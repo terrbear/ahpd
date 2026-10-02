@@ -1,7 +1,7 @@
 /** The protocol server: channels, subscriptions and requests. */
 
 import type { ToolDefinition } from '@microsoft/agent-host-protocol';
-import type { Agent, ToolEffects } from './agent.js';
+import type { Agent, McpServerConfig, ToolEffects } from './agent.js';
 import type { HostHandlers } from './events.js';
 import type { ResourceProvider, ResourceStore } from './resources.js';
 import type { Principal, Users } from './users.js';
@@ -266,6 +266,12 @@ export interface HostOptions {
    * `a-tool-says-when-it-needs-advanced-permission`.
    */
   advancedTools?: boolean;
+  /**
+   * The MCP servers this host gives every session's backend, by name.
+   *
+   * The configuration's `mcpServers`. Reach a backend as `Start.mcpServers`.
+   */
+  mcpServers?: Record<string, McpServerConfig>;
   /**
    * What this host says about itself when a window asks.
    *

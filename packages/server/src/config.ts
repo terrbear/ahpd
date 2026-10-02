@@ -135,6 +135,14 @@ export interface Config {
   /** A file every frame is appended to, both directions, as JSON lines. */
   wire?: string;
   /**
+   * The MCP servers every session's agent is offered, by name.
+   *
+   * VS Code's `mcpServers` setting: `{ "type": "stdio", "command", "args", "env",
+   * "cwd" }` or `{ "type": "http", "url", "headers" }`. An entry of neither shape
+   * is skipped with a warning. They reach a backend as `Start.mcpServers`.
+   */
+  mcpServers?: Record<string, unknown>;
+  /**
    * Whether the HTTP API is served, and where.
    *
    * `true` is the daemon's own listener under `/api`; `{ "port": N }` is a

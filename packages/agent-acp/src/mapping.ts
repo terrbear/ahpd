@@ -152,12 +152,25 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
      */
     case 'tool_call': {
       const call = callOf(turn, update);
+      /*
+       * Whose call it is, when a client provides the tool.
+       *
+       * The protocol makes that client responsible for running it, and a call
+       * reported without the contributor is one nobody answers.
+       */
+      const owner = turn.clientOf?.(update);
+      const contributor = owner === undefined ? undefined : { kind: 'client', clientId: owner };
+      if (contributor !== undefined) {
+        const held = callPartOf(turn, call.toolCallId);
+        if (held !== undefined) bag(held.toolCall).contributor = contributor;
+      }
       const actions: Bag[] = [{
         type: 'chat/toolCallStart',
         turnId: turn.turnId,
         toolCallId: call.toolCallId,
         toolName: call.toolName,
         displayName: call.displayName,
+        ...(contributor === undefined ? {} : { contributor }),
       }];
       const input = written(update.rawInput);
       if (input !== undefined) {
@@ -169,6 +182,7 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
           invocationMessage: call.displayName,
           confirmed: 'not-needed',
           toolInput: input,
+          ...(contributor === undefined ? {} : { contributor }),
         });
       }
       return actions;

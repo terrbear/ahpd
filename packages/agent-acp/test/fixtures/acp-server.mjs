@@ -58,6 +58,9 @@ const LOG = process.env.ACP_LOG;
 /** The session id this server names; one process serves one conversation. */
 let session = 'acp-session-1';
 
+/** The MCP servers the session was opened with. */
+let mcpServers = [];
+
 /** Where the conversation works, as `session/new` was told. */
 let cwd = '/tmp';
 
@@ -294,7 +297,7 @@ const promptScript = async (id, params) => {
       availableCommands: [{ name: 'plan', description: 'Draft a plan' }],
     });
   }
-  const reaches = ['read', 'write', 'term', 'ask'].some((one) => text.includes(one));
+  const reaches = ['read', 'write', 'term', 'ask', 'mcpcall'].some((one) => text.includes(one));
   if (!reaches) for (const update of scriptFor(text)) notify(update);
   if (text.includes('fail')) {
     write({ jsonrpc: '2.0', id, error: { code: -32603, message: 'the model gave up' } });
@@ -340,6 +343,33 @@ const promptScript = async (id, params) => {
       },
     });
     await ask('terminal/release', { sessionId: session, terminalId });
+  }
+
+  if (text.includes('mcpcall')) {
+    const server = mcpServers.find((one) => one.name === 'ahp');
+    notify({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'call-mcp',
+      title: 'Tool: ahp/probe__dummy',
+      kind: 'other',
+      status: 'in_progress',
+      rawInput: { word: 'hi' },
+    });
+    const headers = Object.fromEntries(server.headers.map((one) => [one.name, one.value]));
+    const response = await fetch(server.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json', ...headers },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'probe__dummy', arguments: { word: 'hi' } } }),
+    });
+    const answer = await response.json();
+    const said = String(answer.result?.content?.[0]?.text ?? '');
+    notify({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-mcp',
+      status: answer.result?.isError ? 'failed' : 'completed',
+      content: [{ type: 'content', content: { type: 'text', text: said } }],
+    });
+    notify({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `mcp=${said}` } });
   }
 
   if (text.includes('ask')) {
@@ -428,6 +458,7 @@ const onLine = (line) => {
         protocolVersion: 1,
         agentCapabilities: {
           loadSession: true,
+          ...(process.env.ACP_MCP_HTTP === '1' ? { mcpCapabilities: { http: true } } : {}),
           sessionCapabilities: { list: {}, resume: {} },
         },
         authMethods: [],
@@ -437,6 +468,7 @@ const onLine = (line) => {
     case 'session/new': {
       const id = nextSession();
       if (typeof message.params?.cwd === 'string' && message.params.cwd !== '') cwd = message.params.cwd;
+      mcpServers = message.params?.mcpServers ?? [];
       // Started with `--books`, the server says what the session had already
       // cost before any turn, before it answers, the way `session/load`
       // replays a resumed conversation before its response.
@@ -450,6 +482,7 @@ const onLine = (line) => {
       // belongs to the conversation the client asked to continue.
       session = String(message.params?.sessionId ?? nextSession());
       if (typeof message.params?.cwd === 'string' && message.params.cwd !== '') cwd = message.params.cwd;
+      mcpServers = message.params?.mcpServers ?? [];
       respond(message.id, { modes: modes(), configOptions: configOptions() });
       return;
     }

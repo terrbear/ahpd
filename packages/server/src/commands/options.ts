@@ -16,7 +16,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { ArgumentError, CofoldError, check, type Field, type JsonSchema, type OptionSpec } from '@cofold/commands';
-import type { PluginSpec } from '@ahpd/sdk';
+import type { McpServerConfig, PluginSpec } from '@ahpd/sdk';
 import type { Config, HttpSetting } from '../config.js';
 import { asSpec, configPath, loadConfig } from '../config.js';
 import { proxyConfiguration, proxyProblems, proxySchema, type ProxyConfiguration } from '../proxy/providers.js';
@@ -69,6 +69,8 @@ export interface Options {
    * a deployment is rather than about one run.
    */
   usageTimezone?: string;
+  /** The MCP servers every session's backend is offered, by name. */
+  mcpServers?: Record<string, McpServerConfig>;
   /** A file every frame is appended to, both directions, one JSON line each. */
   wire?: string;
   /**
@@ -257,6 +259,10 @@ export const serverFields = {
     ...proxySchema,
     description: 'The providers this proxy calls and the model names that point at them: providers are keyed by the id a model entry names, and a model name is written <maker>/<name> with the entries serving it. An entry under a built-in id replaces it whole. A key is named by the environment variable holding it, never written here. Set in the configuration file only.',
   },
+  mcpServers: {
+    type: 'object',
+    description: 'The MCP servers every session\'s agent is offered, as VS Code\'s mcpServers setting writes them: a name to { "type": "stdio", "command", "args", "env", "cwd" } or { "type": "http", "url", "headers" }. An entry of neither shape is skipped with a warning. Set in the configuration file only.',
+  },
   plugins: {
     type: 'array',
     items: { type: 'string' },
@@ -282,7 +288,7 @@ export const serverFields = {
 } satisfies Record<string, Field>;
 
 /** The fields only the configuration file sets, which have no flag. */
-const FILE_ONLY = ['http', 'usage', 'proxy'] as const;
+const FILE_ONLY = ['http', 'usage', 'proxy', 'mcpServers'] as const;
 
 /** The flags that mean something only when typed, which the file does not set. */
 const TYPED_ONLY = ['stdio', 'configFile', 'noPlugins', 'pluginOptions'] as const;
@@ -481,6 +487,59 @@ export function checkConfig(file: object, source: (key: string) => string): stri
   return warnings;
 }
 
+/** Whether a value is an object of strings, which is what `env` and `headers` are. */
+const strings = (value: unknown): value is Record<string, string> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+  && Object.values(value).every((one) => typeof one === 'string');
+
+/**
+ * One `mcpServers` entry as the configuration writes it, or why it is not one.
+ *
+ * VS Code's two shapes, and nothing else: a key outside them is not carried on,
+ * so what a backend is handed is what this checked.
+ */
+const mcpServerOf = (entry: unknown): McpServerConfig | string => {
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return 'is not an object';
+  const given = entry as Record<string, unknown>;
+  if (given.type === 'stdio') {
+    if (typeof given.command !== 'string' || given.command === '') return 'is a stdio server with no command';
+    if (given.args !== undefined && !(Array.isArray(given.args) && given.args.every((one) => typeof one === 'string'))) {
+      return 'has args that are not a list of strings';
+    }
+    if (given.env !== undefined && !strings(given.env)) return 'has an env that is not strings';
+    if (given.cwd !== undefined && typeof given.cwd !== 'string') return 'has a cwd that is not a string';
+    return {
+      type: 'stdio',
+      command: given.command,
+      ...(given.args === undefined ? {} : { args: given.args as string[] }),
+      ...(given.env === undefined ? {} : { env: given.env }),
+      ...(given.cwd === undefined ? {} : { cwd: given.cwd }),
+    };
+  }
+  if (given.type === 'http') {
+    if (typeof given.url !== 'string' || given.url === '') return 'is an http server with no url';
+    if (given.headers !== undefined && !strings(given.headers)) return 'has headers that are not strings';
+    return { type: 'http', url: given.url, ...(given.headers === undefined ? {} : { headers: given.headers }) };
+  }
+  return 'has a type that is neither stdio nor http';
+};
+
+/** The servers that are one of the two shapes, and a warning for each that is not. */
+const mcpServersOf = (
+  value: Config['mcpServers'],
+  source: string,
+  warnings: string[],
+): Record<string, McpServerConfig> | undefined => {
+  if (value === undefined) return undefined;
+  const kept: Record<string, McpServerConfig> = {};
+  for (const [name, entry] of Object.entries(value)) {
+    const read = mcpServerOf(entry);
+    if (typeof read === 'string') warnings.push(`${source}: mcpServers.${name} ${read}; skipped`);
+    else kept[name] = read;
+  }
+  return kept;
+};
+
 /**
  * `http` as a run takes it: `true` is the daemon's own listener, `false` and
  * absent are off. `host` binds the API's own listener and has none to bind
@@ -579,6 +638,7 @@ export function optionsFrom(input: Readonly<Record<string, unknown>>): Options {
   const usageZone = given('usage')?.timezone;
   const http = httpOf(file.http, source('http'));
   const proxy = proxyConfiguration(given('proxy'));
+  const mcpServers = mcpServersOf(file.mcpServers, source('mcpServers'), warnings);
 
   return {
     port: given('port') ?? 9187,
@@ -599,6 +659,7 @@ export function optionsFrom(input: Readonly<Record<string, unknown>>): Options {
     usagePer: given('usage')?.per ?? 'turn',
     ...(usageZone === undefined ? {} : { usageTimezone: usageZone }),
     ...(wire === undefined ? {} : { wire }),
+    ...(mcpServers === undefined ? {} : { mcpServers }),
     ...(http === undefined ? {} : { http }),
     proxy,
     plugins,

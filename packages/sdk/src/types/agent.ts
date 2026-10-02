@@ -71,6 +71,53 @@ export interface BoundTool {
 }
 
 /**
+ * One MCP server the host is configured with, as VS Code's `mcpServers` setting writes it.
+ *
+ * A local program speaking MCP over its stdio, or a remote one over HTTP.
+ */
+export type McpServerConfig =
+  | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
+  | { type: 'http'; url: string; headers?: Record<string, string> };
+
+/** A call a client is to run, handed to the host's tools server to wait on. */
+export interface ClientToolCall {
+  /** The tool, with the client that provides it in `owner`. */
+  tool: BoundTool;
+  /** The arguments the model gave. */
+  input: Record<string, unknown>;
+  /**
+   * The id the agent gave the call, when it said one.
+   *
+   * Carried in the MCP request's `_meta.callId`, which is how a backend joins
+   * this call to the tool call the agent reported against the same client.
+   */
+  callId?: string;
+}
+
+/** What a client said its tool call did. */
+export interface ClientToolResult {
+  text: string;
+  ok: boolean;
+}
+
+/**
+ * The host's tools served to one session as an HTTP MCP server.
+ *
+ * Listens on loopback only, answers only a request carrying `headers`, and
+ * lists and calls the session's tools until `close` or until the host closes.
+ */
+export interface ToolsEndpoint {
+  /** Where the server answers. */
+  url: string;
+  /** What a request must carry, the per-session bearer token. */
+  headers: Record<string, string>;
+  /** Replace the tools served, and tell a connected agent the list changed. */
+  setTools(tools: BoundTool[]): void;
+  /** Stop answering. */
+  close(): void;
+}
+
+/**
  * One session a backend already has, before the host has named it.
  *
  * Deliberately not a `Summary`: the resource URI, the provider and the status
@@ -117,6 +164,24 @@ export interface Start {
    * a client knows they exist.
    */
   tools?: BoundTool[];
+  /**
+   * The host's MCP servers, by name.
+   *
+   * The root `mcpServers` key of the configuration. A backend that can take
+   * MCP servers opens its session with them, less any it cannot reach; one that
+   * cannot ignores them. Merged with the session's client plugins' servers once
+   * the host has any, a client plugin winning a name clash.
+   */
+  mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Serve this session's `tools` as an HTTP MCP server, for a backend that cannot call them in-process.
+   *
+   * `client` runs a call to a tool a client provides, which has no `run` of its
+   * own: it is asked to raise the call against that client and to resolve with
+   * what the client says. Absent when the host cannot serve one. The server
+   * stops when the returned endpoint is closed and when the host closes.
+   */
+  toolsServer?(client: (call: ClientToolCall) => Promise<ClientToolResult>): Promise<ToolsEndpoint>;
   /**
    * What the host wants the model told, beside the backend's own prompt.
    *

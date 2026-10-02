@@ -56,6 +56,7 @@ import type { Session, SubagentChat, SubagentRequest } from './types/session.js'
 import type { RunEnding, StartSession } from './types/automations.js';
 import type { Peer } from './types/rpc.js';
 import type { Owner } from './types/usage.js';
+import { toolsServers } from './toolserver.js';
 
 /** `file://` and a path. A string, so this file needs no filesystem to say it. */
 const uriOf = (path: string): string => `file://${path}`;
@@ -3624,6 +3625,10 @@ export function createHost(options: HostOptions): Host {
        */
       ...(boundTools(uri, chatUri).length > 0 ? { tools: boundTools(uri, chatUri) } : {}),
       ...(instructions(uri).length > 0 ? { instructions: instructions(uri) } : {}),
+      ...(options.mcpServers !== undefined && Object.keys(options.mcpServers).length > 0
+        ? { mcpServers: { ...options.mcpServers } }
+        : {}),
+      toolsServer: (client) => toolServers.open({ tools: boundTools(uri, chatUri), client }),
       /*
        * The stores a backend may need for itself, handed down only when the
        * host holds them. Files are this host's own store, so a backend reads
@@ -5716,6 +5721,9 @@ export function createHost(options: HostOptions): Host {
     },
   });
 
+  /** The loopback listener that serves a session's tools to a backend that takes them as MCP. */
+  const toolServers = toolsServers();
+
   const boundTools = (uri: string, chatUri: string): BoundTool[] => [
     ...clientTools(uri),
     ...contributing.flatMap((one): BoundTool[] => {
@@ -6747,6 +6755,7 @@ export function createHost(options: HostOptions): Host {
           new Promise((done) => { timer = setTimeout(done, HOST_CLOSE_WAIT_MS); }),
         ]);
         clearTimeout(timer);
+        await step('the tools server', () => toolServers.close());
         await step('the automation store', () => options.automations?.close?.());
         await step('the session store', () => kept.close?.());
       })();

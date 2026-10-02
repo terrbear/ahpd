@@ -43,6 +43,7 @@ export const optionsSchema = {
     displayName: { type: 'string', description: 'What a client reads instead of the id, default ACP.' },
     description: { type: 'string', description: 'One line about what this backend is.' },
     model: { type: 'string', description: 'The model a session that names none runs on.' },
+    hostTools: { type: 'boolean', description: "Whether a session is given the host's tools, and its clients' tools, as an MCP server. Default true; skipped for a server that takes no http MCP servers." },
   },
   required: ['command'],
 };
