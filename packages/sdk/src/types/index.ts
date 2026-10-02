@@ -30,7 +30,10 @@ export type {
   Connected, OnConnect, Runtime, Listener, ListenOptions, NodeRequestListener, RequestHandler, RequestsListener, RequestsOptions, StdioOptions, Tap,
 } from './listen.js';
 export type { Offered } from './probe.js';
-export type { Agent, Listed, Start, BoundTool, Endpoint, ToolEffects, RestoredSubagent } from './agent.js';
+export type {
+  Agent, Listed, Start, BoundTool, Endpoint, ToolEffects, RestoredSubagent,
+  McpServerConfig, ToolsEndpoint, ClientToolCall, ClientToolResult,
+} from './agent.js';
 export type { DirectoryNeed, FileNeed, EnvNeed, CopyNeed, MachineNeed, NeedKind, ResolvedNeed } from './machine.js';
 export type { Entry, Metadata, Read, ResourceProvider, ResourceStore, SchemeDescription, Write } from './resources.js';
 export type { ComputerPort, MachineSource, Spawn, SpawnOptions } from './computers.js';

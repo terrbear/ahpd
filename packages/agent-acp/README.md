@@ -71,6 +71,7 @@ await listen({ port: 9187 }, (peer) => host.accept(peer));
 | `displayName` | | what a client reads instead of the id, default `ACP` |
 | `description` | | one line about what this backend is |
 | `model` | | the model a session that names none runs on |
+| `hostTools` | | give each session the host's tools and its clients' tools as an HTTP MCP server; default on, skipped for a server that takes no http MCP servers |
 
 ## What it does
 

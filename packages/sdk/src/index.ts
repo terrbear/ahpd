@@ -27,6 +27,8 @@ export { createHost, HOST_CLOSE_WAIT_MS, ROOT, refusalReason } from './host.js';
 export { foldHostOptions, pluginHost, raise, AGENT_CLASH } from './plugins.js';
 export type { FoldedOptions, HostRecording } from './plugins.js';
 export { sdkVersion } from './version.js';
+export { toolsServers } from './toolserver.js';
+export type { ToolsServerOptions, ToolsServers } from './toolserver.js';
 export { listen, overStdio, runtime, serveRequests } from './listen.js';
 export {
   createPeer, receive, RpcError, RpcTimeout, RpcClosed, ANSWER_TIMEOUT,

@@ -25,6 +25,7 @@ import type {
   ReleaseTerminalResponse,
   RequestPermissionRequest,
   SessionUpdate,
+  ToolCall,
   SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse,
   SetSessionModeRequest,
@@ -56,6 +57,14 @@ export interface AcpOptions {
   description?: string;
   /** The model id a session that names none runs on. */
   model?: string;
+  /**
+   * Whether a session is given the host's tools as an MCP server. Default on.
+   *
+   * The host's tools, and the tools its clients provide, reach an ACP agent
+   * only this way. Off for a server that is not to be offered them. Skipped,
+   * with a line in the log, for a server that does not take HTTP MCP servers.
+   */
+  hostTools?: boolean;
 }
 
 /**
@@ -198,6 +207,8 @@ export interface AcpTurn {
   cost?: { amount: number; currency: string };
   /** Whether `session/prompt` has been sent; a cost reported before it is no turn's. */
   prompted?: boolean;
+  /** The client that provides the tool a new call runs, when it is a client's tool and not the agent's. */
+  clientOf?: (call: ToolCall) => string | undefined;
 }
 
 /**

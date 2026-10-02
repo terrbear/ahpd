@@ -347,6 +347,7 @@ export async function runForeground(options: Options): Promise<void> {
      * here.
      */
     advancedTools: options.advancedTools,
+    ...(options.mcpServers === undefined ? {} : { mcpServers: options.mcpServers }),
     /*
      * What this host adds on top of a backend, kept between restarts.
      *

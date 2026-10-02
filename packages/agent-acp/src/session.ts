@@ -30,6 +30,8 @@ import type {
   CreateTerminalResponse,
   KillTerminalRequest,
   KillTerminalResponse,
+  McpCapabilities,
+  McpServer,
   PermissionOptionKind,
   ReadTextFileRequest,
   ReadTextFileResponse,
@@ -48,9 +50,10 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { machineAsked, Status } from '@ahpd/sdk';
-import type { Bag, Chosen, MessageFrom, OpenedTerminal, Ran, Session, Spawn, Start } from '@ahpd/sdk';
+import type { Bag, Chosen, MessageFrom, OpenedTerminal, Ran, Session, Spawn, Start, ToolsEndpoint } from '@ahpd/sdk';
 import { watchSession } from './catalog.js';
 import { connectAcp } from './connection.js';
+import { clientTools } from './clienttools.js';
 import { confirmationOptions, mapUpdate } from './mapping.js';
 import type { AcpConnection, AcpOptions, AcpTurn, ConfirmationOption, PermissionAnswer, WatchedSession, WatchedTurn } from './types.js';
 
@@ -113,6 +116,11 @@ export function acpSession(options: AcpOptions, start: Start): Session {
    * can only be told what it spent by the change since it opened.
    */
   let cumulative: number | undefined;
+  /** The tools offered to the server, and the calls a client runs for them. */
+  const offered = clientTools();
+  offered.set(start.tools ?? []);
+  /** The tools server this session opened for the agent, while it has one. */
+  let toolsEndpoint: ToolsEndpoint | undefined;
   /** The connection this session spawned, once it has one. */
   let live: AcpConnection | undefined;
   /** The server's own id for this conversation, once `session/new` answered. */
@@ -531,6 +539,40 @@ export function acpSession(options: AcpOptions, start: Start): Session {
   };
 
   /**
+   * The MCP servers the session opens with, in ACP's shape.
+   *
+   * The host's configured servers, less any the agent's `mcpCapabilities` do
+   * not accept, and the host's tools as one HTTP server of its own unless
+   * `hostTools` is off. Each server left out is logged.
+   */
+  const mcpServersFor = async (capabilities: McpCapabilities | null | undefined): Promise<McpServer[]> => {
+    const servers: McpServer[] = [];
+    const pairs = (record: Record<string, string> | undefined): { name: string; value: string }[] =>
+      Object.entries(record ?? {}).map(([name, value]) => ({ name, value }));
+    for (const [name, one] of Object.entries(start.mcpServers ?? {})) {
+      if (one.type === 'stdio') {
+        servers.push({ name, command: one.command, args: one.args ?? [], env: pairs(one.env) });
+      }
+      else if (capabilities?.http === true) {
+        servers.push({ type: 'http', name, url: one.url, headers: pairs(one.headers) });
+      }
+      else {
+        console.error(`${provider}: ${name} is an http MCP server and this ACP server does not take them; left out`);
+      }
+    }
+    if (options.hostTools === false || start.toolsServer === undefined) return servers;
+    if (capabilities?.http !== true) {
+      console.error(`${provider}: this ACP server takes no http MCP servers, so the host's tools are not offered to it`);
+      return servers;
+    }
+    toolsEndpoint?.close();
+    toolsEndpoint = await start.toolsServer(offered.run);
+    toolsEndpoint.setTools(offered.tools());
+    servers.push({ type: 'http', name: 'ahp', url: toolsEndpoint.url, headers: pairs(toolsEndpoint.headers) });
+    return servers;
+  };
+
+  /**
    * Spawn the server, hand it a client, and open the one session on it.
    *
    * One promise for the whole of it, so a second turn that arrives while the
@@ -584,6 +626,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
       const extra = start.additional !== undefined && start.additional.length > 0
         ? { additionalDirectories: start.additional }
         : {};
+      const mcpServers = await mcpServersFor(handshake.agentCapabilities?.mcpCapabilities);
       if (start.resume !== undefined) {
         if (handshake.agentCapabilities?.loadSession !== true) {
           throw new Error(`${provider}: this ACP server cannot load a session, so "${start.resume}" cannot be resumed`);
@@ -591,24 +634,24 @@ export function acpSession(options: AcpOptions, start: Start): Session {
         const loaded = await connection.loadSession({
           sessionId: start.resume,
           cwd: where,
-          // No MCP servers yet: task 03 is what offers the host's tools to the
-          // server, and an empty list is the honest answer until then.
-          mcpServers: [],
+          mcpServers,
           ...extra,
         });
         acpSessionId = start.resume;
         learnModes(loaded.modes);
         learnOffers(loaded.configOptions);
+        start.onHandshake?.();
       }
       else {
         const created = await connection.newSession({
           cwd: where,
-          mcpServers: [],
+          mcpServers,
           ...extra,
         });
         acpSessionId = created.sessionId;
         learnModes(created.modes);
         learnOffers(created.configOptions);
+        start.onHandshake?.();
       }
       /*
        * The catalogue's record starts here, where the server has named the
@@ -651,6 +694,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
       turnId,
       parts: active.responseParts as Bag[],
       calls: new Map(),
+      clientOf: offered.clientOf,
       // From where the last update left the session's books, so this turn's
       // cost is its own and not the session's whole.
       ...(cumulative !== undefined ? { costAtStart: cumulative } : {}),
@@ -703,6 +747,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
     active = undefined;
     if (mapping?.cost !== undefined) cumulative = mapping.cost.amount;
     mapping = undefined;
+    offered.release('The turn ended before a client answered this tool call');
     cancelRequested = false;
     if (ending === 'complete') emit('chat', { type: 'chat/turnComplete', turnId, duration });
     else if (ending === 'cancelled') emit('chat', { type: 'chat/turnCancelled', turnId, duration });
@@ -1259,8 +1304,23 @@ export function acpSession(options: AcpOptions, start: Start): Session {
 
     settings: () => ({ ...settings }),
 
+    setTools: async (next) => {
+      offered.set(next);
+      if (toolsEndpoint === undefined) return false;
+      toolsEndpoint.setTools(next);
+      return true;
+    },
+    toolCallOwner: (toolCallId) => offered.owner(toolCallId),
+    completeToolCall: (toolCallId, clientId, result) => offered.complete(toolCallId, clientId, result),
+    clientGone: (clientId) => {
+      offered.release('The client that provides this tool is no longer here', clientId);
+    },
+
     close: () => {
       closed = true;
+      offered.release('The session closed before a client answered this tool call');
+      toolsEndpoint?.close();
+      toolsEndpoint = undefined;
       /*
        * Everything anybody is still waiting on is let go first.
        *
