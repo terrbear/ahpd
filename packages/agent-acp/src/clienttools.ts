@@ -74,8 +74,9 @@ export function clientTools() {
     },
 
     /** Runs a call the tools server was asked for, resolving with what its client says. */
-    run: async (call: ClientToolCall): Promise<ClientToolResult> => {
+    run: async (call: ClientToolCall, started: (id: string) => void): Promise<ClientToolResult> => {
       const id = await claim(call.tool.definition.name, JSON.stringify(call.input));
+      started(id);
       const answered = early.get(id);
       if (answered !== undefined) {
         early.delete(id);
