@@ -140,10 +140,25 @@ it('raises a client tool call for the client and returns what the client says', 
   await until(() => actions(t.notes, t.chatUri).some((a) => a.type === 'chat/toolCallStart'));
   const start = actions(t.notes, t.chatUri).find((a) => a.type === 'chat/toolCallStart');
   expect(start).toMatchObject({ toolCallId: 'call-mcp', contributor: { kind: 'client', clientId: 'probe' } });
+  await until(() => actions(t.notes, t.uri).some((a) => a.type === 'session/inputNeededSet'));
+  const request = actions(t.notes, t.uri).find((a) => a.type === 'session/inputNeededSet')?.request;
+  expect(request).toMatchObject({
+    chat: expect.any(String),
+    kind: 'toolClientExecution',
+    turnId: 't1',
+    clientId: 'probe',
+    toolCall: {
+      toolCallId: 'call-mcp',
+      toolName: 'dummy',
+      toolInput: '{"word":"hi"}',
+      contributor: { kind: 'client', clientId: 'probe' },
+      status: 'running',
+    },
+  });
   await t.client.handle({
     method: 'dispatchAction',
     params: {
-      channel: t.chatUri,
+      channel: (request as { chat: string }).chat,
       action: {
         type: 'chat/toolCallComplete',
         turnId: 't1',
@@ -153,6 +168,7 @@ it('raises a client tool call for the client and returns what the client says', 
     },
   });
   await until(() => actions(t.notes, t.chatUri).some((a) => a.type === 'chat/turnComplete'));
+  expect(actions(t.notes, t.uri).some((a) => a.type === 'session/inputNeededRemoved' && a.id === (request as { id: string }).id)).toBe(true);
   const prose = actions(t.notes, t.chatUri).filter((a) => a.type === 'chat/delta').map((a) => String(a.content)).join('');
   expect(prose).toContain('mcp=dummy says hi');
 });

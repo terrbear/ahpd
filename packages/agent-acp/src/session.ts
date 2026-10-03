@@ -50,7 +50,7 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { machineAsked, Status } from '@ahpd/sdk';
-import type { Bag, Chosen, MessageFrom, OpenedTerminal, Ran, Session, Spawn, Start, ToolsEndpoint } from '@ahpd/sdk';
+import type { Bag, Chosen, ClientToolCall, MessageFrom, OpenedTerminal, Ran, Session, Spawn, Start, ToolsEndpoint } from '@ahpd/sdk';
 import { watchSession } from './catalog.js';
 import { connectAcp } from './connection.js';
 import { clientTools } from './clienttools.js';
@@ -119,6 +119,42 @@ export function acpSession(options: AcpOptions, start: Start): Session {
   /** The tools offered to the server, and the calls a client runs for them. */
   const offered = clientTools();
   offered.set(start.tools ?? []);
+  const runClientTool = async (call: ClientToolCall) => {
+    let requestId: string | undefined;
+    try {
+      return await offered.run(call, (id) => {
+        const owner = call.tool.owner ?? '';
+        const fullName = call.tool.definition.name;
+        const prefix = `${owner}__`;
+        const toolName = fullName.startsWith(prefix) ? fullName.slice(prefix.length) : fullName;
+        const displayName = call.tool.definition.title ?? toolName;
+        requestId = `${id}:client`;
+        emit('session', {
+          type: 'session/inputNeededSet',
+          request: {
+            id: requestId,
+            chat: start.chatUri,
+            kind: 'toolClientExecution',
+            turnId: mapping?.turnId ?? '',
+            clientId: owner,
+            toolCall: {
+              toolCallId: id,
+              toolName,
+              displayName,
+              invocationMessage: displayName,
+              toolInput: JSON.stringify(call.input),
+              contributor: { kind: 'client', clientId: owner },
+              confirmed: 'not-needed',
+              status: 'running',
+            },
+          },
+        });
+      });
+    }
+    finally {
+      if (requestId !== undefined) emit('session', { type: 'session/inputNeededRemoved', id: requestId });
+    }
+  };
   /** The tools server this session opened for the agent, while it has one. */
   let toolsEndpoint: ToolsEndpoint | undefined;
   /** The connection this session spawned, once it has one. */
@@ -566,7 +602,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
       return servers;
     }
     toolsEndpoint?.close();
-    toolsEndpoint = await start.toolsServer(offered.run);
+    toolsEndpoint = await start.toolsServer(runClientTool);
     toolsEndpoint.setTools(offered.tools());
     servers.push({ type: 'http', name: 'ahp', url: toolsEndpoint.url, headers: pairs(toolsEndpoint.headers) });
     return servers;
