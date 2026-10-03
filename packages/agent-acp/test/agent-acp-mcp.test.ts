@@ -150,7 +150,7 @@ it('raises a client tool call for the client and returns what the client says', 
     toolCall: {
       toolCallId: 'call-mcp',
       toolName: 'dummy',
-      toolInput: { inline: '{"word":"hi"}' },
+      toolInput: '{"word":"hi"}',
       contributor: { kind: 'client', clientId: 'probe' },
       status: 'running',
     },

@@ -142,7 +142,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
               toolName,
               displayName,
               invocationMessage: displayName,
-              toolInput: { inline: JSON.stringify(call.input) },
+              toolInput: JSON.stringify(call.input),
               contributor: { kind: 'client', clientId: owner },
               confirmed: 'not-needed',
               status: 'running',
