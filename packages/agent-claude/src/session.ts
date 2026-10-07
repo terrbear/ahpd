@@ -520,12 +520,50 @@ const listsOf = (value: unknown): { allow: string[]; deny: string[] } | undefine
  * argument would have been anyway.
  */
 const shaped = (property: object): z.ZodTypeAny => {
-  const kind = str((property as Bag).type);
-  const of = (property as Bag).items;
-  if (kind === 'number' || kind === 'integer') return z.number();
-  if (kind === 'boolean') return z.boolean();
-  if (kind === 'array') return z.array(of === undefined ? z.string() : shaped(bag(of)));
-  return z.string();
+  const schema = property as Bag;
+  const kind = str(schema.type);
+  let value: z.ZodTypeAny;
+  if (kind === 'number' || kind === 'integer') {
+    value = z.number();
+  } else if (kind === 'boolean') {
+    value = z.boolean();
+  } else if (kind === 'array') {
+    value = z.array(schema.items === undefined ? z.string() : shaped(bag(schema.items)));
+  } else if (kind === 'object') {
+    const properties = bag(schema.properties);
+    const required = new Set(list(schema.required).filter((one): one is string => typeof one === 'string'));
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const [key, child] of Object.entries(properties)) {
+      const shapedChild = shaped(bag(child));
+      shape[key] = required.has(key) ? shapedChild : shapedChild.optional();
+    }
+    if (schema.additionalProperties === false) {
+      value = z.strictObject(shape);
+    } else if (typeof schema.additionalProperties === 'object' && schema.additionalProperties !== null) {
+      value = z.object(shape).catchall(shaped(bag(schema.additionalProperties)));
+    } else {
+      value = z.object(shape).catchall(z.unknown());
+    }
+  } else {
+    value = z.string();
+  }
+  const choices = schema.enum;
+  if (!Array.isArray(choices)) return value;
+  if (choices.length === 0) return z.never();
+  if (choices.every((one) => typeof one === 'string')) {
+    const choice = z.enum(choices as [string, ...string[]]);
+    return kind === undefined ? choice : value.pipe(choice);
+  }
+  if (choices.every((one) => one === null || ['string', 'number', 'boolean'].includes(typeof one))) {
+    const literals = choices.map((one) => z.literal(one as string | number | boolean | null));
+    const first = literals[0];
+    if (!first) return z.never();
+    const choice = literals.length === 1
+      ? first
+      : z.union(literals as unknown as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
+    return kind === undefined ? choice : value.pipe(choice);
+  }
+  return value;
 };
 
 /**
