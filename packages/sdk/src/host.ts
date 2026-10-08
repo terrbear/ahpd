@@ -76,6 +76,8 @@ const need = <T>(port: T | undefined, method: string): T => {
 };
 
 const ROOT = 'ahp-root://';
+const CLIENT_SYSTEM_INSTRUCTIONS = 'ahpd.clientSystemInstructions';
+const MAX_CLIENT_SYSTEM_INSTRUCTIONS_BYTES = 128 * 1024;
 /**
  * Whether a channel is the root, in either spelling.
  *
@@ -904,6 +906,7 @@ export function createHost(options: HostOptions): Host {
     defaultChat: string;
     /** Config in force. Every chat in the session runs on it. */
     config: Record<string, unknown>;
+    clientSystemInstructions?: string;
     /** Where they work, when the client named a directory. */
     workingDirectory: string | undefined;
     /**
@@ -3572,6 +3575,7 @@ export function createHost(options: HostOptions): Host {
     workingDirectory?: string,
     credentials?: Record<string, string>,
     additional?: string[],
+    clientSystemInstructions?: string,
   ): Session => {
     /*
      * The backend that actually runs this session.
@@ -3610,6 +3614,11 @@ export function createHost(options: HostOptions): Host {
       owner: () => kept.owner(idOf(uri)),
       scope: () => charged.get(uri)?.scope,
     });
+    const receivedInstructions = clientSystemInstructions ?? sessions.get(uri)?.clientSystemInstructions;
+    const allInstructions = [
+      ...instructions(uri),
+      ...(receivedInstructions === undefined ? [] : [receivedInstructions]),
+    ];
     const session = used.create({
       uri,
       chatUri,
@@ -3624,7 +3633,7 @@ export function createHost(options: HostOptions): Host {
        * announcement moved the list.
        */
       ...(boundTools(uri, chatUri).length > 0 ? { tools: boundTools(uri, chatUri) } : {}),
-      ...(instructions(uri).length > 0 ? { instructions: instructions(uri) } : {}),
+      ...(allInstructions.length > 0 ? { instructions: allInstructions } : {}),
       ...(options.mcpServers !== undefined && Object.keys(options.mcpServers).length > 0
         ? { mcpServers: { ...options.mcpServers } }
         : {}),
@@ -3888,6 +3897,7 @@ export function createHost(options: HostOptions): Host {
       chats: new Map<string, Session>(),
       defaultChat: chatUri,
       config,
+      ...(clientSystemInstructions === undefined ? {} : { clientSystemInstructions }),
       workingDirectory,
       additional,
       // The catalogue's value for a session being resumed; now, for one being
@@ -4975,6 +4985,7 @@ export function createHost(options: HostOptions): Host {
         to,
         credentials,
         keeping?.additional ?? held.additional,
+        held.clientSystemInstructions,
       );
     }
     catch (error) {
@@ -6557,6 +6568,7 @@ export function createHost(options: HostOptions): Host {
     additional?: string[],
     title?: string,
     by?: { owner?: Owner; principal?: Principal },
+    clientSystemInstructions?: string,
   ): void => {
     named(uri, 'session');
     if (sessions.has(uri))
@@ -6577,7 +6589,7 @@ export function createHost(options: HostOptions): Host {
     // moment and a later root change waits for the next session.
     strategies.set(uri, strategyOf(uri));
     try {
-      const lead = spawn(agent, uri, chatUriFor(uri), config, undefined, where, credentials, additional);
+      const lead = spawn(agent, uri, chatUriFor(uri), config, undefined, where, credentials, additional, clientSystemInstructions);
       // Named before it is announced, when the maker had a name for it: a
       // row that appears as "New session" and is renamed a moment later is
       // two rows to a client that lists once. Written down for the same
@@ -7285,6 +7297,11 @@ export function createHost(options: HostOptions): Host {
              */
             _meta: {
               'ahpd.activeClientSetReceipts': true,
+              ...(Array.from(agents.values()).some((agent) => agent.acceptsSystemInstructions === true)
+                ? { [CLIENT_SYSTEM_INSTRUCTIONS]: Array.from(agents.values())
+                  .filter((agent) => agent.acceptsSystemInstructions === true)
+                  .map((agent) => agent.provider) }
+                : {}),
               'vscode.removeSessionArtifact': true,
               'vscode.detachedWorktrees': true,
               'vscode.getAgentHostSessionStateFile.chat': true,
@@ -8383,6 +8400,17 @@ export function createHost(options: HostOptions): Host {
           if (closed) throw new RpcError(INTERNAL_ERROR, CLOSING);
           const given = named(String(params.channel ?? ''), 'session');
           const provider = String(params.provider ?? first.provider);
+          const requestedInstructions = (params._meta as Record<string, unknown> | undefined)?.[CLIENT_SYSTEM_INSTRUCTIONS];
+          let clientSystemInstructions: string | undefined;
+          if (requestedInstructions !== undefined) {
+            if (agents.get(provider)?.acceptsSystemInstructions !== true)
+              throw new RpcError(-32602, `${provider} does not accept client system instructions`);
+            if (typeof requestedInstructions !== 'string' || requestedInstructions.trim() === '')
+              throw new RpcError(-32602, 'Client system instructions must be nonempty text');
+            if (new TextEncoder().encode(requestedInstructions).byteLength > MAX_CLIENT_SYSTEM_INSTRUCTIONS_BYTES)
+              throw new RpcError(-32602, 'Client system instructions exceed 128 KiB');
+            clientSystemInstructions = requestedInstructions;
+          }
           const uri = `${provider}:/${idOf(given)}`;
           unheld(uri, given);
           /*
@@ -8472,7 +8500,7 @@ export function createHost(options: HostOptions): Host {
             // owns the work rather than against whoever sent it.
             try {
               openSession(uri, provider, backendsOwn(config), running, undefined, tokensFor(provider), peers, undefined,
-                forWhom(ownerFor(connection), connection.principal));
+                forWhom(ownerFor(connection), connection.principal), clientSystemInstructions);
             }
             catch (error) {
               if (activeClient !== undefined) {
