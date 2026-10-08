@@ -360,6 +360,15 @@ A client announces what it can run on `SessionActiveClient.tools`, and the
 protocol makes that client responsible for executing the call and dispatching
 its result. Three things about serving that are not obvious from the types.
 
+`initialize._meta["ahpd.activeClientSetReceipts"]: true` tells clients that an
+origin-tagged `session/activeClientSet` with a positive `clientSeq` receives an
+acceptance or rejection after this host has checked the backend's tool
+publication. An unchanged announcement receives a direct acceptance without
+advancing `serverSeq`; a changed announcement reaches the session stream after
+publication. A backend that cannot offer the tools causes a rejection. Clients
+connected to older hosts without this key should keep their prior attach
+behavior instead of waiting for a receipt the host never promised.
+
 **They ride this host's own MCP server.** The harness reaches a contributed
 tool through `createSdkMcpServer`, so a client's tools and this host's arrive at
 the model in one in-process server named `ahp`. By name they are all
@@ -394,12 +403,14 @@ it could not run.
 
 `session/inputNeeded` is a **list**, and `session/inputNeededSet` carries
 `request` and adds *or updates* the entry with that id; `inputNeededRemoved`
-carries the `id`. Two kinds are served:
+carries the `id`. Four kinds are served:
 
 | kind | what it is | answered by |
 | --- | --- | --- |
 | `toolConfirmation` | a tool call waiting to be allowed | `chat/toolCallConfirmed`, keyed by `toolCall.toolCallId` |
 | `chatInput` | a question the agent asked | `chat/inputCompleted`, keyed by `request.id`, with `response: 'accept' \| 'decline' \| 'cancel'` |
+| `toolClientExecution` | a client-owned tool running on the client that announced it | `chat/toolCallComplete`, keyed by `toolCall.toolCallId` |
+| `toolAuthentication` | a running MCP call blocked on sign-in | `authenticate` for the resource the call names |
 
 Both are held in a map keyed by id, never in one slot: the CLI calls
 `canUseTool` per tool call, and an agent that fires two in parallel asks twice

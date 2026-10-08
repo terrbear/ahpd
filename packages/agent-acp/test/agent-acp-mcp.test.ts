@@ -133,6 +133,7 @@ it('raises a client tool call for the client and returns what the client says', 
       },
     },
   });
+  await until(() => actions(t.notes, t.uri).some((a) => a.type === 'session/activeClientSet'));
   void t.client.handle({
     method: 'dispatchAction',
     params: { channel: t.chatUri, action: { type: 'chat/turnStarted', turnId: 't1', message: { text: 'mcpcall' } } },
