@@ -57,6 +57,8 @@ const sdk = vi.hoisted(() => {
     mcpReconnected: [] as string[],
     /** Every set of MCP servers re-declared on a running session, in order. */
     mcpDeclared: [] as Record<string, unknown>[],
+    mcpDeclareFails: 0,
+    mcpDeclareWait: undefined as Promise<void> | undefined,
     canUseTool: undefined as undefined | ((n: string, i: Record<string, unknown>, about?: Record<string, unknown>) => Promise<unknown>),
     /**
      * Every CLI the host started, in order.
@@ -119,6 +121,13 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
       // Replaces the set, which is what the real one does - so the options a
       // test reads back are what the session is actually offering now.
       setMcpServers: async (servers: Record<string, unknown>) => {
+        const wait = sdk.mcpDeclareWait;
+        sdk.mcpDeclareWait = undefined;
+        if (wait !== undefined) await wait;
+        if (sdk.mcpDeclareFails > 0) {
+          sdk.mcpDeclareFails--;
+          throw new Error('fixture refused the MCP update');
+        }
         fake.options.mcpServers = servers;
         sdk.mcpDeclared.push(servers);
       },
@@ -203,6 +212,8 @@ beforeEach(() => {
   sdk.mcpToggled.length = 0;
   sdk.mcpReconnected.length = 0;
   sdk.mcpDeclared.length = 0;
+  sdk.mcpDeclareFails = 0;
+  sdk.mcpDeclareWait = undefined;
   sdk.canUseTool = undefined;
 });
 
@@ -5352,6 +5363,85 @@ describe('tools a client contributes', () => {
     description: 'Open a file in the editor',
     inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
   };
+
+  it('offers a creator tool when the Claude chat first opens', async () => {
+    const host = serving('/home/softov');
+    const client = host.accept(peer());
+    await client.handle(hello(['0.9.0']));
+    await client.handle({
+      method: 'createSession',
+      params: {
+        channel: 'ahp-session:/creator-tool', provider: 'claude',
+        activeClient: { clientId: 'probe', tools: [OPEN_FILE] },
+      },
+    });
+    const servers = sessionQueries().at(-1)?.options.mcpServers as Record<string, {
+      tools: { name: string }[];
+    }>;
+    expect(servers.ahp?.tools.map((tool) => tool.name)).toContain('probe__openFile');
+    expect(sdk.mcpDeclared).toHaveLength(0);
+  });
+
+  it('refuses a client announcement when Claude rejects the tool update, then retries it', async () => {
+    const { client, peer: p, uri } = await running();
+    sdk.mcpDeclareFails = 1;
+    client.handle({
+      method: 'dispatchAction',
+      params: {
+        channel: uri, clientSeq: 41,
+        action: { type: 'session/activeClientSet', activeClient: { tools: [OPEN_FILE] } },
+      },
+    });
+    await settle();
+    const refused = actions(p, uri).find((event) => event.origin?.clientSeq === 41 && event.rejectionReason !== undefined);
+    expect(refused?.rejectionReason).toContain('could not publish');
+    const afterRefusal = await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+      snapshot: { state: { activeClients: unknown[] } };
+    };
+    expect(afterRefusal.snapshot.state.activeClients).toEqual([]);
+    client.handle({
+      method: 'dispatchAction',
+      params: {
+        channel: uri, clientSeq: 42,
+        action: { type: 'session/activeClientSet', activeClient: { tools: [OPEN_FILE] } },
+      },
+    });
+    await settle();
+    expect(actions(p, uri).some((event) => event.origin?.clientSeq === 42 && event.rejectionReason !== undefined)).toBe(false);
+    expect(offered().some((tool) => tool.name === 'probe__openFile')).toBe(true);
+  });
+
+  it('serializes overlapping announcements from the same client id', async () => {
+    const { host, client, peer: p, uri } = await running();
+    const other = host.accept(peer());
+    await other.handle(hello(['0.9.0']));
+    await other.handle({ method: 'subscribe', params: { channel: uri } });
+    let release: () => void = () => {};
+    sdk.mcpDeclareWait = new Promise<void>((resolve) => { release = resolve; });
+    sdk.mcpDeclareFails = 1;
+    client.handle({
+      method: 'dispatchAction',
+      params: {
+        channel: uri, clientSeq: 51,
+        action: { type: 'session/activeClientSet', activeClient: { tools: [OPEN_FILE] } },
+      },
+    });
+    other.handle({
+      method: 'dispatchAction',
+      params: {
+        channel: uri, clientSeq: 52,
+        action: { type: 'session/activeClientSet', activeClient: { tools: [{ ...OPEN_FILE, name: 'openOther' }] } },
+      },
+    });
+    await settle();
+    expect(sdk.mcpDeclared).toHaveLength(0);
+    release();
+    await settle(8);
+    expect(actions(p, uri).some((event) => event.origin?.clientSeq === 51 && event.rejectionReason !== undefined)).toBe(true);
+    expect(actions(p, uri).some((event) => event.origin?.clientSeq === 52 && event.rejectionReason === undefined)).toBe(true);
+    expect(offered().map((tool) => tool.name)).toContain('probe__openOther');
+    expect(offered().map((tool) => tool.name)).not.toContain('probe__openFile');
+  });
 
   /** A running session with one client that says it can run `openFile`. */
   async function providing(tools: unknown[] = [OPEN_FILE]) {

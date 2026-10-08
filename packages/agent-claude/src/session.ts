@@ -3693,11 +3693,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const before = offering.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const after = next.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       if (before === after) return true;
-      offering = [...next];
-      if (offering.length > 0) declared.ahp = contributed(offering, ranByClient) as Bag;
-      else delete declared.ahp;
-      try { await handle.setMcpServers(declared as never); }
+      const requested = { ...declared };
+      if (next.length > 0) requested.ahp = contributed(next, ranByClient) as Bag;
+      else delete requested.ahp;
+      try { await handle.setMcpServers(requested as never); }
       catch { return false; }
+      offering = [...next];
+      if (requested.ahp === undefined) delete declared.ahp;
+      else declared.ahp = requested.ahp;
       return true;
     },
 

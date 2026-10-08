@@ -5544,16 +5544,27 @@ export function createHost(options: HostOptions): Host {
    *
    * Every chat, because the clients are the session's rather than one chat's -
    * somebody with two conversations open in one session contributes the same
-   * tools to both. A backend that cannot take tools at all answers false and
-   * is left alone; there is nothing to report to a client either way, because
-   * what it announced is already on the session state.
+   * tools to both. A backend that cannot take tools at all answers false.
    */
-  const retool = (uri: string): void => {
+  const retool = async (uri: string): Promise<boolean> => {
     const held = sessions.get(uri);
-    if (!held) return;
-    for (const [chatUri, chat] of held.chats) {
-      void chat.setTools?.(boundTools(uri, chatUri)).catch(() => {});
-    }
+    if (!held) return true;
+    const results = await Promise.all([...held.chats].map(async ([chatUri, chat]) => {
+      if (!chat.setTools) return false;
+      try { return await chat.setTools(boundTools(uri, chatUri)); }
+      catch { return false; }
+    }));
+    return results.every((result) => result);
+  };
+
+  const clientToolUpdates = new Map<string, Promise<void>>();
+  const queueClientToolUpdate = (uri: string, update: () => Promise<void>): Promise<void> => {
+    const previous = clientToolUpdates.get(uri) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(update);
+    clientToolUpdates.set(uri, next);
+    const done = (): void => { if (clientToolUpdates.get(uri) === next) clientToolUpdates.delete(uri); };
+    void next.then(done, done);
+    return next;
   };
 
   /** The chat a tool means in a session: the one with that id, or the default. */
@@ -8436,6 +8447,19 @@ export function createHost(options: HostOptions): Host {
             // session, with this harness's needs and this folder, before the
             // backend is started with it.
             await placedIn(uri, provider, config, running, ownerFor(connection));
+            const claimed = typeof params.activeClient === 'object' && params.activeClient !== null
+              ? params.activeClient as Bag
+              : undefined;
+            const activeClient: Bag | undefined = claimed === undefined ? undefined : {
+              ...claimed,
+              clientId: connection.clientId || 'anonymous',
+              tools: Array.isArray(claimed.tools) ? claimed.tools : [],
+            };
+            if (activeClient !== undefined) {
+              const here = presence.get(idOf(uri)) ?? new Map<string, Bag>();
+              presence.set(idOf(uri), here);
+              here.set(String(activeClient.clientId), activeClient);
+            }
             // This connection's tokens and no other's. A client that pushed
             // nothing gets a session on the daemon's own credentials, which is
             // how every session worked before there was anything to push.
@@ -8444,8 +8468,18 @@ export function createHost(options: HostOptions): Host {
             // Whose this is: this connection's person, kept beside the session
             // so a scope change before the first turn is resolved against who
             // owns the work rather than against whoever sent it.
-            openSession(uri, provider, backendsOwn(config), running, undefined, tokensFor(provider), peers, undefined,
-              forWhom(ownerFor(connection), connection.principal));
+            try {
+              openSession(uri, provider, backendsOwn(config), running, undefined, tokensFor(provider), peers, undefined,
+                forWhom(ownerFor(connection), connection.principal));
+            }
+            catch (error) {
+              if (activeClient !== undefined) {
+                const here = presence.get(idOf(uri));
+                here?.delete(String(activeClient.clientId));
+                if (here?.size === 0) presence.delete(idOf(uri));
+              }
+              throw error;
+            }
             if (!claims.has(given)) claims.set(given, { kind: 'session', of: uri });
             // Complete, which the protocol spells as `progress === total`.
             along(2, 'Ready');
@@ -8464,21 +8498,8 @@ export function createHost(options: HostOptions): Host {
              * dispatch path does for the same reason: a client naming somebody
              * else is announcing a presence that is not theirs.
              */
-            const claimed = typeof params.activeClient === 'object' && params.activeClient !== null
-              ? params.activeClient as Bag
-              : undefined;
-            if (claimed !== undefined) {
-              const clientId = connection.clientId || 'anonymous';
-              const activeClient: Bag = {
-                ...claimed,
-                clientId,
-                tools: Array.isArray(claimed.tools) ? claimed.tools : [],
-              };
-              const here = presence.get(idOf(uri)) ?? new Map<string, Bag>();
-              presence.set(idOf(uri), here);
-              here.set(clientId, activeClient);
+            if (activeClient !== undefined) {
               dispatch(uri, { type: 'session/activeClientSet', activeClient });
-              retool(uri);
             }
             return {};
           }
@@ -9572,32 +9593,24 @@ export function createHost(options: HostOptions): Host {
             clientId,
             tools: Array.isArray(carried.tools) ? carried.tools : [],
           };
-          const held = presence.get(idOf(channel)) ?? new Map<string, Bag>();
-          presence.set(idOf(channel), held);
-          /*
-           * Saying again what this host already held is not a change.
-           *
-           * `serverSeq` advances with *state* and never with messages, and a
-           * client reconciles what it contributes whenever the session state
-           * moves. So an echo of an announcement that changed nothing was
-           * itself the change that prompted the next announcement, and the two
-           * of us ran that loop three hundred times in a few seconds, burning
-           * a sequence number apiece. The guard `isReadChanged` has below is
-           * the same guard, and this is the same reason for it.
-           */
-          if (JSON.stringify(held.get(clientId)) === JSON.stringify(activeClient))
-            return;
-          // Re-announcing is how a client refreshes what it contributes, so
-          // this replaces rather than merges - a tool taken away has to be
-          // able to go.
-          held.set(clientId, activeClient);
-          dispatch(channel, { type, activeClient });
-          // What it says it can run is a change to what the model is offered,
-          // which is the whole point of the field: announced and never read,
-          // `tools` was a list this host published back at the client that
-          // sent it.
-          retool(channel);
-          return;
+          return queueClientToolUpdate(channel, async () => {
+            if (!connections.has(connection)) return;
+            const held = presence.get(idOf(channel)) ?? new Map<string, Bag>();
+            presence.set(idOf(channel), held);
+            if (JSON.stringify(held.get(clientId)) === JSON.stringify(activeClient)) return;
+            const previous = held.get(clientId);
+            held.set(clientId, activeClient);
+            const published = await retool(channel);
+            if (!published) {
+              if (previous === undefined) held.delete(clientId);
+              else held.set(clientId, previous);
+              if (held.size === 0) presence.delete(idOf(channel));
+              await retool(channel);
+              no('The agent could not publish the client tools');
+              return;
+            }
+            dispatch(channel, { type, activeClient }, origin);
+          });
         }
 
         if (type === 'session/isReadChanged' || type === 'session/isArchivedChanged') {
