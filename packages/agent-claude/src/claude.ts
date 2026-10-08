@@ -374,6 +374,7 @@ export function claude(options: ClaudeOptions): Agent {
   return {
     provider: options.provider ?? 'claude',
     displayName: options.displayName ?? 'Claude Code',
+    acceptsSystemInstructions: true,
     // Both, because the SDK resumes at a named prompt: `resumeSessionAt` with
     // `forkSession` continues from a turn under a new id, and a side chat is
     // an unresumed session handed what that turn said.

@@ -369,6 +369,16 @@ publication. A backend that cannot offer the tools causes a rejection. Clients
 connected to older hosts without this key should keep their prior attach
 behavior instead of waiting for a receipt the host never promised.
 
+`initialize._meta["ahpd.clientSystemInstructions"]` lists the providers that
+can append client instructions to the backend system prompt. A client may send
+nonempty UTF-8 text at `createSession.params._meta["ahpd.clientSystemInstructions"]`
+only for a listed provider. The host rejects unsupported providers, malformed
+text, and text over 128 KiB before creating the session. Successful
+`createSession` means the accepted text was given to the backend; it is reused
+for side chats and in-process restarts. The field is optional, so older clients
+and clients connected to a host without the advertised capability create
+sessions without it. It does not change an already existing session's prompt.
+
 **They ride this host's own MCP server.** The harness reaches a contributed
 tool through `createSdkMcpServer`, so a client's tools and this host's arrive at
 the model in one in-process server named `ahp`. By name they are all

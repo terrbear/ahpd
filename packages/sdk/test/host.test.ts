@@ -7668,6 +7668,22 @@ describe('what a session recorded', () => {
       .map((one) => [one.name, one]),
   );
 
+  it('appends accepted client instructions to the Claude SDK system prompt', async () => {
+    const client = open();
+    const initialized = await client.handle(hello(['0.9.0'])) as { _meta: Record<string, unknown> };
+    expect(initialized._meta['ahpd.clientSystemInstructions']).toEqual(['claude']);
+    await client.handle({
+      method: 'createSession',
+      params: {
+        channel: 'ahp-session:/client-instructions',
+        provider: 'claude',
+        _meta: { 'ahpd.clientSystemInstructions': 'Follow the Anton system instructions.' },
+      },
+    });
+    const prompt = sessionQueries().at(-1)?.options.systemPrompt as { append: string } | undefined;
+    expect(prompt?.append).toContain('Follow the Anton system instructions.');
+  });
+
   it('tells the model when to record one, in the reference host\'s words, through the system prompt', async () => {
     await withTools();
     const prompt = sessionQueries().at(-1)?.options.systemPrompt as { type: string; preset: string; append: string; snapshot: boolean } | undefined;
