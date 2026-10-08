@@ -5,8 +5,10 @@ import { turnsOf, subagentsOf } from './transcript.js';
 import { catalogue } from './catalog.js';
 import { offeredModels, ownModels, type ModelEntry, type OfferedModel } from './models.js';
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { promisify } from 'node:util';
 import { machineAsked, refuseComputer } from '@ahpd/sdk';
 import { spawnInside } from './spawn.js';
 import type { Asked, Spawned } from './spawn.js';
@@ -382,6 +384,29 @@ export function claude(options: ClaudeOptions): Agent {
     description: `The Claude Agent SDK, on ${dirs.join(', ')}`,
     schema,
     defaults,
+    accountIdentity: async (directory) => {
+      if (directory !== undefined && !isAbsolute(directory)) return { status: 'unavailable' };
+      if (Object.keys(options.presets ?? {}).length > 0) return { status: 'unavailable' };
+      const overrides = [
+        'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+        'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK',
+        'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+      ];
+      if (overrides.some((name) => process.env[name])) return { status: 'unavailable' };
+      try {
+        const { stdout } = await promisify(execFile)(claudeExecutablePath(), ['auth', 'status', '--json'], {
+          timeout: 5000, maxBuffer: 4096, cwd: directory ?? homedir(),
+        });
+        const state: unknown = JSON.parse(stdout);
+        if (typeof state !== 'object' || state === null) return { status: 'unavailable' };
+        const account = state as Record<string, unknown>;
+        const email = account.email;
+        if (account.loggedIn !== true || typeof email !== 'string' || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(email) || email.length > 254) return { status: 'unavailable' };
+        return { status: 'verified', name: email };
+      } catch {
+        return { status: 'unavailable' };
+      }
+    },
 
     /*
      * What a machine needs for this CLI to run in it.

@@ -145,6 +145,11 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
     sessionUpdate: (params: SessionNotification): void => {
       handlers.update(params.sessionId, params.update);
     },
+    ...(options.authStatus === undefined ? {} : {
+      extNotification: (method: string, params: Record<string, unknown>): void => {
+        if (method === '_auth/status_update' && 'authStatus' in params) options.authStatus?.(params.authStatus);
+      },
+    }),
     /*
      * A person's answer, or the protocol's refusal.
      *
