@@ -1,0 +1,5 @@
+{
+  "description": "Runs the ahpd agent host on this machine as a login service with Claude Code and Codex backends, and registers it as Anton's localhost AHP server.",
+  "setup": "ahpd-setup",
+  "teardown": "ahpd-teardown"
+}
