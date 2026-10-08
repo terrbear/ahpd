@@ -9597,7 +9597,17 @@ export function createHost(options: HostOptions): Host {
             if (!connections.has(connection)) return;
             const held = presence.get(idOf(channel)) ?? new Map<string, Bag>();
             presence.set(idOf(channel), held);
-            if (JSON.stringify(held.get(clientId)) === JSON.stringify(activeClient)) return;
+            if (JSON.stringify(held.get(clientId)) === JSON.stringify(activeClient)) {
+              if (!(await retool(channel))) {
+                no('The agent could not publish the client tools');
+                return;
+              }
+              const alias = connection.aliases.get(channel);
+              connection.peer.notify('action', {
+                channel: alias ?? channel, action: { type, activeClient }, serverSeq, origin,
+              });
+              return;
+            }
             const previous = held.get(clientId);
             held.set(clientId, activeClient);
             const published = await retool(channel);

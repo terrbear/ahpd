@@ -5382,6 +5382,67 @@ describe('tools a client contributes', () => {
     expect(sdk.mcpDeclared).toHaveLength(0);
   });
 
+  it('acknowledges an unchanged client announcement without re-publishing tools', async () => {
+    const host = serving('/home/softov');
+    const p = peer();
+    const client = host.accept(p);
+    await client.handle(hello(['0.9.0']));
+    const uri = 'ahp-session:/creator-tool-ack';
+    const activeClient = { clientId: 'probe', tools: [OPEN_FILE] };
+    await client.handle({ method: 'createSession', params: { channel: uri, provider: 'claude', activeClient } });
+    const subscribed = await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+      snapshot: { fromSeq: number };
+    };
+    await client.handle({ method: 'dispatchAction', params: {
+      channel: uri, clientSeq: 40,
+      action: { type: 'session/activeClientSet', activeClient },
+    } });
+    await settle();
+    const acknowledged = actions(p, uri).find((event) => event.origin?.clientSeq === 40);
+    expect(acknowledged?.rejectionReason).toBeUndefined();
+    expect(acknowledged?.serverSeq).toBe(subscribed.snapshot.fromSeq);
+    expect(sdk.mcpDeclared).toHaveLength(0);
+  });
+
+  it('rejects an unchanged announcement when the backend cannot publish client tools', async () => {
+    const { echo } = await import('../../../examples/echo/agent.js');
+    const host = createHost({ path: '/home/softov', agents: [echo({ path: '/home/softov' })], ...machine() });
+    const p = peer();
+    const client = host.accept(p);
+    await client.handle(hello(['0.9.0']));
+    const uri = 'echo:/creator-tool-unsupported';
+    const activeClient = { clientId: 'probe', tools: [OPEN_FILE] };
+    await client.handle({ method: 'createSession', params: { channel: uri, provider: 'echo', activeClient } });
+    const subscribed = await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+      snapshot: { fromSeq: number };
+    };
+    await client.handle({ method: 'dispatchAction', params: {
+      channel: uri, clientSeq: 44,
+      action: { type: 'session/activeClientSet', activeClient },
+    } });
+    await settle();
+    const rejected = actions(p, uri).find((event) => event.origin?.clientSeq === 44);
+    expect(rejected?.rejectionReason).toContain('could not publish');
+    expect(rejected?.serverSeq).toBe(subscribed.snapshot.fromSeq);
+  });
+
+  it('acknowledges a changed client announcement only after Claude accepts it', async () => {
+    const { client, peer: p, uri } = await running();
+    let release: () => void = () => {};
+    sdk.mcpDeclareWait = new Promise<void>((resolve) => { release = resolve; });
+    client.handle({ method: 'dispatchAction', params: {
+      channel: uri, clientSeq: 43,
+      action: { type: 'session/activeClientSet', activeClient: { tools: [OPEN_FILE] } },
+    } });
+    await settle();
+    expect(actions(p, uri).some((event) => event.origin?.clientSeq === 43)).toBe(false);
+    release();
+    await settle();
+    const acknowledged = actions(p, uri).find((event) => event.origin?.clientSeq === 43);
+    expect(acknowledged?.rejectionReason).toBeUndefined();
+    expect(offered().some((tool) => tool.name === 'probe__openFile')).toBe(true);
+  });
+
   it('refuses a client announcement when Claude rejects the tool update, then retries it', async () => {
     const { client, peer: p, uri } = await running();
     sdk.mcpDeclareFails = 1;
