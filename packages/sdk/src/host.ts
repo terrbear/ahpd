@@ -5549,8 +5549,9 @@ export function createHost(options: HostOptions): Host {
   const retool = async (uri: string): Promise<boolean> => {
     const held = sessions.get(uri);
     if (!held) return true;
+    const hasClientTools = clientTools(uri).length > 0;
     const results = await Promise.all([...held.chats].map(async ([chatUri, chat]) => {
-      if (!chat.setTools) return false;
+      if (!chat.setTools) return !hasClientTools;
       try { return await chat.setTools(boundTools(uri, chatUri)); }
       catch { return false; }
     }));
@@ -7283,6 +7284,7 @@ export function createHost(options: HostOptions): Host {
              * worktree five are its dev container flow.
              */
             _meta: {
+              'ahpd.activeClientSetReceipts': true,
               'vscode.removeSessionArtifact': true,
               'vscode.detachedWorktrees': true,
               'vscode.getAgentHostSessionStateFile.chat': true,
@@ -9602,10 +9604,12 @@ export function createHost(options: HostOptions): Host {
                 no('The agent could not publish the client tools');
                 return;
               }
-              const alias = connection.aliases.get(channel);
-              connection.peer.notify('action', {
-                channel: alias ?? channel, action: { type, activeClient }, serverSeq, origin,
-              });
+              if (origin.clientSeq > 0) {
+                const alias = connection.aliases.get(channel);
+                connection.peer.notify('action', {
+                  channel: alias ?? channel, action: { type, activeClient }, serverSeq, origin,
+                });
+              }
               return;
             }
             const previous = held.get(clientId);

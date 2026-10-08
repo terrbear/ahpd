@@ -20,7 +20,13 @@ function peer(): Peer & { notes: { method: string; params: unknown }[] } {
   return { notes, send: () => {}, notify: (method, params) => notes.push({ method, params }), request: async () => ({}), answered: () => {}, close: () => {} };
 }
 
-const host = () => createHost({ path: DIR, agents: [echo({ path: DIR, pace: 0 })] });
+const host = () => {
+  const agent = echo({ path: DIR, pace: 0 });
+  return createHost({
+    path: DIR,
+    agents: [{ ...agent, create: (start) => ({ ...agent.create(start), setTools: async () => true }) }],
+  });
+};
 
 /** A connected client, named, watching nothing yet. */
 async function joins(held: ReturnType<typeof host>, clientId: string) {
@@ -128,6 +134,7 @@ it('shows one client to another, which is the whole reason a host keeps it', asy
       },
     },
   });
+  await settle();
 
   // The other client hears about it, which is not something the two of them
   // could have told each other.
@@ -151,6 +158,7 @@ it('takes the client id from the connection, not from the action', async () => {
       action: { type: 'session/activeClientSet', activeClient: { clientId: 'somebody-else', tools: [] } },
     },
   });
+  await settle();
   expect(await clientsIn(a.client, URI)).toEqual(['honest']);
 });
 
@@ -165,6 +173,7 @@ it('replaces what a client contributes rather than merging it', async () => {
   });
   await announce([{ name: 'a' }, { name: 'b' }]);
   await announce([{ name: 'a' }]);
+  await settle();
   const opened = await a.client.handle({ method: 'subscribe', params: { channel: URI } }) as {
     snapshot: { state: { activeClients: { tools: unknown[] }[] } };
   };
@@ -185,6 +194,7 @@ it('takes a client out on unsubscribe, on disconnect, and on a reconnect that dr
       method: 'dispatchAction',
       params: { channel: URI, action: { type: 'session/activeClientSet', activeClient: { clientId: id, tools: [] } } },
     });
+    await settle();
   };
 
   // One: unsubscribing.
@@ -230,6 +240,7 @@ it('keeps a client in while another window of theirs is still watching', async (
     method: 'dispatchAction',
     params: { channel: URI, action: { type: 'session/activeClientSet', activeClient: { clientId: 'twice', tools: [] } } },
   });
+  await settle();
   expect(await clientsIn(a.client, URI)).toEqual(['twice']);
 
   first.client.close();

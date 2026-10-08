@@ -5364,6 +5364,13 @@ describe('tools a client contributes', () => {
     inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
   };
 
+  it('advertises accepted client-tool receipts in initialize metadata', async () => {
+    const host = serving('/home/softov');
+    const client = host.accept(peer());
+    const result = await client.handle(hello(['0.9.0'])) as { _meta?: Record<string, unknown> };
+    expect(result._meta?.['ahpd.activeClientSetReceipts']).toBe(true);
+  });
+
   it('offers a creator tool when the Claude chat first opens', async () => {
     const host = serving('/home/softov');
     const client = host.accept(peer());

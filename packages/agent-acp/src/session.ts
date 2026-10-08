@@ -1342,7 +1342,10 @@ export function acpSession(options: AcpOptions, start: Start): Session {
 
     setTools: async (next) => {
       offered.set(next);
-      if (toolsEndpoint === undefined) return false;
+      if (toolsEndpoint === undefined && next.some((tool) => tool.owner !== undefined)) {
+        await open();
+      }
+      if (toolsEndpoint === undefined) return !next.some((tool) => tool.owner !== undefined);
       toolsEndpoint.setTools(next);
       return true;
     },
