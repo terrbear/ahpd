@@ -130,6 +130,7 @@ export interface AcpConnectionOptions {
   env?: Record<string, string>;
   cwd?: string;
   handlers: AcpHandlers;
+  authStatus?: (status: unknown) => void;
 }
 
 /** One open ACP connection over a server's stdio. */
@@ -163,7 +164,7 @@ export interface AcpConnection {
    */
   readonly ended: Promise<Error>;
   /** End the subprocess; settles once it has gone, and never rejects. */
-  close(): Promise<void>;
+  close(graceMs?: number): Promise<void>;
 }
 
 /** One tool call the server opened, as the mapping remembers it between updates. */

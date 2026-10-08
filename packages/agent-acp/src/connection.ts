@@ -145,6 +145,11 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
     sessionUpdate: (params: SessionNotification): void => {
       handlers.update(params.sessionId, params.update);
     },
+    ...(options.authStatus === undefined ? {} : {
+      extNotification: (method: string, params: Record<string, unknown>): void => {
+        if (method === '_auth/status_update' && 'authStatus' in params) options.authStatus?.(params.authStatus);
+      },
+    }),
     /*
      * A person's answer, or the protocol's refusal.
      *
@@ -221,12 +226,26 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
     })),
     cancel: (sessionId: string): Promise<void> => heard(() => connection.cancel({ sessionId })),
     ended,
-    close: async (): Promise<void> => {
+    close: async (graceMs?: number): Promise<void> => {
       // The stdin end is what a well-behaved server reads as a shutdown; the
       // kill is for one that does not.
       child.stdin.end();
       child.kill();
-      await ended;
+      if (graceMs === undefined) {
+        await ended;
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        ended,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            child.kill('SIGKILL');
+            resolve();
+          }, graceMs);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
     },
   };
 }

@@ -374,6 +374,7 @@ export interface Agent {
    * a token is an override rather than a precondition.
    */
   protectedResources?: Bag[];
+  accountIdentity?: (directory?: string) => Promise<{ status: 'verified'; name: string } | { status: 'unavailable' }>;
 
   /**
    * What a session of this kind can be told to do differently.

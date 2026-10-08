@@ -114,6 +114,12 @@ Any AHP client works. [`ahpc`](https://github.com/softov/ahpc) is one:
 ahpc --host ws://127.0.0.1:9187
 ```
 
+## Provider account identity
+
+An admitted AHP client can read `ahpd-account://<provider>` on `ahp-root://` with `resourceRead`. The UTF-8 JSON response is either `{"status":"verified","name":"user@example.com"}` or `{"status":"unavailable"}`. The resource is read only and returns no tokens, raw authentication responses, or probe errors.
+
+Append `?cwd=<URL-encoded absolute path>` to probe a new session's selected working directory. Codex requires that path and must use the configured `codex-acp` command; ahpd accepts only its ChatGPT account-status notification. API key status, missing status, and configured credential environment overrides return `unavailable`. Claude Code probes `claude auth status --json` as the daemon user from the selected directory, and returns `unavailable` for key, gateway, cloud mode, or preset overrides. A session using a machine or client-supplied credential can have a different account from the daemon default; clients selecting those overrides must show this identity as unavailable for that session.
+
 ## Embedding
 
 The daemon is `@ahpd/sdk`, the plugins its config names, and a socket. The same host in your own program:

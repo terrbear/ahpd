@@ -47,6 +47,7 @@ import { pty } from '../pty.js';
 import { MAX_AGE_MS, checkingUpdates, readUpdate, refreshUpdate, registry as npmRegistry, stale, updateLine } from '../update.js';
 import { manifest, version } from '../version.js';
 import { conflict, optionsFrom, secret, flagFields, stop } from './options.js';
+import { accountProvider } from '../account.js';
 import { FORCED_SIGNAL, RESTART_SIGNAL, answerRestartSignal, checkedRestart, lifecycle } from './restart.js';
 import type { Options } from './options.js';
 
@@ -497,6 +498,7 @@ export async function runForeground(options: Options): Promise<void> {
     process.exit(1);
   }
 
+  folded.resourceProviders = { ...folded.resourceProviders, 'ahpd-account': accountProvider(folded.agents) };
   const host = createHost(folded);
   turning = () => host.turning();
   // What the host was finally built over, which is what a served `ahpd usage`
