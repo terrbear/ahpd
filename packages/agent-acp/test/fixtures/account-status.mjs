@@ -1,6 +1,11 @@
 import { createInterface } from 'node:readline';
 import { basename } from 'node:path';
 
+if (process.argv.includes('--ignore-term')) {
+  process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1000);
+}
+
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 
 createInterface({ input: process.stdin }).on('line', (line) => {

@@ -103,7 +103,7 @@ export function acpAgent(options: AcpOptions): Agent {
       } catch {
         return { status: 'unavailable' };
       } finally {
-        await connection.close();
+        await connection.close(250);
       }
     },
 

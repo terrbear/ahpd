@@ -226,12 +226,26 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
     })),
     cancel: (sessionId: string): Promise<void> => heard(() => connection.cancel({ sessionId })),
     ended,
-    close: async (): Promise<void> => {
+    close: async (graceMs?: number): Promise<void> => {
       // The stdin end is what a well-behaved server reads as a shutdown; the
       // kill is for one that does not.
       child.stdin.end();
       child.kill();
-      await ended;
+      if (graceMs === undefined) {
+        await ended;
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        ended,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            child.kill('SIGKILL');
+            resolve();
+          }, graceMs);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
     },
   };
 }

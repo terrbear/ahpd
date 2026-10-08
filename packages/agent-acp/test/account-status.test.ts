@@ -32,3 +32,14 @@ it('declines API key, credential override, and unrelated ACP providers', async (
   const unrelated = acpAgent({ command, args: [fixture], provider: 'other' });
   expect(await unrelated.accountIdentity?.(root)).toEqual({ status: 'unavailable' });
 });
+
+it('bounds account-probe teardown when the ACP process ignores SIGTERM', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ahpd-codex-account-'));
+  const command = join(root, 'codex-acp');
+  await symlink(process.execPath, command);
+  const agent = acpAgent({ command, args: [fixture, '--ignore-term'], provider: 'codex' });
+  const started = Date.now();
+  expect(await agent.accountIdentity?.(root)).toEqual({ status: 'verified', name: `${root.split('/').at(-1)}@example.com` });
+  expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+  expect(Date.now() - started).toBeLessThan(2000);
+});
