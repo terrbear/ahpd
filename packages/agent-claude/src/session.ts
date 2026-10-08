@@ -924,8 +924,32 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const ranByClient = async (tool: BoundTool, input: Bag): Promise<{ text: string; ok: boolean }> => {
     const id = await claim(called(tool.definition.name), input);
     const owner = tool.owner ?? '';
+    const scope = scopeOfCall(id) ?? mainScope;
+    const fullName = tool.definition.name;
+    const prefix = `${owner}__`;
+    const toolName = fullName.startsWith(prefix) ? fullName.slice(prefix.length) : fullName;
+    const displayName = tool.definition.title ?? toolName;
+    const requestId = `${id}:client`;
+    inputNeededSet({
+      id: requestId,
+      chat: scope.chat?.uri ?? chatUri,
+      kind: 'toolClientExecution',
+      turnId: str(scope.turn?.id) ?? '',
+      clientId: owner,
+      toolCall: {
+        toolCallId: id,
+        toolName,
+        displayName,
+        invocationMessage: str(bag(scope.parts.get(id)?.toolCall).invocationMessage) ?? displayName,
+        toolInput: JSON.stringify(input),
+        contributor: { kind: 'client', clientId: owner },
+        confirmed: 'not-needed',
+        status: 'running',
+      },
+    });
     doing(`Waiting on ${owner}: ${tool.definition.title ?? tool.definition.name}`);
-    return await new Promise((settle) => { byClient.set(id, { owner, settle }); });
+    try { return await new Promise((settle) => { byClient.set(id, { owner, settle }); }); }
+    finally { inputNeededRemoved(requestId); }
   };
   /**
    * Tool calls running against an MCP server, by call id.
