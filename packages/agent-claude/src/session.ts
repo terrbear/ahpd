@@ -841,7 +841,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const given = bag(input.tool_input);
     const command = str(given.command);
     if (command === undefined) return {};
-    const xdg = settings.shellXdgConfigHome;
+    const xdg = typeof settings.shellXdgConfigHome === 'string'
+      ? settings.shellXdgConfigHome
+      : process.env.AHPD_SHELL_XDG_CONFIG_HOME;
     const prefix = [
       ...(typeof xdg === 'string'
         ? [xdg === '' ? 'unset XDG_CONFIG_HOME' : `export XDG_CONFIG_HOME='${xdg.replaceAll("'", "'\\''")}'`]

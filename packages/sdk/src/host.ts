@@ -7846,6 +7846,9 @@ export function createHost(options: HostOptions): Host {
             : claimOf(params.claim);
           if (!claim) throw new RpcError(-32602, 'That is not a terminal claim');
           if (closed) throw new RpcError(INTERNAL_ERROR, CLOSING);
+          const shellXdg = typeof connection.config?.shellXdgConfigHome === 'string'
+            ? connection.config.shellXdgConfigHome
+            : process.env.AHPD_SHELL_XDG_CONFIG_HOME;
           const terminal = shells.create({
             uri,
             cwd: asked,
@@ -7856,8 +7859,8 @@ export function createHost(options: HostOptions): Host {
             ...(typeof connection.config?.defaultShell === 'string'
               ? { shell: connection.config.defaultShell }
               : {}),
-            ...(typeof connection.config?.shellXdgConfigHome === 'string'
-              ? { env: { XDG_CONFIG_HOME: connection.config.shellXdgConfigHome || undefined } }
+            ...(typeof shellXdg === 'string'
+              ? { env: { XDG_CONFIG_HOME: shellXdg || undefined } }
               : {}),
             ...(typeof params.name === 'string' ? { name: params.name } : {}),
             ...(typeof params.cols === 'number' ? { cols: params.cols } : {}),

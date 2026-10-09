@@ -675,6 +675,40 @@ it('uses each connection\'s XDG config preference for its terminal', async () =>
   }
 });
 
+it('uses the operator shell XDG baseline without a client preference', async () => {
+  const previousXdg = process.env.XDG_CONFIG_HOME;
+  const previousShellXdg = process.env.AHPD_SHELL_XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = '/private/daemon-config';
+  try {
+    const made = host({ terminals: shellTerminals() });
+    const seen = watching();
+    const client = made.accept(seen);
+    await hello(client);
+    for (const [baseline, uri, expected] of [
+      ['', 'ahp-terminal:/operator-unset', 'xdg=unset'],
+      ['/operator/config', 'ahp-terminal:/operator-custom', 'xdg=/operator/config'],
+    ] as const) {
+      process.env.AHPD_SHELL_XDG_CONFIG_HOME = baseline;
+      expect(await call(client, 'createTerminal', { channel: uri, claim: { kind: 'client', clientId: 'probe' }, cwd: `file://${root}` })).toHaveProperty('result');
+      await call(client, 'subscribe', { channel: uri });
+      await call(client, 'dispatchAction', { channel: uri, action: { type: 'terminal/input', data: 'printf "xdg=%s\\n" "${XDG_CONFIG_HOME-unset}"\n' } });
+      expect(await until(seen, uri, expected)).toContain(expected);
+    }
+    await configChanged(client, { shellXdgConfigHome: '/client/config' });
+    const uri = 'ahp-terminal:/operator-overridden';
+    expect(await call(client, 'createTerminal', { channel: uri, claim: { kind: 'client', clientId: 'probe' }, cwd: `file://${root}` })).toHaveProperty('result');
+    await call(client, 'subscribe', { channel: uri });
+    await call(client, 'dispatchAction', { channel: uri, action: { type: 'terminal/input', data: 'printf "xdg=%s\\n" "${XDG_CONFIG_HOME-unset}"\n' } });
+    expect(await until(seen, uri, 'xdg=/client/config')).toContain('xdg=/client/config');
+  }
+  finally {
+    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousXdg;
+    if (previousShellXdg === undefined) delete process.env.AHPD_SHELL_XDG_CONFIG_HOME;
+    else process.env.AHPD_SHELL_XDG_CONFIG_HOME = previousShellXdg;
+  }
+});
+
 it('lets a role that may not open a terminal set a shell that reaches nothing', async () => {
   const made = host({ users: directory({ w: ['file:read', 'file:write', 'session:read', 'session:write'] }), terminals: shellTerminals() });
   const seen = watching();

@@ -180,6 +180,29 @@ it('restores a custom client XDG when a provider preset gives Claude a private o
   expect(await bashCommand(await queried(undefined, undefined))).toBeUndefined();
 });
 
+it('uses an explicit operator shell XDG baseline when the client sends none', async () => {
+  const previousXdg = process.env.XDG_CONFIG_HOME;
+  const previousShellXdg = process.env.AHPD_SHELL_XDG_CONFIG_HOME;
+  try {
+    process.env.XDG_CONFIG_HOME = '/private/daemon-config';
+    process.env.AHPD_SHELL_XDG_CONFIG_HOME = '';
+    const unset = await queried(undefined, undefined);
+    expect(await bashCommand(unset)).toBe('unset XDG_CONFIG_HOME\nprintf ready');
+    process.env.AHPD_SHELL_XDG_CONFIG_HOME = '/operator/config';
+    const custom = await queried(undefined, undefined);
+    expect(await bashCommand(custom)).toBe("export XDG_CONFIG_HOME='/operator/config'\nprintf ready");
+    expect((custom.env as Record<string, string> | undefined)?.XDG_CONFIG_HOME ?? process.env.XDG_CONFIG_HOME).toBe('/private/daemon-config');
+    const client = await queried(undefined, undefined, undefined, '/client/config');
+    expect(await bashCommand(client)).toBe("export XDG_CONFIG_HOME='/client/config'\nprintf ready");
+  }
+  finally {
+    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousXdg;
+    if (previousShellXdg === undefined) delete process.env.AHPD_SHELL_XDG_CONFIG_HOME;
+    else process.env.AHPD_SHELL_XDG_CONFIG_HOME = previousShellXdg;
+  }
+});
+
 it('loads twice as two harnesses, each under its own provider and name', async () => {
   const { problems, options } = await loadPlugins([
     { name: SOURCE },

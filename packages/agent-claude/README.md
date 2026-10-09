@@ -68,7 +68,7 @@ A preset holds five fields, and each is checked when the plugin loads, so a pres
 
 With one preset there is nothing to choose and every session runs on it; with none, a session runs on what this backend has always run on, which is `thinking: "adaptive"` and no sandbox layer. The first preset is the default in both senses, and a session whose own stored `preset` names one that has since been renamed or removed runs on the first, which is what is left of a choice that no longer resolves.
 
-A client may set the session's `shellXdgConfigHome` to the user's `XDG_CONFIG_HOME`. An empty string unsets it for Claude's Bash tool, letting tools use `HOME/.config`. The setting changes only Bash commands; the daemon and Claude CLI keep their own environment, including any private XDG directory from the launcher or provider preset. If the client does not send it, Bash keeps the inherited XDG value. Host-managed terminals accept the same setting per connection through `root/configChanged`.
+A client may set the session's `shellXdgConfigHome` to the user's `XDG_CONFIG_HOME`. An empty string unsets it for Claude's Bash tool, letting tools use `HOME/.config`. Host-managed terminals accept the same setting per connection through `root/configChanged`. An operator can set `AHPD_SHELL_XDG_CONFIG_HOME` in the daemon environment as the fallback for both kinds of shell; an explicitly empty value unsets XDG in shells. The client setting wins over the operator setting. These settings change only shell commands; the daemon and Claude CLI keep their own environment, including any private XDG directory from the launcher or provider preset. With neither setting, shells keep their inherited XDG value.
 
 ### A second Claude on another endpoint
 
