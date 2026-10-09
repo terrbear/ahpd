@@ -55,14 +55,14 @@ const settle = async (times = 8): Promise<void> => {
 };
 
 /** One session's `query()` options, created with a preset name in its config. */
-const queried = async (presets: Record<string, Record<string, unknown>> | undefined, preset: unknown, env?: Record<string, string>): Promise<Record<string, unknown>> => {
+const queried = async (presets: Record<string, Record<string, unknown>> | undefined, preset: unknown, env?: Record<string, string>, shellXdgConfigHome?: string): Promise<Record<string, unknown>> => {
   sdk.options = [];
   createSession({
     uri: 'ahp-session:/preset',
     chatUri: 'ahp-chat:/preset',
     cwd: mkdtempSync(join(tmpdir(), 'ahpd-preset-')),
     emit: () => {},
-    settings: preset === undefined ? {} : { preset },
+    settings: { ...(preset === undefined ? {} : { preset }), ...(shellXdgConfigHome === undefined ? {} : { shellXdgConfigHome }) },
     ...(presets === undefined ? {} : { presets }),
     ...(env === undefined ? {} : { env }),
   });
@@ -70,6 +70,13 @@ const queried = async (presets: Record<string, Record<string, unknown>> | undefi
   const one = sdk.options.at(0);
   if (one === undefined) throw new Error('no query was built');
   return one;
+};
+
+const bashCommand = async (options: Record<string, unknown>): Promise<string | undefined> => {
+  const hooks = options.hooks as { PreToolUse: { hooks: ((input: unknown) => Promise<Record<string, unknown>>)[] }[] };
+  const result = await hooks.PreToolUse[0]!.hooks[0]!({ hook_event_name: 'PreToolUse', tool_input: { command: 'printf ready' } });
+  const output = result.hookSpecificOutput as { updatedInput: { command: string } } | undefined;
+  return output?.updatedInput.command;
 };
 
 /** What a backend offers a client, by key. */
@@ -150,6 +157,27 @@ it('lays a signed-in credential over a preset env, and lets a preset unset a var
   expect(env.ANTHROPIC_BASE_URL).toBe('https://gateway');
   expect('AHPD_PRESET_PROBE' in env).toBe(false);
   expect(env.PATH).toBe(process.env.PATH);
+});
+
+it('keeps a private daemon XDG for Claude but unsets it in client shell commands', async () => {
+  const previous = process.env.XDG_CONFIG_HOME;
+  try {
+    process.env.XDG_CONFIG_HOME = '/private/daemon-config';
+    const options = await queried(undefined, undefined, undefined, '');
+    expect((options.env as Record<string, string> | undefined)?.XDG_CONFIG_HOME ?? process.env.XDG_CONFIG_HOME).toBe('/private/daemon-config');
+    expect(await bashCommand(options)).toBe('unset XDG_CONFIG_HOME\nprintf ready');
+  }
+  finally {
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previous;
+  }
+});
+
+it('restores a custom client XDG when a provider preset gives Claude a private one', async () => {
+  const options = await queried({ work: { env: { XDG_CONFIG_HOME: '/private/provider-config' } } }, 'work', undefined, '/user/config with space');
+  expect((options.env as Record<string, string>).XDG_CONFIG_HOME).toBe('/private/provider-config');
+  expect(await bashCommand(options)).toBe("export XDG_CONFIG_HOME='/user/config with space'\nprintf ready");
+  expect(await bashCommand(await queried(undefined, undefined))).toBeUndefined();
 });
 
 it('loads twice as two harnesses, each under its own provider and name', async () => {

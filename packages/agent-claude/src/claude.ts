@@ -297,6 +297,14 @@ export function claude(options: ClaudeOptions): Agent {
         readOnly: true,
         sessionMutable: true,
       },
+      shellXdgConfigHome: {
+        scope: 'session',
+        type: 'string',
+        title: 'Shell XDG Config Home',
+        description: 'The client\'s XDG config directory for shell commands. An empty value unsets XDG_CONFIG_HOME.',
+        readOnly: true,
+        sessionMutable: true,
+      },
       /*
        * Per-tool allow and deny, which is the slope the mode above is a cliff.
        *

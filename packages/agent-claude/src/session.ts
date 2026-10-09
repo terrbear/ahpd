@@ -837,11 +837,19 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
   if (settings.shellInitScripts !== undefined) setShellInit(settings.shellInitScripts);
   const sourceFirst: HookCallback = async (input) => {
-    if (!sourced || input.hook_event_name !== 'PreToolUse') return {};
+    if (input.hook_event_name !== 'PreToolUse') return {};
     const given = bag(input.tool_input);
     const command = str(given.command);
     if (command === undefined) return {};
-    return { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { ...given, command: `${sourcing(initScript)}\n${command}` } } };
+    const xdg = settings.shellXdgConfigHome;
+    const prefix = [
+      ...(typeof xdg === 'string'
+        ? [xdg === '' ? 'unset XDG_CONFIG_HOME' : `export XDG_CONFIG_HOME='${xdg.replaceAll("'", "'\\''")}'`]
+        : []),
+      ...(sourced ? [sourcing(initScript)] : []),
+    ];
+    if (prefix.length === 0) return {};
+    return { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { ...given, command: `${prefix.join('\n')}\n${command}` } } };
   };
 
   /**

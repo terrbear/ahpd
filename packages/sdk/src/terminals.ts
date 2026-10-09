@@ -92,7 +92,7 @@ export function createTerminal(options: TerminalOptions, pty?: SpawnPty): Termin
     : options.args === undefined
       ? ['-c', options.command]
       : ['-c', [options.command, ...options.args].map(quoted).join(' ')];
-  const environment = {
+  const environment: Record<string, string | undefined> = {
     ...process.env,
     // Asked for last, because the caller's variables sit over the host's and
     // these three over the caller's: a terminal's own size and kind are not
@@ -103,6 +103,9 @@ export function createTerminal(options: TerminalOptions, pty?: SpawnPty): Termin
     COLUMNS: String(cols),
     LINES: String(rows),
   };
+  for (const [key, value] of Object.entries(options.env ?? {})) {
+    if (value === undefined) delete environment[key];
+  }
 
   /** Where the shell says it is, once it has said. */
   let where = cwd;

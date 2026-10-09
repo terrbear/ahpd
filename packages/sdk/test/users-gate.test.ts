@@ -645,6 +645,36 @@ it('opens a client terminal with that connection\'s own shell', async () => {
   expect(shown?.title).toBe('sh');
 });
 
+it('uses each connection\'s XDG config preference for its terminal', async () => {
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = '/private/daemon-config';
+  try {
+    const made = host({ terminals: shellTerminals() });
+    const firstSeen = watching();
+    const first = made.accept(firstSeen);
+    const secondSeen = watching();
+    const second = made.accept(secondSeen);
+    const inheritedSeen = watching();
+    const inherited = made.accept(inheritedSeen);
+    await hello(first); await hello(second); await hello(inherited);
+    await configChanged(first, { shellXdgConfigHome: '/user/config with space' });
+    await configChanged(second, { shellXdgConfigHome: '' });
+
+    for (const [client, uri] of [[first, 'ahp-terminal:/custom'], [second, 'ahp-terminal:/unset'], [inherited, 'ahp-terminal:/inherited']] as const) {
+      expect(await call(client, 'createTerminal', { channel: uri, claim: { kind: 'client', clientId: 'probe' }, cwd: `file://${root}` })).toHaveProperty('result');
+      await call(client, 'subscribe', { channel: uri });
+      await call(client, 'dispatchAction', { channel: uri, action: { type: 'terminal/input', data: 'printf "xdg=%s\\n" "${XDG_CONFIG_HOME-unset}"\n' } });
+    }
+    expect(await until(firstSeen, 'ahp-terminal:/custom', 'xdg=/user/config with space')).toContain('xdg=/user/config with space');
+    expect(await until(secondSeen, 'ahp-terminal:/unset', 'xdg=unset')).toContain('xdg=unset');
+    expect(await until(inheritedSeen, 'ahp-terminal:/inherited', 'xdg=/private/daemon-config')).toContain('xdg=/private/daemon-config');
+  }
+  finally {
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previous;
+  }
+});
+
 it('lets a role that may not open a terminal set a shell that reaches nothing', async () => {
   const made = host({ users: directory({ w: ['file:read', 'file:write', 'session:read', 'session:write'] }), terminals: shellTerminals() });
   const seen = watching();

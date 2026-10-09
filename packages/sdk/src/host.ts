@@ -329,7 +329,7 @@ const dispatchNeeds = (channel: string, kind: ChannelKind, action?: Record<strin
  * not on any other: whoever connected last decided everybody's shell. So these
  * live on the `Connection`, and a connection reads its own back.
  */
-const PER_CONNECTION = new Set(['defaultShell']);
+const PER_CONNECTION = new Set(['defaultShell', 'shellXdgConfigHome']);
 
 /** The kinds of channel a family of client action can belong on. */
 type Home = 'session' | 'terminal' | 'automations' | 'root' | 'watch';
@@ -5819,6 +5819,11 @@ export function createHost(options: HostOptions): Host {
         title: 'Default Shell',
         description: 'Absolute path to the shell host-managed terminals open. The system shell when unset.',
       },
+      shellXdgConfigHome: {
+        type: 'string',
+        title: 'Shell XDG Config Home',
+        description: 'The client\'s XDG config directory for host-managed terminals. An empty value unsets XDG_CONFIG_HOME.',
+      },
       artifactToolsCompactPrompts: {
         type: 'boolean',
         title: 'Compact Artifact Prompts',
@@ -7850,6 +7855,9 @@ export function createHost(options: HostOptions): Host {
             // and neither can name the binary the other's terminal opens.
             ...(typeof connection.config?.defaultShell === 'string'
               ? { shell: connection.config.defaultShell }
+              : {}),
+            ...(typeof connection.config?.shellXdgConfigHome === 'string'
+              ? { env: { XDG_CONFIG_HOME: connection.config.shellXdgConfigHome || undefined } }
               : {}),
             ...(typeof params.name === 'string' ? { name: params.name } : {}),
             ...(typeof params.cols === 'number' ? { cols: params.cols } : {}),
