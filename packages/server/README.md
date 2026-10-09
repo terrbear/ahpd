@@ -74,6 +74,8 @@ ahpd plugin update <name>   move only the plugins named
 
 Every flag except `--version` and `--help` also has a key in `config.json` under `$XDG_CONFIG_HOME/ahpd`, spelled the same way without the dashes. A flag beats the file. Run `ahpd config` to see the path and the current values.
 
+If the service uses a private `XDG_CONFIG_HOME`, set `AHPD_SHELL_XDG_CONFIG_HOME` in its environment to the user's config directory for agent Bash commands and host-managed terminals. Set it to an empty string to unset `XDG_CONFIG_HOME` in those shells, which makes tools use their usual `HOME/.config` location. The daemon and Claude CLI keep their private environment. An explicit client shell setting takes precedence, and without either setting shells inherit the daemon's XDG value.
+
 ## Directories
 
 `--path` is repeatable:
