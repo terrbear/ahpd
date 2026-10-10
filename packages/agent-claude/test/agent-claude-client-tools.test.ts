@@ -58,24 +58,35 @@ const until = async (check: () => boolean): Promise<void> => {
 
 it('asks the owning client to execute an announced Claude tool and removes the request after completion', async () => {
   const sent: { channel: string; action: Bag }[] = [];
-  const owner = 'anton-client';
+  const owner = 'anton-ahp_0ujtsYcgvSTl8PAuAdqWYSMnLOv';
+  const unrelatedOwner = 'anton-unrelated-client';
   const input = { code: 'return anton.help()' };
+  const antonTools = ['anton_codemode', 'launch_shell', 'shell_write', 'shell_read', 'spawn_teammate'];
   const session = createSession({
     uri: 'claude:/client-tools',
     chatUri: 'ahp-chat:/client-tools',
     cwd: mkdtempSync(join(tmpdir(), 'ahpd-client-tools-')),
     emit: (channel, action) => { sent.push({ channel, action: action as Bag }); },
-    tools: [{
-      definition: { name: `${owner}__anton_codemode`, title: 'Anton Codemode', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
-      owner,
-    } as BoundTool],
+    tools: [
+      ...antonTools.map((name) => ({
+        definition: { name: `${owner}__${name}`, title: name, inputSchema: { type: 'object', properties: { code: { type: 'string' } } } },
+        owner,
+      } as BoundTool)),
+      { definition: { name: `${owner}__anton_debug` }, owner } as BoundTool,
+      { definition: { name: 'anton_debug' }, owner: 'other-client' } as BoundTool,
+      { definition: { name: `${unrelatedOwner}__anton_codemode` }, owner: unrelatedOwner } as BoundTool,
+      { definition: { name: 'other-client__git_status' }, owner: 'other-client' } as BoundTool,
+    ],
   });
   session.begin('turn-1', 'List Anton APIs');
-  await until(() => sdk.server?.tools.some((tool) => tool.name === `${owner}__anton_codemode`) === true);
-  const tool = sdk.server?.tools.find((one) => one.name === `${owner}__anton_codemode`);
+  await until(() => sdk.server?.tools.some((tool) => tool.name === 'anton_codemode') === true);
+  const names = sdk.server?.tools.map((tool) => tool.name) ?? [];
+  expect(names).toEqual(expect.arrayContaining(antonTools));
+  expect(names).toEqual(expect.arrayContaining(['anton-ahp_0ujtsYcgvSTl8PAuAdqWYSMnLOv__anton_debug', 'anton_debug', 'anton-unrelated-client__anton_codemode', 'other-client__git_status']));
+  const tool = sdk.server?.tools.find((one) => one.name === 'anton_codemode');
   if (!tool) throw new Error('client tool was not offered');
   const result = tool.handler(input);
-  sdk.push({ type: 'assistant', parent_tool_use_id: null, uuid: 'assistant-1', message: { id: 'message-1', role: 'assistant', content: [{ type: 'tool_use', id: 'call-1', name: `mcp__ahp__${owner}__anton_codemode`, input }] } });
+  sdk.push({ type: 'assistant', parent_tool_use_id: null, uuid: 'assistant-1', message: { id: 'message-1', role: 'assistant', content: [{ type: 'tool_use', id: 'call-1', name: 'mcp__ahp__anton_codemode', input }] } });
   await until(() => sent.some(({ action }) => action.type === 'session/inputNeededSet'));
   const request = sent.find(({ action }) => action.type === 'session/inputNeededSet');
   expect(request).toMatchObject({
