@@ -32,6 +32,44 @@ export interface Asked {
 }
 
 /**
+ * The SDK may turn a child-process error into a generic native-binary warning.
+ * Keep the OS errno, but never forward `path`, `spawnargs`, or the environment
+ * that Node attaches to the original error.
+ */
+export const spawnFailure = (error: unknown): Error | undefined => {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth++) {
+    if (current === null || typeof current !== 'object') return undefined;
+    const source = current as {
+      name?: unknown;
+      code?: unknown;
+      syscall?: unknown;
+      path?: unknown;
+      spawnargs?: unknown;
+      cause?: unknown;
+    };
+    const isSpawn = source.name === 'ClaudeSpawnError'
+      || (typeof source.syscall === 'string' && /^spawn(?:Sync)?(?:\s|$)/u.test(source.syscall))
+      || (typeof source.path === 'string' && Array.isArray(source.spawnargs));
+    if (isSpawn) {
+      const code = typeof source.code === 'string'
+        && /^E[A-Z0-9_]+$/u.test(source.code)
+        && !source.code.startsWith('ERR_')
+        ? source.code
+        : undefined;
+      const failure = new Error(code === undefined
+        ? 'Claude Code process could not start (unknown OS error)'
+        : `Claude Code process could not start (${code})`);
+      failure.name = 'ClaudeSpawnError';
+      if (code !== undefined) Object.assign(failure, { code });
+      return failure;
+    }
+    current = source.cause;
+  }
+  return undefined;
+};
+
+/**
  * A process that is not there yet, standing in for one that will be.
  *
  * The SDK's spawn hook is synchronous and the host's `computers` port is not:
@@ -52,7 +90,8 @@ class Deferred implements Spawned {
   #killed = false;
   #signal: NodeJS.Signals | undefined;
   #exit: ((code: number | null, signal: NodeJS.Signals | null) => void)[] = [];
-  #fail: ((error: Error) => void)[] = [];
+  #errorListeners: ((error: Error) => void)[] = [];
+  #failure: Error | undefined;
   #settled = false;
 
   get killed(): boolean {
@@ -74,7 +113,7 @@ class Deferred implements Spawned {
     if (this.#settled) return;
     this.#settled = true;
     if (child instanceof Error) {
-      for (const listener of this.#fail) listener(child);
+      this.#fail(child);
       this.stdout.end();
       return;
     }
@@ -98,8 +137,14 @@ class Deferred implements Spawned {
     this.stdin.pipe(child.stdin as Writable);
     (child.stdout as Readable).pipe(this.stdout);
     child.on('exit', (code, signal) => { for (const listener of this.#exit) listener(code, signal); });
-    child.on('error', (error) => { for (const listener of this.#fail) listener(error); });
+    child.on('error', (error) => { this.#fail(error); });
     if (this.#killed) child.kill(this.#signal ?? 'SIGTERM');
+  }
+
+  #fail(error: Error): void {
+    if (this.#failure !== undefined) return;
+    this.#failure = spawnFailure(error) ?? error;
+    for (const listener of this.#errorListeners.splice(0)) listener(this.#failure);
   }
 
   kill(signal: NodeJS.Signals): boolean {
@@ -109,8 +154,23 @@ class Deferred implements Spawned {
   }
 
   on(event: 'exit' | 'error', listener: never): void {
-    if (event === 'exit') this.#exit.push(listener);
-    else this.#fail.push(listener);
+    if (event === 'exit') {
+      this.#exit.push(listener);
+      return;
+    }
+    const errorListener = listener as (error: Error) => void;
+    const failure = this.#failure;
+    this.#errorListeners.push(errorListener);
+    if (failure !== undefined) {
+      // `how()` is asynchronous, and a fast failure can arrive before the SDK
+      // subscribes. Replay it on the next turn, like a child `error` event.
+      queueMicrotask(() => {
+        const at = this.#errorListeners.indexOf(errorListener);
+        if (at === -1) return;
+        this.#errorListeners.splice(at, 1);
+        errorListener(failure);
+      });
+    }
   }
 
   once(event: 'exit' | 'error', listener: never): void {
@@ -124,7 +184,7 @@ class Deferred implements Spawned {
   }
 
   off(event: 'exit' | 'error', listener: never): void {
-    const held = event === 'exit' ? this.#exit : this.#fail;
+    const held = event === 'exit' ? this.#exit : this.#errorListeners;
     const at = held.indexOf(listener);
     if (at !== -1) held.splice(at, 1);
   }
