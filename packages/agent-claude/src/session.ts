@@ -569,6 +569,21 @@ const shaped = (property: object): z.ZodTypeAny => {
   return value;
 };
 
+const exposedToolName = (tool: BoundTool, all: BoundTool[]): string => {
+  const owner = tool.owner;
+  if (owner === undefined || !owner.startsWith('anton-')) return tool.definition.name;
+  const prefix = `${owner}__`;
+  if (!tool.definition.name.startsWith(prefix)) return tool.definition.name;
+  const shortName = tool.definition.name.slice(prefix.length);
+  const aliases = all.filter((one) => {
+    if (one.owner === undefined || !one.owner.startsWith('anton-')) return false;
+    const onePrefix = `${one.owner}__`;
+    return one.definition.name.startsWith(onePrefix) && one.definition.name.slice(onePrefix.length) === shortName;
+  });
+  const collides = all.some((one) => one !== tool && one.definition.name === shortName);
+  return aliases.length === 1 && !collides ? shortName : tool.definition.name;
+};
+
 /**
  * The host's tools, as an in-process MCP server the CLI can call.
  *
@@ -586,6 +601,7 @@ const contributed = (
   name: 'ahp',
   version: '1.0.0',
   tools: tools.map((one) => {
+    const name = exposedToolName(one, tools);
     const schema = one.definition.inputSchema;
     const shape: Record<string, z.ZodTypeAny> = {};
     for (const [key, property] of Object.entries(schema?.properties ?? {})) {
@@ -593,8 +609,8 @@ const contributed = (
       shape[key] = (schema?.required ?? []).includes(key) ? value : value.optional();
     }
     return {
-      name: one.definition.name,
-      description: one.definition.description ?? one.definition.title ?? one.definition.name,
+      name,
+      description: one.definition.description ?? one.definition.title ?? name,
       inputSchema: shape,
       /*
        * A raw SDK definition, not the SDK's `tool()` helper, so the eager flag
@@ -937,7 +953,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const called = (name: string): string => `mcp__ahp__${name}`;
   /** Which client provides a tool, by the name the CLI calls it. */
   const providedBy = (toolName: string): string | undefined =>
-    offering.find((one) => called(one.definition.name) === toolName)?.owner;
+    offering.find((one) => called(exposedToolName(one, offering)) === toolName)?.owner;
 
   /*
    * Joining the call the model made to the handler that has to answer it.
@@ -992,7 +1008,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const ranByClient = async (tool: BoundTool, input: Bag): Promise<{ text: string; ok: boolean }> => {
-    const id = await claim(called(tool.definition.name), input);
+    const id = await claim(called(exposedToolName(tool, offering)), input);
     const owner = tool.owner ?? '';
     const scope = scopeOfCall(id) ?? mainScope;
     const fullName = tool.definition.name;
