@@ -328,7 +328,6 @@ it('gives a confirmation card the row line, not the CLI\'s title', async () => {
 
 const asBag = (value: unknown): Bag => (typeof value === 'object' && value !== null ? value as Bag : {});
 type BeforeToolHook = (input: Bag, toolUseID: string | undefined, options: { signal: AbortSignal }) => Promise<Bag>;
-// Match the case-sensitive server and operation name reported by the live AHP tool call.
 const jiraTool = 'mcp__claude_ai_Atlassian__editJiraIssue';
 const jiraServers = { claude_ai_Atlassian: { type: 'http', url: 'https://mcp.atlassian.com/v1' } };
 
