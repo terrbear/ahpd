@@ -328,10 +328,8 @@ it('gives a confirmation card the row line, not the CLI\'s title', async () => {
 
 const asBag = (value: unknown): Bag => (typeof value === 'object' && value !== null ? value as Bag : {});
 type BeforeToolHook = (input: Bag, toolUseID: string | undefined, options: { signal: AbortSignal }) => Promise<Bag>;
-// The private Sentry attachment was unavailable by session id here, so this
-// regression covers the reported external Atlassian editJiraIssue operation shape.
-const jiraTool = 'mcp__atlassian__editJiraIssue';
-const jiraServers = { atlassian: { type: 'http', url: 'https://mcp.atlassian.com/v1' } };
+const jiraTool = 'mcp__claude_ai_Atlassian__editJiraIssue';
+const jiraServers = { claude_ai_Atlassian: { type: 'http', url: 'https://mcp.atlassian.com/v1' } };
 
 function jiraPreToolUse(): { hook: BeforeToolHook; timeout: number | undefined } {
   const hooks = asBag(sdk.queryOptions?.hooks);
@@ -408,6 +406,35 @@ it('awaits a fresh AHP confirmation on each of 15 Atlassian issue edits, despite
     expect(hookDecision(await result)).toBe('allow');
   }
   expect(sent.filter((one) => one.type === 'chat/toolCallReady' && String(one.toolCallId).startsWith('toolu_atlassian_'))).toHaveLength(15);
+});
+
+it('recognizes issueIdOrKey on the case-sensitive managed Atlassian edit tool and shows the full proposal', async () => {
+  const { session, sent } = await live([], undefined, {
+    settings: { permissionMode: 'auto', permissions: { allow: [jiraTool] } },
+    mcpServers: jiraServers,
+  });
+  const { hook } = jiraPreToolUse();
+  const toolUseId = 'toolu_managed_atlassian_edit';
+  const payload = {
+    cloudId: 'https://trustgrid.atlassian.net',
+    issueIdOrKey: 'WOR-999999999',
+    fields: { summary: 'ahpd guard smoke test' },
+  };
+  let finished = false;
+  const before = sent.length;
+  const pending = hook({
+    hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_input: payload, tool_use_id: toolUseId,
+  }, undefined, { signal: new AbortController().signal }).then((value) => { finished = true; return value; });
+  await settle();
+  expect(finished).toBe(false);
+  const request = requestFor(sent, toolUseId, before);
+  const confirmation = asBag(request?.toolCall);
+  expect(confirmation.confirmationTitle).toBe(`Confirm ${jiraTool} for WOR-999999999?`);
+  expect(JSON.parse(confirmation.toolInput as string)).toEqual(payload);
+  expect(confirmation._meta).toMatchObject({ requiresHumanConfirmation: true });
+
+  session.confirm(toolUseId, true);
+  expect(hookDecision(await pending)).toBe('allow');
 });
 
 it('keeps each of 15 sequential Jira edits pending without a human, then denies on hook abort', async () => {

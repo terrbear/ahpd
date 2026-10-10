@@ -899,7 +899,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     if (!mutates || !issueRelated) return undefined;
 
     const keys = new Set<string>();
-    const keyField = /^(?:issuekey|issuekeys|targetissuekey|targetissuekeys|key)$/;
+    const keyField = /^(?:issuekey|issuekeys|issueidorkey|targetissuekey|targetissuekeys|key)$/;
     const issueKey = /^[A-Z][A-Z0-9]*-\d+$/i;
     const addKeys = (value: unknown): void => {
       const candidates = Array.isArray(value) ? value : [value];
