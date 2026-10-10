@@ -11,6 +11,7 @@ import { flagSettingsOf, optionDefaults, presetValues, queryOptionsOf } from './
 import type { ActiveTurn, McpServerState, StringOrMarkdown, ToolCallCompletedState, ToolCallRunningState, ToolResultContent, ToolResultTerminalContent, ToolResultTextContent } from '@microsoft/agent-host-protocol';
 import { Status, idOf, tail } from '@ahpd/sdk';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
+import { spawnFailure } from './spawn.js';
 import type { Asked, Spawned } from './spawn.js';
 
 /**
@@ -3135,7 +3136,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         }
       }
     } catch (error) {
-      failed = error instanceof Error ? error.message : String(error);
+      failed = spawnFailure(error)?.message ?? (error instanceof Error ? error.message : String(error));
       /*
        * The CLI is gone, and it is not coming back on this session.
        *

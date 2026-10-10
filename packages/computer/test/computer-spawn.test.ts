@@ -61,6 +61,33 @@ it('delivers a port that rejected as an error', async () => {
   expect(error.message).toBe('docker is not running');
 });
 
+it('reports an OS spawn errno without executable details', async () => {
+  const held = spawnInside(asked, async () => ({ command: 'ahpd-intentionally-missing-binary-3106', args: [], env: {} }), 'computer://box');
+  const error = await new Promise<Error>((resolve) => { held.once('error', resolve); });
+  expect(error.message).toBe('Claude Code process could not start (ENOENT)');
+  expect((error as NodeJS.ErrnoException).code).toBe('ENOENT');
+});
+
+it('replays a fast spawn failure to a late listener without leaking arguments', async () => {
+  const cause = Object.assign(new Error('spawn ENOENT'), {
+    code: 'ENOENT',
+    syscall: 'spawn /private/native/claude',
+    path: '/private/native/claude',
+    spawnargs: ['--api-key', 'must-not-escape'],
+  });
+  const held = spawnInside(asked, async () => { throw cause; }, 'computer://box');
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+  const error = await new Promise<Error>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('the spawn error was not replayed')), 100);
+    held.once('error', (given) => { clearTimeout(timer); resolve(given); });
+  });
+  expect(error.message).toBe('Claude Code process could not start (ENOENT)');
+  expect((error as NodeJS.ErrnoException).code).toBe('ENOENT');
+  expect(error.message).not.toContain('/private/native/claude');
+  expect(error.message).not.toContain('--api-key');
+  expect(error.message).not.toContain('must-not-escape');
+});
+
 it('applies a kill that arrived before the child did', async () => {
   let release: (() => void) | undefined;
   const waited = new Promise<void>((resolve) => { release = resolve; });
