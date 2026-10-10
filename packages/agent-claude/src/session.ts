@@ -569,14 +569,17 @@ const shaped = (property: object): z.ZodTypeAny => {
   return value;
 };
 
+const isAntonAHPClient = (owner: string | undefined): owner is string =>
+  owner !== undefined && /^anton-ahp_[0-9A-Za-z]{27}$/.test(owner);
+
 const exposedToolName = (tool: BoundTool, all: BoundTool[]): string => {
   const owner = tool.owner;
-  if (owner === undefined || !owner.startsWith('anton-')) return tool.definition.name;
+  if (!isAntonAHPClient(owner)) return tool.definition.name;
   const prefix = `${owner}__`;
   if (!tool.definition.name.startsWith(prefix)) return tool.definition.name;
   const shortName = tool.definition.name.slice(prefix.length);
   const aliases = all.filter((one) => {
-    if (one.owner === undefined || !one.owner.startsWith('anton-')) return false;
+    if (!isAntonAHPClient(one.owner)) return false;
     const onePrefix = `${one.owner}__`;
     return one.definition.name.startsWith(onePrefix) && one.definition.name.slice(onePrefix.length) === shortName;
   });

@@ -58,7 +58,8 @@ const until = async (check: () => boolean): Promise<void> => {
 
 it('asks the owning client to execute an announced Claude tool and removes the request after completion', async () => {
   const sent: { channel: string; action: Bag }[] = [];
-  const owner = 'anton-client';
+  const owner = 'anton-ahp_0ujtsYcgvSTl8PAuAdqWYSMnLOv';
+  const unrelatedOwner = 'anton-unrelated-client';
   const input = { code: 'return anton.help()' };
   const antonTools = ['anton_codemode', 'launch_shell', 'shell_write', 'shell_read', 'spawn_teammate'];
   const session = createSession({
@@ -73,6 +74,7 @@ it('asks the owning client to execute an announced Claude tool and removes the r
       } as BoundTool)),
       { definition: { name: `${owner}__anton_debug` }, owner } as BoundTool,
       { definition: { name: 'anton_debug' }, owner: 'other-client' } as BoundTool,
+      { definition: { name: `${unrelatedOwner}__anton_codemode` }, owner: unrelatedOwner } as BoundTool,
       { definition: { name: 'other-client__git_status' }, owner: 'other-client' } as BoundTool,
     ],
   });
@@ -80,7 +82,7 @@ it('asks the owning client to execute an announced Claude tool and removes the r
   await until(() => sdk.server?.tools.some((tool) => tool.name === 'anton_codemode') === true);
   const names = sdk.server?.tools.map((tool) => tool.name) ?? [];
   expect(names).toEqual(expect.arrayContaining(antonTools));
-  expect(names).toEqual(expect.arrayContaining(['anton-client__anton_debug', 'anton_debug', 'other-client__git_status']));
+  expect(names).toEqual(expect.arrayContaining(['anton-ahp_0ujtsYcgvSTl8PAuAdqWYSMnLOv__anton_debug', 'anton_debug', 'anton-unrelated-client__anton_codemode', 'other-client__git_status']));
   const tool = sdk.server?.tools.find((one) => one.name === 'anton_codemode');
   if (!tool) throw new Error('client tool was not offered');
   const result = tool.handler(input);
