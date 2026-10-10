@@ -130,6 +130,8 @@ interface PendingInput {
   options?: Bag[];
   /** The SDK's `suggestions` for this call, returned as `updatedPermissions` when "always" is picked. */
   suggestions?: unknown[];
+  /** Detaches a hook timeout/abort listener when this request is settled. */
+  clearAbort?: () => void;
   settle(result: { behavior: 'allow'; updatedInput: Bag; updatedPermissions?: unknown[] } | { behavior: 'deny'; message: string }): void;
 }
 
@@ -864,6 +866,63 @@ export function createSession(options: ClaudeSessionOptions): Session {
    */
   const serverOf = (toolName: string): string | undefined => /^mcp__(.+?)__/.exec(toolName)?.[1];
 
+  /**
+   * Existing-issue writes on a Jira/Atlassian MCP server are never covered by
+   * a remembered tool permission. A version search is not an authorization
+   * scope: the exact issue key(s) and proposed payload have to be shown for
+   * every individual write.
+   */
+  const jiraIssueMutation = (toolName: string, raw: unknown, servers: Record<string, Bag>): { keys: string[] } | undefined => {
+    const named = /^mcp__(.+?)__(.+)$/.exec(toolName);
+    const serverName = named?.[1];
+    const operation = named?.[2];
+    if (serverName === undefined || operation === undefined) return undefined;
+    const config = servers[serverName];
+    let configuredAsJira = /jira|atlassian/i.test(serverName) || /jira|atlassian/i.test(operation);
+    if (!configuredAsJira && config !== undefined) {
+      try { configuredAsJira = /jira|atlassian/i.test(JSON.stringify(config)); }
+      catch { /* A malformed config cannot establish that this is a Jira server. */ }
+    }
+    if (!configuredAsJira) return undefined;
+
+    const words = operation.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const operationName = words.filter((word) => word !== 'jira' && word !== 'atlassian').join('_');
+    const action = words.find((word) => word !== 'jira' && word !== 'atlassian');
+    // Exempt only the actual new-ticket operation. In particular, creating an
+    // issue link is a write to existing tickets, not issue creation.
+    if (/^create_issue$/.test(operationName)) return undefined;
+    // Explicitly read-only operations keep their existing permission behavior.
+    if (['get', 'list', 'search', 'find', 'read', 'fetch', 'lookup', 'describe', 'query', 'view', 'download'].includes(action ?? '')) return undefined;
+
+    const mutates = ['create', 'edit', 'update', 'set', 'transition', 'assign', 'add', 'delete', 'remove', 'resolve', 'close', 'reopen', 'link', 'unlink', 'attach', 'label', 'move', 'comment', 'worklog', 'vote', 'watch'].some((word) => words.includes(word));
+    const issueRelated = ['issue', 'comment', 'worklog', 'link', 'attachment', 'label', 'assignee', 'status', 'resolution', 'priority', 'sprint', 'epic', 'watcher', 'vote'].some((word) => words.includes(word));
+    if (!mutates || !issueRelated) return undefined;
+
+    const keys = new Set<string>();
+    const keyField = /^(?:issuekey|issuekeys|targetissuekey|targetissuekeys|key)$/;
+    const issueKey = /^[A-Z][A-Z0-9]*-\d+$/i;
+    const addKeys = (value: unknown): void => {
+      const candidates = Array.isArray(value) ? value : [value];
+      for (const candidate of candidates) {
+        if (typeof candidate === 'string' && issueKey.test(candidate.trim())) keys.add(candidate.trim());
+      }
+    };
+    const addDirectTargets = (value: unknown): void => {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return;
+      for (const [field, target] of Object.entries(value)) {
+        if (keyField.test(field.replace(/[^a-z0-9]/gi, '').toLowerCase())) addKeys(target);
+      }
+    };
+    const root = bag(raw);
+    addDirectTargets(root);
+    // A few MCP schemas wrap the target as { issue: { key: ... } }; accept
+    // only that one documented wrapper level, never fields/comment/search data.
+    if (typeof root.issue === 'string') addKeys(root.issue);
+    else if (Array.isArray(root.issue)) root.issue.forEach(addDirectTargets);
+    else addDirectTargets(root.issue);
+    return { keys: [...keys] };
+  };
+
   /*
    * The tools on offer, which is not a fixed list.
    *
@@ -1163,6 +1222,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       for (const one of [...pending.values()]) {
         if (one.entry.kind !== 'toolConfirmation' || str(bag(one.entry.toolCall).toolCallId) !== id) continue;
         pending.delete(one.id);
+        one.clearAbort?.();
         one.settle({ behavior: 'deny', message: 'The turn ended before this ran' });
         inputNeededRemoved(one.id);
       }
@@ -1201,6 +1261,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     for (const one of [...pending.values()]) {
       if (one.entry.chat !== scope.chat.uri) continue;
       pending.delete(one.id);
+      one.clearAbort?.();
       one.settle({ behavior: 'deny', message: 'The subagent finished' });
       inputNeededRemoved(one.id);
     }
@@ -2079,6 +2140,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const canUseTool = async (toolName: string, raw: Bag, asked?: Bag): Promise<unknown> => {
+    const scopeApproval = jiraIssueMutation(toolName, raw, declared);
+    if (scopeApproval?.keys.length === 0) {
+      return { behavior: 'deny', message: 'AHP blocked this Jira/Atlassian mutation: include the exact existing issue key in the tool input, then retry.' };
+    }
     /*
      * Answered from the lists, before anybody is asked.
      *
@@ -2090,8 +2155,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * for a decision made before the turn began.
      */
     const already = settled(toolName);
-    if (already === 'allow') return { behavior: 'allow', updatedInput: raw };
+    if (already === 'allow' && scopeApproval === undefined) return { behavior: 'allow', updatedInput: raw };
     if (already === 'deny') return { behavior: 'deny', message: `${toolName} is denied for this session` };
+    const abortSignal = bag(asked).signal as AbortSignal | undefined;
+    if (abortSignal?.aborted) return { behavior: 'deny', message: 'AHP confirmation was aborted before it was requested' };
     return await new Promise((settle) => {
       const about = bag(asked);
       /*
@@ -2162,17 +2229,24 @@ export function createSession(options: ClaudeSessionOptions): Session {
         return;
       }
 
-      const input = toolInputOf(toolName, raw);
+      const input = scopeApproval === undefined ? toolInputOf(toolName, raw) : JSON.stringify(raw, null, 2);
       const displayName = str(about.displayName) ?? toolName;
-      // The card reads the row's line; the CLI's own sentence is its title.
-      const invocationMessage = lineOf(toolName, raw);
+      // A scoped Jira card names its exact targets and exposes the entire
+      // proposed payload below; a short search-derived line is not enough.
+      const invocationMessage = scopeApproval === undefined
+        ? lineOf(toolName, raw)
+        : `Jira/Atlassian mutation for ${scopeApproval.keys.join(', ')}. Full proposed values are shown in the tool input; approval applies to this call only.`;
       pastLines.set(id, pastLineOf(toolName, raw));
-      const confirmationTitle = str(about.title) ?? `Run ${displayName}?`;
+      const confirmationTitle = scopeApproval === undefined
+        ? str(about.title) ?? `Run ${displayName}?`
+        : `Confirm ${displayName} for ${scopeApproval.keys.join(', ')}?`;
 
       // The call the assistant message opened, if it arrived first. Which of
       // the two comes first is the CLI's business; either order is one call.
       const held = scope.parts.get(id);
-      const meta = toolMetaOf(toolName);
+      const meta = scopeApproval === undefined
+        ? toolMetaOf(toolName)
+        : { ...bag(bag(held?.toolCall)._meta), ...(toolMetaOf(toolName) ?? {}), requiresHumanConfirmation: true };
       const call = held ? bag(held.toolCall) : {
         toolCallId: id,
         toolName,
@@ -2180,6 +2254,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         ...(input !== undefined ? { toolInput: input } : {}),
         ...(meta ? { _meta: meta } : {}),
       } as Bag;
+      if (scopeApproval !== undefined) call._meta = { ...bag(call._meta), ...meta };
       /*
        * The choices, when the SDK suggested a permission to keep.
        *
@@ -2187,7 +2262,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
        * suggestion there is nothing to keep and the call is approve or deny.
        */
       const suggestions = list(about.suggestions);
-      const options: Bag[] | undefined = suggestions.length === 0 ? undefined : [
+      const options: Bag[] | undefined = scopeApproval !== undefined || suggestions.length === 0 ? undefined : [
         { id: 'allow-once', label: 'Allow once', kind: 'approve', group: 1 },
         { id: 'allow-always', label: keptLabel(suggestions), kind: 'approve', group: 1 },
         { id: 'deny', label: 'Deny', kind: 'deny', group: 2 },
@@ -2195,10 +2270,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // A call still streaming has only its half-written json, and the
       // assistant message that would complete it skips a call no longer
       // streaming: the whole input is given here, as the action gives it.
-      if (held && str(call.status) === 'streaming') {
-        delete call.partialInput;
-        if (input !== undefined) call.toolInput = input;
-      }
+      if (held && str(call.status) === 'streaming') delete call.partialInput;
+      if (scopeApproval !== undefined || (held && str(call.status) === 'streaming')) call.toolInput = input;
       call.status = 'pending-confirmation';
       call.confirmationTitle = confirmationTitle;
       if (options !== undefined) call.options = options;
@@ -2215,6 +2288,43 @@ export function createSession(options: ClaudeSessionOptions): Session {
           ...(meta ? { _meta: meta } : {}),
         });
       }
+      // `chat` and `turnId` are both required on a tool confirmation and
+      // neither was sent.
+      const entry: Bag = { id, chat: where, kind: 'toolConfirmation', turnId: str(turn.id) ?? '', toolCall: call };
+      const pendingInput: PendingInput = {
+        id,
+        entry,
+        asked: new Map(),
+        answers: new Map(),
+        ...(options !== undefined ? { options, suggestions } : {}),
+        settle: (result) => settle(result.behavior === 'allow'
+          ? { behavior: 'allow', updatedInput: raw, ...(scopeApproval !== undefined || result.updatedPermissions === undefined ? {} : { updatedPermissions: result.updatedPermissions }) }
+          : result),
+      };
+      pending.set(id, pendingInput);
+      let requestPublished = false;
+      const abort = (): void => {
+        const waiting = pending.get(id);
+        if (waiting !== pendingInput) return;
+        pending.delete(id);
+        waiting.clearAbort?.();
+        call.status = 'cancelled';
+        call.reason = 'The Jira confirmation was aborted or timed out';
+        if (requestPublished) inputNeededRemoved(id);
+        waiting.settle({ behavior: 'deny', message: 'AHP confirmation timed out or was aborted' });
+        touch();
+      };
+      if (abortSignal !== undefined) {
+        pendingInput.clearAbort = () => abortSignal.removeEventListener('abort', abort);
+        abortSignal.addEventListener('abort', abort, { once: true });
+        // Abort may race the initial check above. Recheck after subscribing and
+        // before emitting either the confirmation card or its pending request.
+        if (abortSignal.aborted) {
+          abort();
+          return;
+        }
+      }
+      requestPublished = true;
       emitOn(scope, {
         type: 'chat/toolCallReady',
         turnId: turn.id,
@@ -2223,25 +2333,52 @@ export function createSession(options: ClaudeSessionOptions): Session {
         confirmationTitle,
         ...(input !== undefined ? { toolInput: input } : {}),
         ...(options !== undefined ? { options } : {}),
+        ...(scopeApproval !== undefined ? { _meta: meta } : {}),
       });
-
-      if (scope === mainScope) doing(`Waiting on you: ${displayName}`);
-      // `chat` and `turnId` are both required on a tool confirmation and
-      // neither was sent.
-      const entry: Bag = { id, chat: where, kind: 'toolConfirmation', turnId: str(turn.id) ?? '', toolCall: call };
-      pending.set(id, {
-        id,
-        entry,
-        asked: new Map(),
-        answers: new Map(),
-        ...(options !== undefined ? { options, suggestions } : {}),
-        settle: (result) => settle(result.behavior === 'allow'
-          ? { behavior: 'allow', updatedInput: raw, ...(result.updatedPermissions === undefined ? {} : { updatedPermissions: result.updatedPermissions }) }
-          : result),
-      });
+      // An abort can be delivered synchronously by an emitter; do not recreate
+      // its pending card after the abort handler has removed it.
+      if (!pending.has(id)) return;
       inputNeededSet(entry);
+      if (scope === mainScope) doing(`Waiting on you: ${displayName}`);
       touch();
     });
+  };
+
+  /**
+   * Await the AHP human answer in PreToolUse itself, then return allow/deny to
+   * the SDK. This does not depend on `canUseTool` being called by the SDK, so
+   * auto mode and allowedTools cannot bypass the scoped confirmation.
+   */
+  const requireJiraScope: HookCallback = async (input, _toolUseID, { signal }) => {
+    if (input.hook_event_name !== 'PreToolUse') return {};
+    const toolName = str(input.tool_name);
+    if (toolName === undefined) return {};
+    const scope = jiraIssueMutation(toolName, input.tool_input, declared);
+    if (scope === undefined) return {};
+    if (scope.keys.length === 0) {
+      return { hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: 'AHP blocked this Jira/Atlassian mutation: include the exact existing issue key in the tool input, then retry.',
+      } };
+    }
+    let answer: Bag;
+    try {
+      answer = bag(await canUseTool(toolName, bag(input.tool_input), {
+        toolUseID: input.tool_use_id,
+        displayName: toolName,
+        signal,
+      }));
+    }
+    catch { answer = { behavior: 'deny' }; }
+    const approved = !signal.aborted && answer.behavior === 'allow';
+    return { hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: approved ? 'allow' : 'deny',
+      permissionDecisionReason: approved
+        ? `AHP human approved this call for ${scope.keys.join(', ')}.`
+        : 'AHP human confirmation was denied.',
+    } };
   };
 
   // ------------------------------------------------------------------ the run
@@ -2329,7 +2466,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // the others, and a second way in was a second thing to keep in step.
       ...(typeof settings.permissionMode === 'string' ? { permissionMode: settings.permissionMode } : {}),
       // Before every shell command, while a client has a script in force.
-      hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [sourceFirst] }] },
+      hooks: { PreToolUse: [
+        { matcher: 'Bash', hooks: [sourceFirst] },
+        { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
+      ] },
       /*
        * The lists, at the moment the query is built.
        *
@@ -3612,6 +3752,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // were open used to leave the other tool waiting for ever.
       for (const one of [...pending.values()]) {
         pending.delete(one.id);
+        one.clearAbort?.();
         one.settle({ behavior: 'deny', message: 'The turn was stopped' });
         inputNeededRemoved(one.id);
       }
@@ -3678,6 +3819,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       if (!held) return;
       const settle = held.settle;
       pending.delete(held.id);
+      held.clearAbort?.();
       inputNeededRemoved(held.id);
       // The call's own conversation, so an approval given in a worker's chat
       // is said back there rather than on the lead chat.
@@ -3816,6 +3958,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const held = pending.get(requestId);
       if (!held) return;
       pending.delete(requestId);
+      held.clearAbort?.();
       inputNeededRemoved(requestId);
 
       if (!accepted) {
@@ -3867,6 +4010,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       wake?.();
       for (const one of [...pending.values()]) {
         pending.delete(one.id);
+        one.clearAbort?.();
         one.settle({ behavior: 'deny', message: 'The session was disposed' });
       }
       releaseCalls('The session was disposed');

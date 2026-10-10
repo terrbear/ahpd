@@ -24,32 +24,36 @@ const sdk = vi.hoisted(() => ({
   /** What the stream waits on after its frames, so a test can keep it open. */
   hold: Promise.resolve() as Promise<void>,
   canUseTool: undefined as undefined | ((name: string, input: Record<string, unknown>, about?: Record<string, unknown>) => Promise<unknown>),
+  queryOptions: undefined as Record<string, unknown> | undefined,
 }));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   createSdkMcpServer: (given: Record<string, unknown>) => ({ type: 'sdk', name: given.name, tools: given.tools }),
   getSessionMessages: async () => sdk.frames,
-  query: ({ options }: { options: Record<string, unknown> }) => ({
-    async *[Symbol.asyncIterator]() {
-      sdk.canUseTool = options.canUseTool as typeof sdk.canUseTool;
-      for (const frame of sdk.frames) yield frame;
-      await sdk.hold;
-    },
-    interrupt: async () => {},
-    setPermissionMode: async () => {},
-    setModel: async () => {},
-    applyFlagSettings: async () => {},
-    toggleMcpServer: async () => {},
-    reconnectMcpServer: async () => {},
-    setMcpServers: async () => {},
-    initializationResult: async () => ({}),
-    mcpServerStatus: async () => [],
-    reloadSkills: async () => ({ skills: [] }),
-    reloadPlugins: async () => ({ plugins: [] }),
-    supportedModels: async () => [],
-    streamInput: async () => {},
-    close: () => {},
-  }),
+  query: ({ options }: { options: Record<string, unknown> }) => {
+    sdk.queryOptions = options;
+    return {
+      async *[Symbol.asyncIterator]() {
+        sdk.canUseTool = options.canUseTool as typeof sdk.canUseTool;
+        for (const frame of sdk.frames) yield frame;
+        await sdk.hold;
+      },
+      interrupt: async () => {},
+      setPermissionMode: async () => {},
+      setModel: async () => {},
+      applyFlagSettings: async () => {},
+      toggleMcpServer: async () => {},
+      reconnectMcpServer: async () => {},
+      setMcpServers: async () => {},
+      initializationResult: async () => ({}),
+      mcpServerStatus: async () => [],
+      reloadSkills: async () => ({ skills: [] }),
+      reloadPlugins: async () => ({ plugins: [] }),
+      supportedModels: async () => [],
+      streamInput: async () => {},
+      close: () => {},
+    };
+  },
 }));
 
 const { createSession } = await import('../src/session.js');
@@ -97,7 +101,7 @@ const settle = async (times = 30): Promise<void> => {
 async function live(frames: Record<string, unknown>[] = [{
   type: 'assistant', parent_tool_use_id: null, uuid: 'a1',
   message: { id: 'msg_1', role: 'assistant', content: calls },
-}], asking?: () => void): Promise<{ held: Map<string, Bag>; ready: Map<string, Bag> }> {
+}], asking?: () => void, options: { settings?: Bag; mcpServers?: Record<string, Bag> } = {}): Promise<{ held: Map<string, Bag>; ready: Map<string, Bag>; session: ReturnType<typeof createSession>; sent: Bag[] }> {
   sdk.frames = frames;
   const sent: Bag[] = [];
   const session = createSession({
@@ -105,6 +109,7 @@ async function live(frames: Record<string, unknown>[] = [{
     chatUri: 'ahp-chat:/input',
     cwd: mkdtempSync(join(tmpdir(), 'ahpd-input-')),
     emit: (_channel, action) => { sent.push(action as Bag); },
+    ...options,
   });
   await settle();
   if (asking !== undefined) {
@@ -124,7 +129,7 @@ async function live(frames: Record<string, unknown>[] = [{
       held.set(call.toolCallId as string, call);
     }
   }
-  return { held, ready };
+  return { held, ready, session, sent };
 }
 
 /** The same calls read back from a transcript, with any frames that follow them. */
@@ -319,4 +324,212 @@ it('gives a confirmation card the row line, not the CLI\'s title', async () => {
   expect(ready.get('toolu_card')?.invocationMessage).toBe('Clear scratch directory');
   expect(held.get('toolu_card')?.confirmationTitle).toBe('Claude wants to run rm -rf /tmp/scratch');
   expect(held.get('toolu_card')?.toolInput).toBe('rm -rf /tmp/scratch');
+});
+
+const asBag = (value: unknown): Bag => (typeof value === 'object' && value !== null ? value as Bag : {});
+type BeforeToolHook = (input: Bag, toolUseID: string | undefined, options: { signal: AbortSignal }) => Promise<Bag>;
+// The private Sentry attachment was unavailable by session id here, so this
+// regression covers the reported external Atlassian editJiraIssue operation shape.
+const jiraTool = 'mcp__atlassian__editJiraIssue';
+const jiraServers = { atlassian: { type: 'http', url: 'https://mcp.atlassian.com/v1' } };
+
+function jiraPreToolUse(): { hook: BeforeToolHook; timeout: number | undefined } {
+  const hooks = asBag(sdk.queryOptions?.hooks);
+  const groups = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse.map(asBag) : [];
+  const group = groups.find((entry) => entry.matcher === 'mcp__.*');
+  const callbacks = Array.isArray(group?.hooks) ? group.hooks : [];
+  return { hook: callbacks[0] as BeforeToolHook, timeout: typeof group?.timeout === 'number' ? group.timeout : undefined };
+}
+
+function requestFor(sent: Bag[], toolUseId: string, from = 0): Bag | undefined {
+  const action = sent.slice(from).find((one) => one.type === 'session/inputNeededSet'
+    && asBag(one.request).kind === 'toolConfirmation'
+    && asBag(asBag(one.request).toolCall).toolCallId === toolUseId);
+  return action === undefined ? undefined : asBag(action.request);
+}
+
+function callFromSnapshot(session: ReturnType<typeof createSession>, toolUseId: string): Bag | undefined {
+  const state = asBag(session.chatState());
+  const turns = [
+    ...(Array.isArray(state.turns) ? state.turns.map(asBag) : []),
+    ...(state.activeTurn === undefined ? [] : [asBag(state.activeTurn)]),
+  ];
+  for (const turn of turns) {
+    const parts = Array.isArray(turn.responseParts) ? turn.responseParts.map(asBag) : [];
+    const part = parts.find((entry) => entry.kind === 'toolCall' && asBag(entry.toolCall).toolCallId === toolUseId);
+    if (part) return asBag(part.toolCall);
+  }
+  return undefined;
+}
+
+const hookDecision = (output: Bag): string | undefined => asBag(output.hookSpecificOutput).permissionDecision as string | undefined;
+
+it('awaits a fresh AHP confirmation on each of 15 Atlassian issue edits, despite auto mode and an allowedTools rule', async () => {
+  const { session, sent } = await live([], undefined, {
+    settings: { permissionMode: 'auto', permissions: { allow: [jiraTool] } },
+    mcpServers: jiraServers,
+  });
+  const { hook, timeout } = jiraPreToolUse();
+  expect(sdk.queryOptions?.permissionMode).toBe('auto');
+  expect(sdk.queryOptions?.allowedTools).toContain(jiraTool);
+  expect(timeout).toBe(1800);
+  // A version-only search may supply candidates, but it creates no write scope.
+  expect(await hook({
+    hook_event_name: 'PreToolUse', tool_name: 'mcp__atlassian__searchJiraIssuesUsingJql', tool_use_id: 'toolu_version_search',
+    tool_input: { jql: 'project = WOR AND fixVersion = "2026.10"' },
+  }, undefined, { signal: new AbortController().signal })).toEqual({});
+  expect(sent.some((one) => one.type === 'session/inputNeededSet')).toBe(false);
+
+  for (let index = 0; index < 15; index++) {
+    const toolUseId = `toolu_atlassian_${index + 1}`;
+    const payload = {
+      issueKey: `WOR-${501 + index}`,
+      fields: { summary: `Scoped edit ${index + 1}`, description: `Proposed full description ${index + 1}` },
+    };
+    let finished = false;
+    const before = sent.length;
+    const result = hook({ hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_input: payload, tool_use_id: toolUseId }, undefined, { signal: new AbortController().signal })
+      .then((value) => { finished = true; return value; });
+    await settle();
+    expect(finished, `call ${index + 1} waits for its own human answer`).toBe(false);
+    const request = requestFor(sent, toolUseId, before);
+    expect(request, `call ${index + 1} has a distinct pending confirmation`).toBeDefined();
+    const confirmation = asBag(request?.toolCall);
+    expect(confirmation.confirmationTitle).toBe(`Confirm ${jiraTool} for WOR-${501 + index}?`);
+    expect(confirmation.invocationMessage).toContain(`WOR-${501 + index}`);
+    expect(JSON.parse(confirmation.toolInput as string)).toEqual(payload);
+    expect(confirmation).not.toHaveProperty('options');
+    expect(confirmation._meta).toMatchObject({ requiresHumanConfirmation: true });
+    const ready = sent.slice(before).find((one) => one.type === 'chat/toolCallReady' && one.toolCallId === toolUseId);
+    expect(ready?._meta).toMatchObject({ requiresHumanConfirmation: true });
+    expect(callFromSnapshot(session, toolUseId)?._meta).toMatchObject({ requiresHumanConfirmation: true });
+
+    session.confirm(toolUseId, true);
+    expect(hookDecision(await result)).toBe('allow');
+  }
+  expect(sent.filter((one) => one.type === 'chat/toolCallReady' && String(one.toolCallId).startsWith('toolu_atlassian_'))).toHaveLength(15);
+});
+
+it('keeps each of 15 sequential Jira edits pending without a human, then denies on hook abort', async () => {
+  const { sent } = await live([], undefined, { settings: { permissionMode: 'auto' }, mcpServers: jiraServers });
+  const { hook } = jiraPreToolUse();
+  expect(await hook({
+    hook_event_name: 'PreToolUse', tool_name: 'mcp__atlassian__searchJiraIssuesUsingJql', tool_use_id: 'toolu_search_only',
+    tool_input: { jql: 'fixVersion = "2026.10"' },
+  }, undefined, { signal: new AbortController().signal })).toEqual({});
+
+  for (let index = 0; index < 15; index++) {
+    const toolUseId = `toolu_unapproved_${index + 1}`;
+    const controller = new AbortController();
+    let finished = false;
+    const before = sent.length;
+    const pending = hook({
+      hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_use_id: toolUseId,
+      tool_input: { issueKey: `WOR-${601 + index}`, fields: { summary: `Unapproved edit ${index + 1}` } },
+    }, undefined, { signal: controller.signal }).then((value) => { finished = true; return value; });
+    await settle();
+    expect(finished, `target ${index + 1} remains blocked without a human`).toBe(false);
+    expect(requestFor(sent, toolUseId, before)).toBeDefined();
+    controller.abort();
+    expect(hookDecision(await pending)).toBe('deny');
+  }
+  expect(sent.filter((one) => one.type === 'session/inputNeededSet' && String(asBag(one.request).id).startsWith('toolu_unapproved_'))).toHaveLength(15);
+  expect(sent.filter((one) => one.type === 'session/inputNeededRemoved' && String(one.id).startsWith('toolu_unapproved_'))).toHaveLength(15);
+});
+
+it('does not let a settled allow permission skip AHP confirmation in canUseTool', async () => {
+  const { session, sent } = await live([], undefined, {
+    settings: { permissionMode: 'auto', permissions: { allow: [jiraTool] } },
+    mcpServers: jiraServers,
+  });
+  expect(sdk.queryOptions?.allowedTools).toContain(jiraTool);
+  const payload = { issueKey: 'WOR-700', fields: { summary: 'Explicitly reviewed' } };
+  let finished = false;
+  const result = sdk.canUseTool?.(jiraTool, payload, { toolUseID: 'toolu_settled_allow', suggestions: [{ type: 'addRules' }] })
+    .then((value) => { finished = true; return asBag(value); });
+  expect(result).toBeDefined();
+  await settle();
+  expect(finished).toBe(false);
+  const request = requestFor(sent, 'toolu_settled_allow');
+  expect(asBag(request?.toolCall)).not.toHaveProperty('options');
+  expect(asBag(request?.toolCall)._meta).toMatchObject({ requiresHumanConfirmation: true });
+  session.confirm('toolu_settled_allow', true);
+  expect(asBag(await result)._meta).toBeUndefined();
+  expect(asBag(await result).behavior).toBe('allow');
+});
+
+it('denies Jira mutations when keys appear only inside fields, comments, or search results', async () => {
+  const { sent } = await live([], undefined, { mcpServers: jiraServers });
+  const { hook } = jiraPreToolUse();
+  const output = await hook({
+    hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_use_id: 'toolu_hidden_key',
+    tool_input: { fields: { summary: 'A change for WOR-901' }, comment: 'Found WOR-901 in search', searchResults: [{ key: 'WOR-901' }] },
+  }, undefined, { signal: new AbortController().signal });
+  expect(hookDecision(output)).toBe('deny');
+  expect(sent.some((one) => one.type === 'session/inputNeededSet')).toBe(false);
+  expect(sent.some((one) => one.type === 'chat/toolCallReady')).toBe(false);
+});
+
+it('preserves Jira reads and exact new-issue creation while guarding create_issue_link', async () => {
+  const { session, sent } = await live([], undefined, { mcpServers: jiraServers });
+  const { hook } = jiraPreToolUse();
+  const invoke = (name: string, input: Bag, id: string) => hook({ hook_event_name: 'PreToolUse', tool_name: name, tool_input: input, tool_use_id: id }, undefined, { signal: new AbortController().signal });
+  expect(await invoke('mcp__atlassian__getJiraIssue', {}, 'toolu_read')).toEqual({});
+  expect(await invoke('mcp__atlassian__createJiraIssue', { fields: { summary: 'New issue' } }, 'toolu_create')).toEqual({});
+  const payload = { issueKey: 'WOR-10', targetIssueKey: 'WOR-11', linkType: 'Blocks' };
+  let finished = false;
+  const before = sent.length;
+  const link = invoke('mcp__atlassian__create_issue_link', payload, 'toolu_link').then((value) => { finished = true; return value; });
+  await settle();
+  expect(finished).toBe(false);
+  const request = requestFor(sent, 'toolu_link', before);
+  const confirmation = asBag(request?.toolCall);
+  expect(confirmation.confirmationTitle).toBe('Confirm mcp__atlassian__create_issue_link for WOR-10, WOR-11?');
+  expect(JSON.parse(confirmation.toolInput as string)).toEqual(payload);
+  expect(confirmation._meta).toMatchObject({ requiresHumanConfirmation: true });
+  session.confirm('toolu_link', true);
+  expect(hookDecision(await link)).toBe('allow');
+  expect(session.chatState()).toBeDefined();
+});
+
+it('denies a human refusal and aborts timed-out confirmations without leaving or re-emitting a card', async () => {
+  const { session, sent } = await live([], undefined, { mcpServers: jiraServers });
+  const { hook } = jiraPreToolUse();
+  const payload = { issueKey: 'WOR-800', fields: { summary: 'Should not run' } };
+  const denied = hook({ hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_input: payload, tool_use_id: 'toolu_human_denied' }, undefined, { signal: new AbortController().signal });
+  await settle();
+  session.confirm('toolu_human_denied', false);
+  expect(hookDecision(await denied)).toBe('deny');
+
+  const alreadyAborted = new AbortController();
+  alreadyAborted.abort();
+  const preAborted = await hook({ hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_input: payload, tool_use_id: 'toolu_pre_aborted' }, undefined, { signal: alreadyAborted.signal });
+  expect(hookDecision(preAborted)).toBe('deny');
+
+  let raceAborted = false;
+  const raceSignal = {
+    get aborted() { return raceAborted; },
+    addEventListener: () => { raceAborted = true; },
+    removeEventListener: () => {},
+  } as unknown as AbortSignal;
+  const beforeRace = sent.length;
+  const raced = await hook({ hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_input: payload, tool_use_id: 'toolu_abort_registration_race' }, undefined, { signal: raceSignal });
+  expect(hookDecision(raced)).toBe('deny');
+  expect(sent.slice(beforeRace).some((one) => one.type === 'session/inputNeededSet' || one.type === 'chat/toolCallReady')).toBe(false);
+
+  const duringWait = new AbortController();
+  const before = sent.length;
+  const waiting = hook({ hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_input: payload, tool_use_id: 'toolu_aborted_wait' }, undefined, { signal: duringWait.signal });
+  await settle();
+  const request = requestFor(sent, 'toolu_aborted_wait', before);
+  expect(request).toBeDefined();
+  duringWait.abort();
+  expect(hookDecision(await waiting)).toBe('deny');
+  const afterAbort = sent.slice(before);
+  expect(afterAbort.filter((one) => one.type === 'session/inputNeededSet')).toHaveLength(1);
+  expect(afterAbort.filter((one) => one.type === 'session/inputNeededRemoved' && one.id === request?.id)).toHaveLength(1);
+  session.confirm('toolu_aborted_wait', true);
+  expect(hookDecision(await Promise.resolve(await waiting))).toBe('deny');
+  expect(callFromSnapshot(session, 'toolu_aborted_wait')?.status).toBe('cancelled');
+  expect(afterAbort.filter((one) => one.type === 'chat/toolCallReady' && one.toolCallId === 'toolu_aborted_wait')).toHaveLength(1);
 });
