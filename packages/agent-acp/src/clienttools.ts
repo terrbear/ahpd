@@ -2,6 +2,11 @@ import type { ToolCall } from '@agentclientprotocol/sdk';
 import type { BoundTool, ClientToolCall, ClientToolResult } from '@ahpd/sdk';
 
 type Answer = (answer: ClientToolResult) => void;
+type ReportWaiter = {
+  owner: string;
+  accept: (id: string) => void;
+  cancel: (why: string) => void;
+};
 
 /** The longest a bridge call waits to hear the agent report it, so a call the agent never reports cannot hang. */
 const REPORT_WAIT_MS = 30_000;
@@ -23,7 +28,8 @@ export function clientTools() {
   let offering: BoundTool[] = [];
   const unclaimed = new Map<string, { id: string; input: string; owner: string }[]>();
   const early = new Map<string, ClientToolResult>();
-  const expecting = new Map<string, ((id: string) => void)[]>();
+  const expecting = new Map<string, ReportWaiter[]>();
+  const generations = new Map<string, number>();
   const byClient = new Map<string, { owner: string; settle: Answer }>();
 
   const providing = (call: ToolCall): BoundTool | undefined => {
@@ -32,20 +38,32 @@ export function clientTools() {
     return offering.find((one) => one.owner !== undefined && said.some((text) => text.includes(one.definition.name)));
   };
 
-  const claim = (name: string, input: string): Promise<string> => {
+  const claim = (name: string, input: string, owner: string, callId?: string): Promise<string> => {
     const open = unclaimed.get(name) ?? [];
-    const at = open.findIndex((one) => one.input === input);
-    const took = at >= 0 ? open.splice(at, 1)[0] : open.shift();
+    const exact = open.findIndex((one) => one.owner === owner && one.input === input);
+    const at = exact >= 0 ? exact : open.findIndex((one) => one.owner === owner);
+    const took = at >= 0 ? open.splice(at, 1)[0] : undefined;
     unclaimed.set(name, open);
     if (took !== undefined) return Promise.resolve(took.id);
     return new Promise((resolve, reject) => {
-      const waiting = expecting.get(name) ?? [];
+      const remove = (): void => {
+        const remaining = (expecting.get(name) ?? []).filter((one) => one !== waiter);
+        if (remaining.length === 0) expecting.delete(name);
+        else expecting.set(name, remaining);
+        clearTimeout(timer);
+      };
+      const waiter: ReportWaiter = {
+        owner,
+        accept: (id) => { remove(); resolve(id); },
+        cancel: (why) => {
+          remove();
+          reject(new Error(`${why}; tool=${name}, client=${owner}, state=awaiting-agent-report, toolCallId=${callId ?? 'unavailable'}; reconnect Anton and retry the read-only check`));
+        },
+      };
       const timer = setTimeout(() => {
-        expecting.set(name, (expecting.get(name) ?? []).filter((one) => one !== resolve));
-        reject(new Error('The agent never reported this tool call'));
+        waiter.cancel('AHP timed out after 30000ms waiting for the agent to report the tool call');
       }, REPORT_WAIT_MS);
-      waiting.push((id) => { clearTimeout(timer); resolve(id); });
-      expecting.set(name, waiting);
+      expecting.set(name, [...(expecting.get(name) ?? []), waiter]);
     });
   };
 
@@ -53,7 +71,7 @@ export function clientTools() {
     for (const [id, held] of [...byClient.entries()]) {
       if (whose !== undefined && held.owner !== whose) continue;
       byClient.delete(id);
-      held.settle({ text: why, ok: false });
+      held.settle({ text: `${why}; toolCallId=${id}, client=${held.owner}, state=awaiting-client-result; reconnect Anton and check the outcome before retrying`, ok: false });
     }
   };
 
@@ -67,22 +85,35 @@ export function clientTools() {
       if (tool === undefined) return undefined;
       const name = tool.definition.name;
       const input = JSON.stringify(argumentsOf(call.rawInput));
-      const first = (expecting.get(name) ?? []).shift();
-      if (first !== undefined) first(call.toolCallId);
+      const first = (expecting.get(name) ?? []).find((one) => one.owner === tool.owner);
+      if (first !== undefined) first.accept(call.toolCallId);
       else unclaimed.set(name, [...(unclaimed.get(name) ?? []), { id: call.toolCallId, input, owner: tool.owner ?? '' }]);
       return tool.owner;
     },
 
     /** Runs a call the tools server was asked for, resolving with what its client says. */
     run: async (call: ClientToolCall, started: (id: string) => void): Promise<ClientToolResult> => {
-      const id = await claim(call.tool.definition.name, JSON.stringify(call.input));
-      started(id);
+      const owner = call.tool.owner ?? '';
+      const generation = generations.get(owner) ?? 0;
+      generations.set(owner, generation);
+      const id = await claim(call.tool.definition.name, JSON.stringify(call.input), owner, call.callId);
+      if ((generations.get(owner) ?? 0) !== generation) {
+        return { text: `The client disconnected before execution was dispatched; toolCallId=${id}, client=${owner}, state=cancelled-before-dispatch; reconnect Anton and retry the read-only check`, ok: false };
+      }
       const answered = early.get(id);
       if (answered !== undefined) {
         early.delete(id);
         return answered;
       }
-      return await new Promise((settle) => { byClient.set(id, { owner: call.tool.owner ?? '', settle }); });
+      return await new Promise((settle, reject) => {
+        byClient.set(id, { owner, settle });
+        try { started(id); }
+        catch (error) {
+          byClient.delete(id);
+          const reason = error instanceof Error ? error.message : String(error);
+          reject(new Error(`Unable to publish client tool execution; toolCallId=${id}, client=${owner}, state=dispatch-failed: ${reason}; reconnect Anton and check the outcome before retrying`));
+        }
+      });
     },
 
     owner: (id: string): string | undefined => byClient.get(id)?.owner,
@@ -101,10 +132,30 @@ export function clientTools() {
     },
 
     release: (why: string, whose?: string): void => {
-      if (whose === undefined) {
-        early.clear();
-        unclaimed.clear();
+      const owners = new Set<string>();
+      for (const waiting of [...expecting.values()]) {
+        for (const held of [...waiting]) {
+          if (whose !== undefined && held.owner !== whose) continue;
+          owners.add(held.owner);
+          held.cancel(why);
+        }
       }
+      for (const [name, reports] of unclaimed) {
+        const remaining = reports.filter((one) => {
+          if (whose !== undefined && one.owner !== whose) return true;
+          owners.add(one.owner);
+          early.delete(one.id);
+          return false;
+        });
+        if (remaining.length === 0) unclaimed.delete(name);
+        else unclaimed.set(name, remaining);
+      }
+      for (const held of byClient.values()) {
+        if (whose === undefined || held.owner === whose) owners.add(held.owner);
+      }
+      if (whose !== undefined) owners.add(whose);
+      else for (const owner of generations.keys()) owners.add(owner);
+      for (const owner of owners) generations.set(owner, (generations.get(owner) ?? 0) + 1);
       release(why, whose);
     },
   };
