@@ -163,14 +163,14 @@ it('advertises exactly the ports it was given, and nothing more', async () => {
   const both = await talking();
   begin(both.client, both.chatUri, 't1', 'hello');
   await endedTurn(both.peer, both.chatUri, 1);
-  expect(capabilitiesOf(both.log)).toEqual({ fs: { readTextFile: true, writeTextFile: true }, terminal: true });
+  expect(capabilitiesOf(both.log)).toEqual({ fs: { readTextFile: true, writeTextFile: true }, terminal: true, elicitation: { form: {} } });
 
   // A capability advertised without an implementation is a request nobody
   // answers, so a host with neither port asks a server for neither.
   const neither = await talking({ files: false, shells: false });
   begin(neither.client, neither.chatUri, 't1', 'hello');
   await endedTurn(neither.peer, neither.chatUri, 1);
-  expect(capabilitiesOf(neither.log)).toEqual({});
+  expect(capabilitiesOf(neither.log)).toEqual({ elicitation: { form: {} } });
 });
 
 it('reads and writes a file through the host\'s own store', async () => {
