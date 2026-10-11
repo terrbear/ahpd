@@ -14,6 +14,7 @@ export interface Spawned {
   stdin: Writable;
   stdout: Readable;
   readonly killed: boolean;
+  readonly exited?: boolean;
   readonly exitCode: number | null;
   kill(signal: NodeJS.Signals): boolean;
   on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
@@ -28,6 +29,8 @@ export interface Spawned {
 export interface Asked {
   command: string;
   args: string[];
+  cwd?: string;
+  signal?: AbortSignal;
   env: Record<string, string | undefined>;
 }
 
@@ -93,6 +96,9 @@ class Deferred implements Spawned {
   #errorListeners: ((error: Error) => void)[] = [];
   #failure: Error | undefined;
   #settled = false;
+  #exited = false;
+
+  get exited(): boolean { return this.#exited; }
 
   get killed(): boolean {
     return this.#child?.killed ?? this.#killed;
@@ -113,6 +119,7 @@ class Deferred implements Spawned {
     if (this.#settled) return;
     this.#settled = true;
     if (child instanceof Error) {
+      this.#exited = true;
       this.#fail(child);
       this.stdout.end();
       return;
@@ -136,7 +143,7 @@ class Deferred implements Spawned {
     if (child.stdout !== null) quiet(child.stdout);
     this.stdin.pipe(child.stdin as Writable);
     (child.stdout as Readable).pipe(this.stdout);
-    child.on('exit', (code, signal) => { for (const listener of this.#exit) listener(code, signal); });
+    child.on('exit', (code, signal) => { this.#exited = true; for (const listener of this.#exit) listener(code, signal); });
     child.on('error', (error) => { this.#fail(error); });
     if (this.#killed) child.kill(this.#signal ?? 'SIGTERM');
   }
