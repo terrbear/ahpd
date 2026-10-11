@@ -178,3 +178,18 @@ it('cleans related resources and still kills the process if SDK close throws', a
   child.exit();
   expect(await result).toEqual(expect.objectContaining({ message: 'close failed' }));
 });
+
+it('bounds the initial SDK handshake instead of leaving its lease alive forever', async () => {
+  const query = new Query();
+  query.initialized = () => new Promise<void>(() => {});
+  const idle = idleQuery({
+    timeout: 100,
+    eligible: () => true,
+    create: () => ({ query, signal: new AbortController(), stop: async () => { query.close(); } }),
+  });
+  const initialized = idle.handle.initializationResult().catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(await initialized).toEqual(expect.objectContaining({ message: expect.stringContaining('initialization exceeded 30 seconds') }));
+  expect(query.closed).toBe(true);
+  await idle.dispose();
+});

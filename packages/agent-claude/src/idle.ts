@@ -143,7 +143,7 @@ export function idleQuery<Q extends ManagedQuery>(options: {
         };
         let operation: Promise<unknown>;
         try {
-          operation = runtime && !stopping && !closed && !failure ? invoke(runtime.query) : ensure().then(invoke);
+          operation = key !== 'initializationResult' && runtime && !stopping && !closed && !failure ? invoke(runtime.query) : ensure().then(invoke);
         } catch (error: unknown) { operation = Promise.reject(error); }
         return operation.finally(() => { leases--; changed(); });
       };
