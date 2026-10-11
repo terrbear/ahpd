@@ -54,6 +54,7 @@ import type { Bag, Chosen, ClientToolCall, MessageFrom, OpenedTerminal, Ran, Ses
 import { watchSession } from './catalog.js';
 import { connectAcp } from './connection.js';
 import { clientTools } from './clienttools.js';
+import { elicitations } from './elicitation.js';
 import { confirmationOptions, mapUpdate } from './mapping.js';
 import type { AcpConnection, AcpOptions, AcpTurn, ConfirmationOption, PermissionAnswer, WatchedSession, WatchedTurn } from './types.js';
 
@@ -161,6 +162,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
   let live: AcpConnection | undefined;
   /** The server's own id for this conversation, once `session/new` answered. */
   let acpSessionId: string | undefined;
+  const inputs = elicitations(emit, start.chatUri, () => ({ sessionId: acpSessionId, turn: mapping }));
   /** The one opening, shared by every caller, so one server is spawned. */
   let opening: Promise<{ connection: AcpConnection; sessionId: string }> | undefined;
   /** Whether a client asked to stop, read when the prompt settles. */
@@ -221,7 +223,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
    * A permission the server is blocked on is the session waiting for
    * somebody, which is what a client draws the input request from.
    */
-  const status = (): number => (permissions.size > 0 ? Status.InputNeeded
+  const status = (): number => (permissions.size > 0 || inputs.size() > 0 ? Status.InputNeeded
     : active !== undefined ? Status.InProgress
       : failed !== undefined ? Status.Error
         : Status.Idle);
@@ -636,6 +638,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
         handlers: {
           update: receivedUpdate,
           permission: askPermission,
+          elicit: inputs.create,
           // Each half only where the session has what it needs: an
           // unadvertised capability is a request a conformant server never
           // makes, and one with nothing behind it would throw.
@@ -657,6 +660,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
         if (live !== connection) return;
         live = undefined;
         opening = undefined;
+        inputs.cancel();
       });
       const handshake = await connection.initialize();
       const extra = start.additional !== undefined && start.additional.length > 0
@@ -766,6 +770,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
   const finish = (turnId: string, ending: 'complete' | 'cancelled' | 'error', why?: string): void => {
     const turn = active;
     if (turn === undefined || String(turn.id) !== turnId) return;
+    if (ending !== 'complete') inputs.cancel(turnId);
     doing(undefined);
     const duration = Date.now() - Date.parse(String(turn.startedAt));
     turn.state = ending;
@@ -907,6 +912,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
       opening = undefined;
       const connection = live;
       live = undefined;
+      inputs.cancel();
       connection?.close();
       finish(turnId, 'error', messageOf(why));
     }
@@ -1270,14 +1276,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
       touch();
     },
 
-    /*
-     * ACP asks no questions of its own here.
-     *
-     * Its only interactive request is `session/request_permission`, which is
-     * the confirmation above; there is no question shape to answer, so an
-     * answer names something this session never asked.
-     */
-    answer: () => {},
+    answer: inputs.answer,
 
     /**
      * Take a config value, in the server's own terms.
@@ -1357,6 +1356,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
 
     close: () => {
       closed = true;
+      inputs.cancel();
       offered.release('The session closed before a client answered this tool call');
       toolsEndpoint?.close();
       toolsEndpoint = undefined;

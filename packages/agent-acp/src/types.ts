@@ -7,6 +7,8 @@
  */
 
 import type {
+  CreateElicitationRequest,
+  CreateElicitationResponse,
   CreateTerminalRequest,
   CreateTerminalResponse,
   InitializeResponse,
@@ -100,6 +102,7 @@ export interface ConfirmationOption {
  */
 export interface AcpHandlers {
   update(sessionId: string, update: SessionUpdate): void;
+  elicit?(request: CreateElicitationRequest, signal: AbortSignal): Promise<CreateElicitationResponse>;
   /** Read a file the agent named, through the host's own store. */
   readTextFile?(request: ReadTextFileRequest): Promise<ReadTextFileResponse>;
   /** Write one. */
