@@ -6772,12 +6772,9 @@ describe('a session a client names', () => {
     expect(sessionQueries()[0]?.options.sessionId).toBe('d65884b6-d15e-4bec-b4b8-ae44d17765dd');
   });
 
-  it('leaves a name the backend would not take alone', async () => {
+  it('keeps a non-UUID logical name while allocating a native UUID for unused-chat recreation', async () => {
     const { client } = await running();
-    // `ahp-session:/live` - a name, and not a UUID. Asking the backend to use
-    // it would be refused, so the backend names this one and nothing is lost
-    // that was not already lost.
-    expect(sessionQueries()[0]?.options.sessionId).toBeUndefined();
+    expect(sessionQueries()[0]?.options.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu);
   });
 
   it('holds a session created under another scheme as its provider\'s, and answers its creator in its own', async () => {

@@ -91,6 +91,7 @@ export interface ClaudeOptions {
    * runs with it.
    */
   workerStop?: 'worker' | 'session';
+  idleTimeoutMs?: number;
   /**
    * Named sets of Claude options, by the name a person gives them.
    *
@@ -566,6 +567,7 @@ export function claude(options: ClaudeOptions): Agent {
       return createSession({
       ...(inside === undefined ? {} : { spawn: inside, spawnExecutable: executable, spawnConfigDir: configDir }),
       ...(options.workerStop !== undefined ? { workerStop: options.workerStop } : {}),
+      ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
       uri: start.uri,
       chatUri: start.chatUri,
       cwd: workingDirectory(start.workingDirectory),

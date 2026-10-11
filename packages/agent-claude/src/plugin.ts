@@ -50,6 +50,7 @@ export const optionsSchema = {
       description: "The configuration directory the CLI reads inside a machine. /ahpd/claude by default; false leaves the image's own.",
     },
     workerStop: { type: 'string', enum: ['worker', 'session'], description: "What a stop given in a subagent's chat stops. worker by default." },
+    idleTimeoutMs: { type: 'integer', minimum: 0, maximum: 2147483647, description: 'Release locally owned idle Claude processes after this many milliseconds. Computer/custom-spawn sessions are excluded. Defaults to 3600000 (one hour); zero disables eviction. Running turns, tools and background tasks prevent eviction.' },
     presets: {
       type: 'object',
       description: 'Named sets of Claude options, by name. One is what every session runs on; two or more offer a session a choice, and the first is the default.',

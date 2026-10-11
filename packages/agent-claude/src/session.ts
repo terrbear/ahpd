@@ -12,6 +12,8 @@ import type { ActiveTurn, McpServerState, StringOrMarkdown, ToolCallCompletedSta
 import { Status, idOf, tail } from '@ahpd/sdk';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
+import { idleQuery } from './idle.js';
+import { processExit, spawnLocal, stopQuery } from './shutdown.js';
 import type { Asked, Spawned } from './spawn.js';
 
 /**
@@ -600,6 +602,7 @@ const contributed = (
   tools: BoundTool[],
   /** Hand a call to the client that provides it, and wait for what it says. */
   byClient: (tool: BoundTool, input: Bag) => Promise<{ text: string; ok: boolean }>,
+  working: (running: boolean) => void,
 ): unknown => createSdkMcpServer({
   name: 'ahp',
   version: '1.0.0',
@@ -624,33 +627,36 @@ const contributed = (
       ...(one.deferLoading !== undefined ? { _meta: { 'anthropic/alwaysLoad': !one.deferLoading } } : {}),
       ...(one.definition.annotations ? { annotations: one.definition.annotations } : {}),
       handler: async (input: Record<string, unknown>) => {
-        /*
-         * Somebody else's tool, run where it lives.
-         *
-         * A client that announced this one is the only thing that can run it -
-         * it is the editor's own command, or a plugin's - so the call goes out
-         * against that client and this waits. The wait is what makes the model
-         * see a tool at all: an MCP handler that returned before the answer
-         * came back would be answering on the client's behalf.
-         */
-        if (one.owner !== undefined) {
-          const answer = await byClient(one, input);
-          return {
-            content: [{ type: 'text' as const, text: answer.text }],
-            ...(answer.ok ? {} : { isError: true }),
-          };
-        }
+        working(true);
         try {
-          return { content: [{ type: 'text' as const, text: await one.run?.(input) ?? '' }] };
-        }
-        catch (error: unknown) {
-          // The message, not a throw: an MCP tool that rejects is a transport
-          // failure, and a tool that could not do the thing is an answer.
-          return {
-            content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }],
-            isError: true,
-          };
-        }
+          /*
+           * Somebody else's tool, run where it lives.
+           *
+           * A client that announced this one is the only thing that can run it -
+           * it is the editor's own command, or a plugin's - so the call goes out
+           * against that client and this waits. The wait is what makes the model
+           * see a tool at all: an MCP handler that returned before the answer
+           * came back would be answering on the client's behalf.
+           */
+          if (one.owner !== undefined) {
+            const answer = await byClient(one, input);
+            return {
+              content: [{ type: 'text' as const, text: answer.text }],
+              ...(answer.ok ? {} : { isError: true }),
+            };
+          }
+          try {
+            return { content: [{ type: 'text' as const, text: await one.run?.(input) ?? '' }] };
+          }
+          catch (error: unknown) {
+            // The message, not a throw: an MCP tool that rejects is a transport
+            // failure, and a tool that could not do the thing is an answer.
+            return {
+              content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }],
+              isError: true,
+            };
+          }
+        } finally { working(false); }
       },
     };
   }),
@@ -675,6 +681,7 @@ export interface ClaudeSessionOptions extends SessionOptions {
    * with `session` the lead turn that runs it.
    */
   workerStop?: 'worker' | 'session';
+  idleTimeoutMs?: number;
   /**
    * The presets `claude()` was configured with, by name.
    *
@@ -698,6 +705,9 @@ export interface ClaudeSessionOptions extends SessionOptions {
 }
 
 export function createSession(options: ClaudeSessionOptions): Session {
+  if (options.idleTimeoutMs !== undefined && (!Number.isSafeInteger(options.idleTimeoutMs) || options.idleTimeoutMs < 0 || options.idleTimeoutMs > 2_147_483_647)) {
+    throw new Error('idleTimeoutMs must be an integer from 0 to 2147483647 milliseconds');
+  }
   const { uri, chatUri, cwd, emit } = options;
 
   const turns: Bag[] = [...(options.seed ?? [])];
@@ -739,13 +749,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * now.
    */
   let failed: string | undefined;
-  /**
-   * Why this session's CLI is gone, once it is.
-   *
-   * Survives `begin`, unlike `failed`: the query is built once and a session
-   * whose process has exited cannot run another turn however many are asked
-   * for. Set when the run loop ends, for whatever reason, and never cleared.
-   */
   let gone: string | undefined;
   let startedAt = 0;
   /**
@@ -768,6 +771,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * disk and the row in memory are two sessions saying the same thing.
    */
   let agentId: string | undefined = options.resume;
+  const reservedNativeId = options.resume ?? (UUID.test(idOf(uri)) ? idOf(uri) : crypto.randomUUID());
+  let hasNativePrompt = options.resume !== undefined;
+  let nativePromptSent = false;
   /** What the session is doing, in one line, or nothing when it is idle. */
   let activity: string | undefined;
   /**
@@ -952,6 +958,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * model reaches them through.
    */
   let offering: BoundTool[] = [...(options.tools ?? [])];
+  let contributedCalls = 0;
+  const contributedWork = (running: boolean): void => {
+    contributedCalls += running ? 1 : -1;
+    runtimeChanged();
+  };
   /** The full name the CLI calls a contributed tool by. */
   const called = (name: string): string => `mcp__ahp__${name}`;
   /** Which client provides a tool, by the name the CLI calls it. */
@@ -1327,7 +1338,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * at construction so `setMcpServers` keeps it: that call replaces the whole
    * set, and a set rebuilt without this would take the host's tools away.
    */
-  if (offering.length > 0) declared.ahp = contributed(offering, ranByClient) as Bag;
+  if (offering.length > 0) declared.ahp = contributed(offering, ranByClient, contributedWork) as Bag;
 
   /** What each server that needs signing in published about itself, by name. */
   const wanted = new Map<string, Published>();
@@ -1363,24 +1374,30 @@ export function createSession(options: ClaudeSessionOptions): Session {
    */
   let steering: Bag | undefined;
 
-  async function* input(): AsyncGenerator<(typeof waiting)[number]> {
-    for (;;) {
-      while (waiting.length > 0) {
-        const next = waiting.shift() as (typeof waiting)[number];
-        yield next;
-        if (steering !== undefined) {
-          const said = steering;
-          steering = undefined;
-          emit('chat', { type: 'chat/pendingMessageRemoved', kind: 'steering', id: String(said.id ?? '') });
-          touch();
+  async function* input(signal: AbortSignal): AsyncGenerator<(typeof waiting)[number]> {
+    const abort = () => { wake?.(); };
+    signal.addEventListener('abort', abort, { once: true });
+    try {
+      for (;;) {
+        if (signal.aborted) return;
+        while (waiting.length > 0 && !signal.aborted) {
+          const next = waiting.shift() as (typeof waiting)[number];
+          yield next;
+          if (steering !== undefined) {
+            const said = steering;
+            steering = undefined;
+            emit('chat', { type: 'chat/pendingMessageRemoved', kind: 'steering', id: String(said.id ?? '') });
+            touch();
+          }
         }
+        if (closed || signal.aborted) return;
+        await new Promise<void>((resolve) => { wake = resolve; });
       }
-      if (closed) return;
-      await new Promise<void>((resolve) => { wake = resolve; });
-    }
+    } finally { signal.removeEventListener('abort', abort); }
   }
 
-  const touch = (): void => { modified = new Date().toISOString(); };
+  let runtimeChanged = (): void => {};
+  const touch = (): void => { modified = new Date().toISOString(); runtimeChanged(); };
 
   /**
    * Say what it is doing now, if that has changed.
@@ -2403,146 +2420,194 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
   // ------------------------------------------------------------------ the run
 
-  const handle = query({
-    prompt: input(),
-    options: {
-      cwd,
-      /*
-       * Where the CLI runs, when it is not here.
-       *
-       * The executable is named so the SDK builds a command for a *binary*
-       * rather than for a script it would run under this host's node: with a
-       * path that ends in `.js` it passes that path as an argument, and it is
-       * this host's path, which the machine does not have. `executableArgs`
-       * is empty by default, so what reaches the hook is the in-machine
-       * command and the CLI's own flags.
-       */
-      ...(options.spawn === undefined ? {} : {
-        pathToClaudeCodeExecutable: options.spawnExecutable ?? 'claude',
-        spawnClaudeCodeProcess: options.spawn as never,
-        /*
-         * Only what the CLI reads crosses into the machine.
-         *
-         * The SDK's env is this process's, and `HOME`, `PATH` and `PWD` in
-         * there are this host's: forwarded, they send the CLI looking for a
-         * home the machine does not have and a PATH that may not find it.
-         * `CLAUDE_CONFIG_DIR` is set last so a machine mounting this host's
-         * `~/.claude` is one the CLI is already signed in on.
-         */
-        env: {
-          ...Object.fromEntries(Object.entries(process.env)
-            .filter(([key]) => key.startsWith('CLAUDE_') || key.startsWith('ANTHROPIC_'))),
-          ...(options.spawnConfigDir === false || options.spawnConfigDir === undefined
-            ? {}
-            : { CLAUDE_CONFIG_DIR: options.spawnConfigDir }),
-        },
-      }),
-      // The peers of `cwd`, which the SDK takes at startup. The first entry is
-      // the process root and is not one of these.
-      ...(peers.length > 0 ? { additionalDirectories: [...peers] } : {}),
-      /*
-       * The MCP servers, declared here rather than found by the CLI.
-       *
-       * The CLI reads the same files either way; what changes is ownership. A
-       * server the SDK was *given* is one `setMcpServers` can re-declare, and
-       * that is the only way a token a client signed in with can be applied -
-       * `setMcpServers` does not touch servers that came from a settings file.
-       */
-      ...(Object.keys(declared).length > 0 ? { mcpServers: declared as never } : {}),
-      /*
-       * What the host wants said, after the CLI's own prompt.
-       *
-       * The preset with an `append`, not a prompt of this backend's own: the
-       * CLI's prompt is what makes it the CLI. `snapshot`, so the prompt is
-       * recorded once for the conversation and a resume does not rewrite it
-       * under the model's reasoning.
-       */
-      ...(options.instructions && options.instructions.length > 0
-        ? { systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: options.instructions.join('\n\n'), snapshot: true } }
-        : {}),
-      includePartialMessages: true,
-      /*
-       * A subagent's own words, not only its tool calls.
-       *
-       * Without this the harness forwards a worker's `tool_use` and
-       * `tool_result` and nothing else - so a chat opened for it has rows and
-       * no text and no thinking, which is a transcript with the reasoning cut
-       * out. The reference host turns this on for the same reason.
-       */
-      forwardSubagentText: true,
-      /*
-       * Over the daemon's own environment, never instead of it.
-       *
-       * The SDK's `env` *replaces* the subprocess environment rather than
-       * merging with it, so handing it a lone credential is a subprocess with
-       * no `PATH` and no `HOME` - which fails as something that has nothing to
-       * do with authentication. Absent when nobody pushed a token, and then
-       * the subprocess simply inherits, which is how every session worked
-       * before this and how an automation's still does.
-       */
-      ...fromPreset,
-      ...(options.env ? { env: { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env } } : {}),
-      // From the settings, which is where it lives: it is a config key like
-      // the others, and a second way in was a second thing to keep in step.
-      ...(typeof settings.permissionMode === 'string' ? { permissionMode: settings.permissionMode } : {}),
-      // Before every shell command, while a client has a script in force.
-      hooks: { PreToolUse: [
-        { matcher: 'Bash', hooks: [sourceFirst] },
-        { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
-      ] },
-      /*
-       * The lists, at the moment the query is built.
-       *
-       * The SDK takes them natively, which is what makes this the smallest
-       * thing that works - and it is only half of it: the SDK has nowhere to
-       * put a later change, so `canUseTool` reads the same lists on every
-       * call and that is what makes one set mid-session take effect.
-       */
-      ...(allowed.allow.length > 0 ? { allowedTools: [...allowed.allow] } : {}),
-      ...(allowed.deny.length > 0 ? { disallowedTools: [...allowed.deny] } : {}),
-      // Resumed, not replayed: the agent picks up the context it built - the
-      // files it read, the decisions it made - rather than being handed a
-      // transcript of them and asked to infer the rest.
-      ...(options.resume ? { resume: options.resume } : {}),
-      /*
-       * A fork, which the SDK spells as a resume that does not keep the id.
-       *
-       * `resumeSessionAt` is the prompt to continue from and `forkSession`
-       * makes the continuation a session of its own, so the conversation this
-       * was cut from carries on untouched.
-       */
-      ...(options.resume && options.forkAt
-        ? { forkSession: true, resumeSessionAt: options.forkAt }
-        : {}),
-      /*
-       * A rewind, which is the same resume without the new id.
-       *
-       * `chat/truncated` drops the turns after a named one and carries on in
-       * the conversation it dropped them from - so the id has to survive it,
-       * or every later resume would reach the transcript that still has them.
-       * That is the whole difference from a fork, and it is one word.
-       */
-      ...(options.resume && options.rewindAt && !options.forkAt
-        ? { resumeSessionAt: options.rewindAt }
-        : {}),
-      /*
-       * On disk under the name the client gave it.
-       *
-       * The SDK invents an id and writes the transcript under that, so a
-       * session a client created lived on disk under a name the client had
-       * never heard of. While the daemon ran it answered to both, because it
-       * held the pair in memory; once it restarted, the catalogue listed the
-       * SDK's name and the URI the client created the session under answered
-       * `No agent for session` for ever - the session was still there and its
-       * only name for it was dead.
-       *
-       * Only where the client named a UUID, because that is what the SDK will
-       * take. A client that names a session something else keeps what it had.
-       */
-      ...(options.resume === undefined && UUID.test(idOf(uri)) ? { sessionId: idOf(uri) } : {}),
-      canUseTool,
+  let backgroundSnapshot = false;
+  const dependencies = new Set<string>();
+  const disabledServers = new Set<string>();
+  const idle = idleQuery<ReturnType<typeof query>>({
+    timeout: options.spawn === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
+    eligible: () => !closed && gone === undefined && !busy()
+      && (nativePromptSent || options.forkAt === undefined && options.rewindAt === undefined)
+      && queued.length === 0 && waiting.length === 0 && steering === undefined
+      && pending.size === 0 && byClient.size === 0 && contributedCalls === 0 && ![...expecting.values()].some((calls) => calls.length > 0)
+      && onServer.size === 0 && calling.size === 0 && dependencies.size === 0
+      && ![...spawning.values()].some((worker) => !worker.completed)
+      && ![...parts.values()].some((part) => bag(part.toolCall).status === 'running'),
+    prepare: async (query, generation) => {
+      if (generation === 0) return;
+      await query.applyFlagSettings(flagSettingsOf(values));
+      for (const server of disabledServers) await query.toggleMcpServer(server, false);
     },
-  } as Parameters<typeof query>[0]);
+    completed: (key, args) => {
+      if (key !== 'toggleMcpServer') return;
+      const [server, enabled] = args;
+      if (typeof server !== 'string') return;
+      if (enabled === false) disabledServers.add(server);
+      else disabledServers.delete(server);
+    },
+    create: (generation) => {
+      const signal = new AbortController();
+      let childExit: ReturnType<typeof processExit> | undefined;
+      let resume = options.resume;
+      if (generation > 0) resume = hasNativePrompt ? agentId ?? reservedNativeId : undefined;
+      if (generation > 0) {
+        paid.clear();
+        backgroundSnapshot = false;
+        dependencies.clear();
+        if (settings.shellInitScripts !== undefined) {
+          const restored = setShellInit(settings.shellInitScripts);
+          if (restored !== true) throw new Error(restored);
+        }
+        if (offering.length > 0) declared.ahp = contributed(offering, ranByClient, contributedWork) as Bag;
+      }
+      const handle = query({
+        prompt: input(signal.signal),
+        options: {
+          cwd,
+          spawnClaudeCodeProcess: (asked: Asked) => {
+            const child = (options.spawn ?? spawnLocal)(asked);
+            childExit = processExit(child);
+            return child;
+          },
+          /*
+           * Where the CLI runs, when it is not here.
+           *
+           * The executable is named so the SDK builds a command for a *binary*
+           * rather than for a script it would run under this host's node: with a
+           * path that ends in `.js` it passes that path as an argument, and it is
+           * this host's path, which the machine does not have. `executableArgs`
+           * is empty by default, so what reaches the hook is the in-machine
+           * command and the CLI's own flags.
+           */
+          ...(options.spawn === undefined ? {} : {
+            pathToClaudeCodeExecutable: options.spawnExecutable ?? 'claude',
+            /*
+             * Only what the CLI reads crosses into the machine.
+             *
+             * The SDK's env is this process's, and `HOME`, `PATH` and `PWD` in
+             * there are this host's: forwarded, they send the CLI looking for a
+             * home the machine does not have and a PATH that may not find it.
+             * `CLAUDE_CONFIG_DIR` is set last so a machine mounting this host's
+             * `~/.claude` is one the CLI is already signed in on.
+             */
+            env: {
+              ...Object.fromEntries(Object.entries(process.env)
+                .filter(([key]) => key.startsWith('CLAUDE_') || key.startsWith('ANTHROPIC_'))),
+              ...(options.spawnConfigDir === false || options.spawnConfigDir === undefined
+                ? {}
+                : { CLAUDE_CONFIG_DIR: options.spawnConfigDir }),
+            },
+          }),
+          // The peers of `cwd`, which the SDK takes at startup. The first entry is
+          // the process root and is not one of these.
+          ...(peers.length > 0 ? { additionalDirectories: [...peers] } : {}),
+          /*
+           * The MCP servers, declared here rather than found by the CLI.
+           *
+           * The CLI reads the same files either way; what changes is ownership. A
+           * server the SDK was *given* is one `setMcpServers` can re-declare, and
+           * that is the only way a token a client signed in with can be applied -
+           * `setMcpServers` does not touch servers that came from a settings file.
+           */
+          ...(Object.keys(declared).length > 0 ? { mcpServers: { ...declared } as never } : {}),
+          /*
+           * What the host wants said, after the CLI's own prompt.
+           *
+           * The preset with an `append`, not a prompt of this backend's own: the
+           * CLI's prompt is what makes it the CLI. `snapshot`, so the prompt is
+           * recorded once for the conversation and a resume does not rewrite it
+           * under the model's reasoning.
+           */
+          ...(options.instructions && options.instructions.length > 0
+            ? { systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: options.instructions.join('\n\n'), snapshot: true } }
+            : {}),
+          includePartialMessages: true,
+          /*
+           * A subagent's own words, not only its tool calls.
+           *
+           * Without this the harness forwards a worker's `tool_use` and
+           * `tool_result` and nothing else - so a chat opened for it has rows and
+           * no text and no thinking, which is a transcript with the reasoning cut
+           * out. The reference host turns this on for the same reason.
+           */
+          forwardSubagentText: true,
+          /*
+           * Over the daemon's own environment, never instead of it.
+           *
+           * The SDK's `env` *replaces* the subprocess environment rather than
+           * merging with it, so handing it a lone credential is a subprocess with
+           * no `PATH` and no `HOME` - which fails as something that has nothing to
+           * do with authentication. Absent when nobody pushed a token, and then
+           * the subprocess simply inherits, which is how every session worked
+           * before this and how an automation's still does.
+           */
+          ...fromPreset,
+          ...(options.env ? { env: { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env } } : {}),
+          // From the settings, which is where it lives: it is a config key like
+          // the others, and a second way in was a second thing to keep in step.
+          ...(typeof settings.permissionMode === 'string' ? { permissionMode: settings.permissionMode } : {}),
+          ...(chosen === undefined ? {} : { model: chosen }),
+          ...(typeof settings.effortLevel === 'string' ? { effort: settings.effortLevel } : {}),
+          // Before every shell command, while a client has a script in force.
+          hooks: { PreToolUse: [
+            { matcher: 'Bash', hooks: [sourceFirst] },
+            { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
+          ] },
+          /*
+           * The lists, at the moment the query is built.
+           *
+           * The SDK takes them natively, which is what makes this the smallest
+           * thing that works - and it is only half of it: the SDK has nowhere to
+           * put a later change, so `canUseTool` reads the same lists on every
+           * call and that is what makes one set mid-session take effect.
+           */
+          ...(allowed.allow.length > 0 ? { allowedTools: [...allowed.allow] } : {}),
+          ...(allowed.deny.length > 0 ? { disallowedTools: [...allowed.deny] } : {}),
+          // Resumed, not replayed: the agent picks up the context it built - the
+          // files it read, the decisions it made - rather than being handed a
+          // transcript of them and asked to infer the rest.
+          ...(resume ? { resume } : {}),
+          /*
+           * A fork, which the SDK spells as a resume that does not keep the id.
+           *
+           * `resumeSessionAt` is the prompt to continue from and `forkSession`
+           * makes the continuation a session of its own, so the conversation this
+           * was cut from carries on untouched.
+           */
+          ...(generation === 0 && options.resume && options.forkAt
+            ? { forkSession: true, resumeSessionAt: options.forkAt }
+            : {}),
+          /*
+           * A rewind, which is the same resume without the new id.
+           *
+           * `chat/truncated` drops the turns after a named one and carries on in
+           * the conversation it dropped them from - so the id has to survive it,
+           * or every later resume would reach the transcript that still has them.
+           * That is the whole difference from a fork, and it is one word.
+           */
+          ...(generation === 0 && options.resume && options.rewindAt && !options.forkAt
+            ? { resumeSessionAt: options.rewindAt }
+            : {}),
+          ...(resume === undefined ? { sessionId: agentId ?? reservedNativeId } : {}),
+          canUseTool,
+        },
+      } as Parameters<typeof query>[0]);
+      return {
+        query: handle,
+        signal,
+        stop: async () => {
+          await stopQuery(handle, childExit, async () => {
+            await Promise.all(Object.values(declared).map(async (server) => {
+              const instance = bag(server.instance);
+              if (server.type === 'sdk' && typeof instance.close === 'function') await instance.close.call(instance);
+            }));
+          });
+          rmSync(initScript, { force: true });
+        },
+      };
+    },
+  });
+  const handle = idle.handle;
+  runtimeChanged = idle.changed;
 
   /**
    * Start a turn, whoever asked for it.
@@ -2626,60 +2691,30 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const beginTurn = async (turnId: string, text: string, model?: Chosen, queuedMessageId?: string, from?: MessageFrom): Promise<void> => {
-    /*
-     * A session whose CLI has exited answers at once, and says why.
-     *
-     * The turn is recorded as one that failed rather than refused, because a
-     * person typed it and it belongs in the transcript beside the reason. The
-     * alternative is what this replaces: `active` set on a session with
-     * nothing left to answer it, which reads as thinking for ever and never
-     * says the CLI never started.
-     */
     if (gone !== undefined) {
       refuseTurn(turnId, text, gone, queuedMessageId, from);
       return;
     }
-    /*
-     * The model this turn names, taken before the prompt goes out and before
-     * the turn is credited to it.
-     *
-     * The turn is busy for as long as this takes - named in `beginning` from
-     * here, so a message queued behind it waits rather than reaching the CLI
-     * first - and the marker comes off again whichever way the switch went,
-     * because a turn that ends is a turn the next one may start behind.
-     */
+    if (beginning !== undefined) {
+      refuseTurn(turnId, text, 'Another Claude turn is still starting', queuedMessageId, from);
+      return;
+    }
+    beginning = turnId;
     if (model !== undefined && model.id !== chosen) {
-      beginning = turnId;
-      const refused = await take(model.id);
-      beginning = undefined;
+      touch();
+      let refused: string | undefined;
+      try { await idle.ready(); refused = await take(model.id); }
+      catch (error: unknown) { refused = error instanceof Error ? error.message : String(error); }
+      if (closed || beginning !== turnId) return;
       if (refused !== undefined) {
+        beginning = undefined;
         refuseTurn(turnId, text, refused, queuedMessageId, from);
-        /*
-         * The queue keeps going, which it does for any other turn that ends.
-         *
-         * Not the way an exited CLI's turn does, because that session has
-         * nothing left to answer what is behind it, and this one does.
-         */
         startNext();
         return;
       }
       chosen = model.id;
     }
-    /*
-     * The form the model came with, which is one key here.
-     *
-     * `thinkingLevel` is what a client writes into `ModelSelection.config`,
-     * and the CLI holds one effort setting for the whole query rather than one
-     * per turn - so a turn that names a level sets it from here on, and the
-     * session-wide `effortLevel` is told so the two controls do not describe
-     * different futures.
-     */
-    const level = EFFORTS.find((one) => one === (model?.config ?? {}).thinkingLevel);
-    if (level !== undefined && level !== settings.effortLevel) {
-      settings.effortLevel = level;
-      void handle.applyFlagSettings({ effortLevel: level }).catch(() => {});
-      emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
-    }
+    const selected = chosen;
     active = {
       id: turnId,
       startedAt: new Date().toISOString(),
@@ -2687,7 +2722,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         text,
         origin: from?.origin ?? { kind: 'user' },
         ...(from?._meta ? { _meta: from._meta } : {}),
-        ...(chosen ? { model: { id: chosen, ...(model?.config ? { config: model.config } : {}) } } : {}),
+        ...(selected ? { model: { id: selected, ...(model?.config ? { config: model.config } : {}) } } : {}),
       },
       responseParts: [],
       usage: undefined,
@@ -2695,29 +2730,48 @@ export function createSession(options: ClaudeSessionOptions): Session {
     startedAt = Date.now();
     failed = undefined;
     newTurn();
-    // Said back, including to the client that started it. A host that only
-    // reduced this privately would go on to emit `chat/responsePart` for a
-    // turn no client has - so the parts land nowhere and the conversation
-    // appears only when somebody reopens it and gets a fresh snapshot.
     emit('chat', {
       type: 'chat/turnStarted',
-      turnId: active.id,
+      turnId,
       startedAt: active.startedAt,
       message: active.message,
       ...(queuedMessageId !== undefined ? { queuedMessageId } : {}),
     });
     if (title === 'New session' && text) retitle(text.slice(0, 60));
     doing('Thinking');
-    /*
-     * What the model is given, which is not always what the transcript shows.
-     *
-     * A side chat is started from a turn somewhere else and has to know what
-     * that turn said, and the protocol is explicit that the source is *not*
-     * copied into this chat's visible history. So it rides on the first prompt
-     * and nowhere else: the wire message stays what the person typed.
-     */
+    touch();
+    const reject = (why: string) => {
+      if (str(active?.id) !== turnId) return;
+      const turn = active!;
+      turn.state = 'error';
+      turn.duration = Date.now() - startedAt;
+      failed = why;
+      const part = addFailure(turn, why);
+      turns.push(turn);
+      active = undefined;
+      beginning = undefined;
+      emit('chat', { type: 'chat/error', turnId, duration: turn.duration, part });
+      doing(undefined);
+      touch();
+      startNext();
+    };
+    try { await idle.ready(); }
+    catch (error: unknown) {
+      reject(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (closed || beginning !== turnId || str(active?.id) !== turnId) return;
+    const level = EFFORTS.find((one) => one === (model?.config ?? {}).thinkingLevel);
+    if (level !== undefined && level !== settings.effortLevel) {
+      settings.effortLevel = level;
+      void handle.applyFlagSettings({ effortLevel: level }).catch(() => {});
+      emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
+    }
+    beginning = undefined;
     const sent = carried === undefined ? text : `${carried}\n\n${text}`;
     carried = undefined;
+    hasNativePrompt = true;
+    nativePromptSent = true;
     waiting.push({ type: 'user', message: { role: 'user', content: sent }, parent_tool_use_id: null });
     wake?.();
     wake = undefined;
@@ -2933,7 +2987,22 @@ export function createSession(options: ClaudeSessionOptions): Session {
         const type = str(message.type);
         // Every message carries it, so this needs no particular one to arrive.
         const said = str(message.session_id);
-        if (said) agentId = said;
+        if (said) {
+          if (idle.generation() > 0 && (agentId ?? reservedNativeId) !== said) {
+            const error = new Error('Claude resumed a different native session; refusing to continue');
+            throw error;
+          }
+          agentId = said;
+        }
+        if (type === 'system' && str(message.subtype) === 'background_tasks_changed') {
+          backgroundSnapshot = true;
+          dependencies.clear();
+          for (const task of list(message.tasks)) {
+            const id = str(bag(task).task_id);
+            if (id !== undefined) dependencies.add(id);
+          }
+          continue;
+        }
 
         // The message stream's own init. Capabilities come from the control
         // protocol instead (see `describe`), because those are needed before
@@ -3035,6 +3104,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         if (type === 'system' && str(message.subtype) === 'task_started') {
           const id = str(message.tool_use_id);
           const task = str(message.task_id);
+          if (!backgroundSnapshot && (task ?? id) !== undefined) dependencies.add((task ?? id)!);
           if (id !== undefined) background.add(id);
           if (id !== undefined && task !== undefined && !ended.has(id)) tasks.set(id, task);
           continue;
@@ -3042,6 +3112,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
         if (type === 'system' && str(message.subtype) === 'task_notification') {
           const id = str(message.tool_use_id);
           const status = str(message.status);
+          if (!backgroundSnapshot && ['completed', 'failed', 'stopped'].includes(status ?? '')) {
+            const task = str(message.task_id) ?? id;
+            if (task !== undefined) dependencies.delete(task);
+          }
           if (id !== undefined && background.has(id)
             && (status === 'completed' || status === 'failed' || status === 'stopped')) {
             endWorker(id, status === 'completed' ? 'complete' : status === 'stopped' ? 'cancelled' : 'error',
@@ -3155,6 +3229,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         }
       }
     } catch (error) {
+      void idle.dispose().catch(() => {});
       failed = spawnFailure(error)?.message ?? (error instanceof Error ? error.message : String(error));
       /*
        * The CLI is gone, and it is not coming back on this session.
@@ -3754,18 +3829,37 @@ export function createSession(options: ClaudeSessionOptions): Session {
       failed = undefined;
       doing('Thinking');
       const message = bag((active as Bag).message);
-      waiting.push({
-        type: 'user',
-        message: { role: 'user', content: str(message.text) ?? '' },
-        parent_tool_use_id: null,
-      });
-      wake?.();
-      wake = undefined;
       touch();
+      void idle.ready().then(() => {
+        if (closed || str(active?.id) !== turnId) return;
+        hasNativePrompt = true;
+        nativePromptSent = true;
+        waiting.push({
+          type: 'user',
+          message: { role: 'user', content: str(message.text) ?? '' },
+          parent_tool_use_id: null,
+        });
+        wake?.();
+        wake = undefined;
+        touch();
+      }).catch((error: unknown) => {
+        if (str(active?.id) !== turnId) return;
+        const turn = active!;
+        turn.state = 'error';
+        turn.duration = Date.now() - startedAt;
+        failed = error instanceof Error ? error.message : String(error);
+        const part = addFailure(turn, failed);
+        turns.push(turn);
+        active = undefined;
+        emit('chat', { type: 'chat/error', turnId, duration: turn.duration, part });
+        doing(undefined);
+        touch();
+      });
       return true;
     },
 
     cancel: (turnId) => {
+      beginning = undefined;
       // A turn blocked on a person is stopped by answering no, not by leaving
       // a promise nobody will settle - the subprocess would sit there for ever.
       // All of them, not the last one: a turn stopped while two questions
@@ -3890,7 +3984,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const after = next.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       if (before === after) return true;
       const requested = { ...declared };
-      if (next.length > 0) requested.ahp = contributed(next, ranByClient) as Bag;
+      if (next.length > 0) requested.ahp = contributed(next, ranByClient, contributedWork) as Bag;
       else delete requested.ahp;
       try { await handle.setMcpServers(requested as never); }
       catch { return false; }
@@ -4036,13 +4130,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       releaseCalls('The session was disposed');
       try { rmSync(initScript, { force: true }); }
       catch { /* a script that was never written */ }
-      handle.close();
-      /*
-       * The query's cleanup, which `close` starts and does not return: it
-       * settles once the CLI's process has exited, or after the SDK's own bound.
-       */
-      const disposed = (handle as unknown as { [Symbol.asyncDispose]?: () => Promise<void> })[Symbol.asyncDispose]?.();
-      return Promise.resolve(disposed).catch(() => undefined);
+      return idle.dispose();
     },
   };
   return self;

@@ -95,6 +95,9 @@
       "workerStop": {
         "required": false
       },
+      "idleTimeoutMs": {
+        "required": false
+      },
       "presets": {
         "required": false
       }
