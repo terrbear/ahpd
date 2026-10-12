@@ -57,7 +57,7 @@ function questionsOf(schema: Bag): Bag[] {
   });
 }
 
-function contentOf(questions: Bag[], answers: Bag): Bag {
+export function contentOf(questions: Bag[], answers: Bag): Bag {
   const content: Bag = {};
   for (const question of questions) {
     const id = String(question.id);

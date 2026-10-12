@@ -23,6 +23,7 @@
  * not have yet.
  */
 
+import { asyncInputs } from './async-input.js';
 import { idOf } from '@ahpd/sdk';
 import type { AcpCatalog } from './persistence.js';
 import { turnsOf } from './transcript.js';
@@ -178,6 +179,20 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   /** The server's own id for this conversation, once `session/new` answered. */
   let acpSessionId: string | undefined = record?.id;
   const inputs = elicitations(emit, start.chatUri, () => ({ sessionId: acpSessionId, turn: mapping }));
+  const asynchronous = asyncInputs(emit, start.chatUri, turns, (turn, id, response, answers) => {
+    const watched = record?.turns.find((one) => one.turnId === turn);
+    if (watched === undefined || record === undefined) throw new Error('The question transcript is unavailable');
+    const previous = watched.inputs;
+    watched.inputs = { ...previous, [id]: { response, answers: structuredClone(answers) } };
+    try { catalog?.save(record, hostId); }
+    catch (error) {
+      if (previous === undefined) delete watched.inputs;
+      else watched.inputs = previous;
+      throw error;
+    }
+  });
+  for (const request of asynchronous.requests()) pendingInputs.set(String(request.id), request);
+
   /** The one opening, shared by every caller, so one server is spawned. */
   let opening: Promise<{ connection: AcpConnection; sessionId: string }> | undefined;
   /** Whether a client asked to stop, read when the prompt settles. */
@@ -365,6 +380,11 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
      * last carried.
      */
     for (const action of mapUpdate(current, update)) {
+      if (action.type === 'chat/inputRequested') {
+        if (record !== undefined) catalog?.save(record, hostId);
+        const part = current.parts.find((one) => bag(one.request).id === bag(action.request).id);
+        if (part !== undefined) asynchronous.register(current.turnId, part);
+      }
       if (action.type === 'chat/usage' && active !== undefined) active.usage = bag(action.usage);
       emit('chat', action);
     }
@@ -1215,6 +1235,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
      * exactly once. This must not send one of its own, or a client sees two.
      */
     cancel: (turnId) => {
+      asynchronous.cancel();
       const turn = active;
       if (turn === undefined || String(turn.id) !== turnId) return;
       cancelRequested = true;
@@ -1316,7 +1337,10 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       touch();
     },
 
-    answer: inputs.answer,
+    answer: (id, accepted, answers) => {
+      if (asynchronous.has(id)) return asynchronous.answer(id, accepted, answers);
+      return inputs.answer(id, accepted, answers);
+    },
 
     /**
      * Take a config value, in the server's own terms.

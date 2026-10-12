@@ -1,3 +1,4 @@
+import { mapAsyncInput } from './async-input.js';
 /**
  * The one place a `session/update` becomes an AHP `chat/*` action.
  *
@@ -135,6 +136,8 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
      * `chat/responsePart`.
      */
     case 'agent_message_chunk': {
+      const input = mapAsyncInput(turn, update);
+      if (input !== undefined) return input;
       const text = textOf(update.content);
       return text === undefined ? [] : chunk(turn, 'markdown', text);
     }

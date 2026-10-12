@@ -12,7 +12,7 @@
  * answers `undefined` for it rather than inventing a conversation.
  */
 
-import type { Agent } from '@ahpd/sdk';
+import type { Agent, Bag } from '@ahpd/sdk';
 import { mapUpdate } from './mapping.js';
 import type { AcpTurn, WatchedSession } from './types.js';
 
@@ -42,6 +42,14 @@ export function turnsOf(session: WatchedSession): TranscriptTurn[] {
       calls: new Map(),
     };
     for (const update of watched.updates) mapUpdate(replay, update);
+    for (const part of replay.parts) {
+      const request = part.request as Bag | undefined;
+      const settled = request === undefined ? undefined : watched.inputs?.[String(request.id)];
+      if (settled !== undefined && request !== undefined) {
+        part.response = settled.response;
+        request.answers = structuredClone(settled.answers);
+      }
+    }
     return {
       id: watched.turnId,
       startedAt: watched.startedAt,

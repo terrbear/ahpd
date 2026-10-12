@@ -10575,9 +10575,14 @@ export function createHost(options: HostOptions): Host {
              */
             const response = typeof action.response === 'string' ? action.response : undefined;
             const accepted = response !== undefined ? response === 'accept' : action.accepted !== false;
-            session.answer(String(action.requestId ?? action.id ?? ''), accepted, (typeof action.answers === 'object' && action.answers !== null
+            const followup = session.answer(String(action.requestId ?? action.id ?? ''), accepted, (typeof action.answers === 'object' && action.answers !== null
               ? action.answers
               : {}) as Record<string, unknown>);
+            if (followup !== undefined) {
+              const provider = sessions.get(session.uri)?.agent.provider ?? 'This provider';
+              const refused = beginOrRun(session, provider, crypto.randomUUID(), followup.text, undefined, { origin: { kind: 'user' } }, ownerFor(connection), crypto.randomUUID());
+              if (refused !== undefined) no(refused);
+            }
             break;
           }
           /*

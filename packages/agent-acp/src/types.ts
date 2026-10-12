@@ -237,6 +237,7 @@ export interface WatchedTurn {
   duration?: number;
   /** Every update the server sent while this turn ran. */
   updates: SessionUpdate[];
+  inputs?: Record<string, { response: string; answers: Bag }>;
 }
 
 /**

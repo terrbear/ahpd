@@ -105,3 +105,17 @@ ID. A backend that cannot load sessions reports an error instead of silently
 starting another conversation. Interrupted turns are restored as cancelled.
 Sessions created before this registry existed require recovery because their
 host-to-provider mapping was not persisted.
+
+## Codex asynchronous questions
+
+Codex ACP updates carrying `_meta["codex/asyncUserInput"]` become persistent AHP
+input requests. This requires a Codex ACP bridge that forwards
+`agentMessage.questions`; older bridges discard those native questions.
+Completing a turn does not withdraw the form. Reconnecting or restarting restores
+unanswered forms, and accepted or declined answers are saved before completion is
+broadcast. An explicit stop withdraws pending forms.
+
+A form answer queues a new user turn through the host's normal message queue.
+The prompt includes each original question and the user's answer, including
+free text. The SDK's `Session.answer` may return `{text}` for this asynchronous
+follow-up; existing backends that return nothing keep their current behavior.
