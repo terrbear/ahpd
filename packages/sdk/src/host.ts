@@ -57,6 +57,7 @@ import type { RunEnding, StartSession } from './types/automations.js';
 import type { Peer } from './types/rpc.js';
 import type { Owner } from './types/usage.js';
 import { toolsServers } from './toolserver.js';
+import { Deliveries } from './delivery.js';
 
 /** `file://` and a path. A string, so this file needs no filesystem to say it. */
 const uriOf = (path: string): string => `file://${path}`;
@@ -930,6 +931,7 @@ export function createHost(options: HostOptions): Host {
   }
   /** Live sessions, by their own uri. */
   const sessions = new Map<string, Held>();
+  const deliveries = new Deliveries();
   /**
    * The live sessions started by resuming one the backend recorded, whose
    * workers from before this process are read back beside the live ones. A
@@ -3619,6 +3621,7 @@ export function createHost(options: HostOptions): Host {
       ...instructions(uri),
       ...(receivedInstructions === undefined ? [] : [receivedInstructions]),
     ];
+    let deliveryOwner: Session | undefined;
     const session = used.create({
       uri,
       chatUri,
@@ -3674,6 +3677,7 @@ export function createHost(options: HostOptions): Host {
       subagent: (toolCallId: string, request: SubagentRequest) => openSubagent(uri, chatUri, toolCallId, request),
       emit: (channel, action) => {
         const where = channel === 'chat' ? chatUri : uri;
+        if (deliveryOwner !== undefined) deliveries.observe(where, action, deliveryOwner);
         /*
          * Who sent this turn, and a queued one finding out which turn it became.
          *
@@ -3923,6 +3927,7 @@ export function createHost(options: HostOptions): Host {
     // The name it is held under, which is its provider's. Recorded so every
     // other answer about it uses that same string.
     names.set(idOf(uri), uri);
+    deliveryOwner = session;
     byChat.set(chatUri, { uri, chat: session });
     /*
      * The draft somebody left on this chat before it was running.
@@ -4857,6 +4862,7 @@ export function createHost(options: HostOptions): Host {
      * in it: a session that is gone keeps nothing there watched.
      */
     const gone = dirOf(uri);
+    deliveries.forget(uri);
     sessions.delete(uri);
     if (gone !== undefined) stopUnwatched(gone);
     /*
@@ -4963,6 +4969,7 @@ export function createHost(options: HostOptions): Host {
      * place: the clients watching it there still watch it.
      */
     const previous = dirOf(uri);
+    deliveries.forget(uri);
     sessions.delete(uri);
     if (previous !== undefined && previous !== to) stopUnwatched(previous);
     try {
@@ -5656,7 +5663,7 @@ export function createHost(options: HostOptions): Host {
     models: () => [...learned].flatMap(([provider, known]) => known.models.map((model) => ({
       id: model.id, name: model.name, provider,
     }))),
-    context: async (session, chatId) => {
+    context: async (session, chatId, pendingOffset) => {
       const held = sessions.get(heldAs(session));
       const found = held === undefined ? undefined : chatMeant(held, chatId);
       if (found === undefined) return undefined;
@@ -5665,21 +5672,25 @@ export function createHost(options: HostOptions): Host {
         turns: Array.isArray(state.turns) ? state.turns as Bag[] : [],
         ...(typeof state.activeTurn === 'object' && state.activeTurn !== null ? { activeTurn: state.activeTurn as Bag } : {}),
         hasMoreHistory: state.turnsNextCursor !== undefined,
+        delivery: deliveries.context({ resource: heldAs(session), chat: found.uri, session: found.chat }, pendingOffset),
       };
     },
-    send: async (session, chatId, text, from) => {
+    send: async (session, chatId, text, from, supersedes) => {
       const held = sessions.get(heldAs(session));
       const found = held === undefined ? undefined : chatMeant(held, chatId);
       if (found === undefined) throw new Error(`${session} is not a session this host is running`);
-      const state = found.chat.chatState() as { activeTurn?: unknown; queuedMessages?: unknown; steeringMessage?: unknown };
-      const busy = state.activeTurn !== undefined || state.steeringMessage !== undefined
-        || (Array.isArray(state.queuedMessages) && state.queuedMessages.length > 0);
-      if (busy) {
-        found.chat.queue(crypto.randomUUID(), text, undefined, from);
-        return 'queued';
+      if (found.uri !== found.chat.chatUri) throw new Error('Messaging this worker chat is unsupported; refusing to send to its parent');
+      return deliveries.send({ resource: heldAs(session), chat: found.uri, session: found.chat },
+        { session: uri, chat: chatUri }, text, from, supersedes);
+    },
+    interrupt: async (session, chatId, turnId) => {
+      const held = sessions.get(heldAs(session));
+      const found = held === undefined ? undefined : chatMeant(held, chatId);
+      if (found === undefined) throw new Error(`${session} is not a session this host is running`);
+      if (toolCallOfSubagentChat(found.uri) !== undefined) {
+        throw new Error('Worker interruption is unsupported here; refusing to cancel its parent');
       }
-      found.chat.begin(crypto.randomUUID(), text, undefined, from);
-      return 'sent';
+      return deliveries.interrupt({ resource: heldAs(session), chat: found.uri, session: found.chat }, turnId);
     },
     create: async (asked) => {
       const provider = asked.provider ?? sessions.get(uri)?.agent.provider ?? first.provider;
@@ -6760,6 +6771,7 @@ export function createHost(options: HostOptions): Host {
     close: () => {
       closing ??= (async () => {
         closed = true;
+        deliveries.close();
         /** One step of the close, logged rather than thrown, so a failed one does not skip the rest. */
         const step = async (what: string, run: () => unknown): Promise<void> => {
           try { await run(); }
@@ -8680,6 +8692,7 @@ export function createHost(options: HostOptions): Host {
             // with nothing to talk to, which `disposeSession` says properly.
             throw new RpcError(-32602, `${chatUri} is the only chat in ${found.uri}; dispose the session instead`);
           }
+          deliveries.forgetChat(chatUri, found.chat);
           found.chat.close();
           byChat.delete(chatUri);
           drafts.delete(chatUri);
