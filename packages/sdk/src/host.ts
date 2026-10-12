@@ -10421,7 +10421,17 @@ export function createHost(options: HostOptions): Host {
            */
           case 'chat/turnCancelled': {
             if (!worker) {
-              session.cancel(String(action.turnId ?? ''));
+              const turnId = String(action.turnId ?? '');
+              const before = serverSeq;
+              session.cancel(turnId);
+              const state = session.chatState() as { activeTurn?: { id?: unknown }; queuedMessages?: { id?: unknown }[]; steeringMessage?: { id?: unknown } };
+              if (serverSeq === before && state.activeTurn === undefined && !(state.queuedMessages ?? []).some((message) => message.id === turnId)
+                && state.steeringMessage?.id !== turnId && turnId !== '' && origin.clientSeq > 0) {
+                const alias = connection.aliases.get(channel);
+                connection.peer.notify('action', {
+                  channel: alias ?? channel, action: { type, turnId, duration: 0 }, serverSeq, origin,
+                });
+              }
               break;
             }
             const call = toolCallOfSubagentChat(channel);
