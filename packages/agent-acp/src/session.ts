@@ -77,7 +77,17 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   const hostId = idOf(start.uri);
   let record = catalog?.get(start.resume ?? hostId);
   const provider = options.provider ?? 'acp';
-  const emit = start.emit;
+  const pendingInputs = new Map<string, Bag>();
+  const emit: Start['emit'] = (where, action) => {
+    if (where === 'session' && action.type === 'session/inputNeededSet') {
+      const request = bag(action.request);
+      pendingInputs.set(String(request.id), structuredClone(request));
+    }
+    if (where === 'session' && action.type === 'session/inputNeededRemoved') {
+      pendingInputs.delete(String(action.id));
+    }
+    start.emit(where, action);
+  };
   /*
    * The directory the server works in.
    *
@@ -767,6 +777,14 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     doing('Thinking');
   };
 
+  const cancelPermissions = (): void => {
+    for (const held of permissions.values()) {
+      emit('session', { type: 'session/inputNeededRemoved', id: held.requestId });
+      held.settle('cancelled');
+    }
+    permissions.clear();
+  };
+
   /**
    * End the running turn, whoever ended it.
    *
@@ -779,6 +797,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     const turn = active;
     if (turn === undefined || String(turn.id) !== turnId) return;
     if (ending !== 'complete') inputs.cancel(turnId);
+    cancelPermissions();
     doing(undefined);
     const duration = Date.now() - Date.parse(String(turn.startedAt));
     turn.state = ending;
@@ -920,7 +939,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       if (mapping !== undefined) mapping.prompted = true;
       const response = await held.connection.prompt(held.sessionId, text);
       saidUsage(response.usage);
-      finish(turnId, response.stopReason === 'cancelled' ? 'cancelled' : 'complete');
+      finish(turnId, cancelRequested || response.stopReason === 'cancelled' ? 'cancelled' : 'complete');
     }
     catch (why: unknown) {
       // The opening is cleared so the next turn spawns a server again rather
@@ -1136,6 +1155,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       title,
       status: status(),
       lifecycle: 'ready',
+      inputNeeded: structuredClone([...pendingInputs.values()]),
       defaultChat: start.chatUri,
       chats: [{ resource: start.chatUri, title }],
       workingDirectories: [`file://${where}`],
@@ -1199,6 +1219,9 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       if (turn === undefined || String(turn.id) !== turnId) return;
       cancelRequested = true;
       doing('Cancelling');
+      inputs.cancel(turnId);
+      cancelPermissions();
+      offered.release('The turn was cancelled before a client answered this tool call');
       const connection = live;
       if (connection !== undefined && acpSessionId !== undefined) {
         // Fire and forget: the prompt's own resolution is what ends the turn.
@@ -1385,8 +1408,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
        * without answering either leaves the first hanging and the second
        * running under nobody.
        */
-      for (const held of permissions.values()) held.settle('cancelled');
-      permissions.clear();
+      cancelPermissions();
       for (const held of terminals.values()) held.handle.release();
       terminals.clear();
       const connection = live;

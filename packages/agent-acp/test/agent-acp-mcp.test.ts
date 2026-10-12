@@ -121,7 +121,7 @@ it('leaves out the host tools server when hostTools is off', async () => {
   expect(sentToServer(t.log).mcpServers.map((one) => one.name)).toEqual(['files', 'docs']);
 });
 
-it('raises a client tool call for the client and returns what the client says', async () => {
+it.each(['complete', 'cancel'])('retains a client call in snapshots until %s', async (ending) => {
   const t = await talking(true);
   await t.client.handle({
     method: 'dispatchAction',
@@ -156,6 +156,20 @@ it('raises a client tool call for the client and returns what the client says', 
       status: 'running',
     },
   });
+  const pending = await t.client.handle({ method: 'subscribe', params: { channel: t.uri } });
+  expect(pending).toMatchObject({ snapshot: { state: { inputNeeded: [request] } } });
+  if (ending === 'cancel') {
+    await t.client.handle({
+      method: 'dispatchAction',
+      params: { channel: t.chatUri, action: { type: 'chat/turnCancelled', turnId: 't1', duration: 0 } },
+    });
+    await until(() => actions(t.notes, t.uri).some((a) => a.type === 'session/inputNeededRemoved'));
+    const cancelled = await t.client.handle({ method: 'subscribe', params: { channel: t.uri } });
+    expect(cancelled).toMatchObject({ snapshot: { state: { inputNeeded: [] } } });
+    await until(() => actions(t.notes, t.chatUri).some((a) => a.type === 'chat/turnCancelled'));
+    expect(actions(t.notes, t.chatUri).some((a) => a.type === 'chat/turnCancelled')).toBe(true);
+    return;
+  }
   await t.client.handle({
     method: 'dispatchAction',
     params: {
@@ -170,6 +184,8 @@ it('raises a client tool call for the client and returns what the client says', 
   });
   await until(() => actions(t.notes, t.chatUri).some((a) => a.type === 'chat/turnComplete'));
   expect(actions(t.notes, t.uri).some((a) => a.type === 'session/inputNeededRemoved' && a.id === (request as { id: string }).id)).toBe(true);
+  const settled = await t.client.handle({ method: 'subscribe', params: { channel: t.uri } });
+  expect(settled).toMatchObject({ snapshot: { state: { inputNeeded: [] } } });
   const prose = actions(t.notes, t.chatUri).filter((a) => a.type === 'chat/delta').map((a) => String(a.content)).join('');
   expect(prose).toContain('mcp=dummy says hi');
 });

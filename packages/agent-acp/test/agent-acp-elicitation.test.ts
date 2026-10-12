@@ -74,6 +74,8 @@ it("publishes accepted async questions before turn completion and retains them t
   expect(
     events.some((e) => e.action.type === "session/inputNeededRemoved"),
   ).toBe(false);
+  const pending = events.find((e) => e.action.type === "session/inputNeededSet")?.action.request;
+  expect(session.sessionState()).toMatchObject({ inputNeeded: [pending] });
   session.begin("turn-interrupt", "interrupt");
   await until(
     () =>
@@ -98,6 +100,7 @@ it("publishes accepted async questions before turn completion and retains them t
   );
   await until(() => readFileSync(log, "utf8").includes("Use another folder"));
   expect(readFileSync(log, "utf8")).toContain("Keep the original untouched");
+  expect(session.sessionState()).toMatchObject({ inputNeeded: [] });
   const state = session.chatState() as Bag;
   const origin = (state.turns as Bag[]).find(
     (turn) => turn.id === "turn-async",
