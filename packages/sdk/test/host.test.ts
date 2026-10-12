@@ -4972,7 +4972,7 @@ describe('tools the host contributes', () => {
     }).snapshot.state;
     expect(state.serverTools?.map((one) => one.name)).toEqual([
       'list_sessions', 'get_current_session', 'set_workspace', 'create_session', 'create_chat',
-      'rename_chat', 'send_message', 'get_session_context', 'delete_session',
+      'rename_chat', 'send_message', 'interrupt_session', 'get_session_context', 'delete_session',
       'add_artifact_or_reference', 'remove_artifact_or_reference', 'list_artifacts_and_references',
       'ahp_resource', 'ahp_terminals',
     ]);
@@ -5079,7 +5079,7 @@ describe('tools the host contributes', () => {
       await client.handle({ method: 'subscribe', params: { channel: chatUri } });
       // From the first session's tools, at the second, by its link.
       const said = await call('send_message', { session: 'agent-host-session://claude/other', message: 'check the makefile' }, 0);
-      expect(said).toBe('Message sent (agent-host-session://claude/other).');
+      expect(JSON.parse(said)).toMatchObject({ state: 'consumed', resource: 'claude:/other', deliveryId: expect.any(String) });
       await settle();
       const started = actions(p, chatUri).find((one) => one.action.type === 'chat/turnStarted');
       expect(started?.action.message).toMatchObject({
@@ -5102,7 +5102,7 @@ describe('tools the host contributes', () => {
       });
       await settle();
       const said = await call('send_message', { session: 'claude:/busy', message: 'and then this' }, 0);
-      expect(said).toBe('Message queued (agent-host-session://claude/busy).');
+      expect(JSON.parse(said)).toMatchObject({ state: 'queued', resource: 'claude:/busy', deliveryId: expect.any(String) });
       await settle();
       const queued = actions(p, chatUri).find((one) => one.action.type === 'chat/pendingMessageSet');
       expect(queued?.action).toMatchObject({ kind: 'queued', message: { text: 'and then this', origin: { kind: 'agent' } } });
@@ -7704,7 +7704,7 @@ describe('what a session recorded', () => {
     const tools = state.serverTools ?? [];
     expect(tools.map((one) => one.name)).toEqual([
       'list_sessions', 'get_current_session', 'set_workspace', 'create_session', 'create_chat',
-      'rename_chat', 'send_message', 'get_session_context', 'delete_session',
+      'rename_chat', 'send_message', 'interrupt_session', 'get_session_context', 'delete_session',
       'add_artifact_or_reference', 'remove_artifact_or_reference', 'list_artifacts_and_references',
       'ahp_resource', 'ahp_terminals',
     ]);

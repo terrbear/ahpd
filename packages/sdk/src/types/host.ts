@@ -431,7 +431,7 @@ export interface ToolCall {
    * on disk is opened by resuming, and a tool reading one would start an agent
    * to answer a question about the past.
    */
-  context(session: string, chatId?: string): Promise<{ turns: Bag[]; activeTurn?: Bag; hasMoreHistory: boolean } | undefined>;
+  context(session: string, chatId?: string, pendingOffset?: number): Promise<{ turns: Bag[]; activeTurn?: Bag; hasMoreHistory: boolean; delivery?: Bag } | undefined>;
   /**
    * A message into another chat, as a turn of its own.
    *
@@ -439,9 +439,10 @@ export interface ToolCall {
    * turn when something is - the queue a client sees and can reorder. `from`
    * says who sent it (`origin.kind: agent`) and where from (`_meta`), and
    * rides on the message so a client can draw it as delegated rather than
-   * typed. Answers which of the two happened.
+   * typed.
    */
-  send(session: string, chatId: string | undefined, text: string, from: Bag): Promise<'sent' | 'queued'>;
+  send(session: string, chatId: string | undefined, text: string, from: Bag, supersedes?: string): Promise<Bag>;
+  interrupt(session: string, chatId: string | undefined, turnId: string): Promise<Bag>;
   /**
    * A new session, started with its first message.
    *

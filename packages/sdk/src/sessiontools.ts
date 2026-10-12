@@ -3,23 +3,6 @@ import type { HostTool, ToolCall } from './types/host.js';
 import type { Summary } from './types/catalog.js';
 import type { Bag } from './types/common.js';
 
-/**
- * The tools an agent gets for the host it runs in, under VS Code's names.
- *
- * `serverToolNames.ts` in the reference host names nine, and its
- * `sessionServerTools.ts` says what each takes and answers. The names, the
- * input schemas and the answer shapes are copied rather than redesigned, so a
- * prompt or a skill written against that host calls these and gets the same
- * thing back: `list_sessions` answers `{ sessions: [...] }` with the same
- * keys, `send_message` says "Message queued (link)." in the same words, and a
- * link is `agent-host-session://<provider>/<id>`, which its window opens.
- *
- * Every tool acts through `ToolCall`, which is what the host lets a tool see
- * and do; nothing here reaches past it. Confirmation is the backend's: these
- * are MCP tools to the model, and the ones that write are marked
- * `destructiveHint` so a permission mode that asks, asks.
- */
-
 const LINK = 'agent-host-session';
 
 /** The clickable spelling of a session, or of one chat in it. */
@@ -209,7 +192,7 @@ const inlineInput = (input: unknown): string => {
 export const serializeContext = (
   session: Summary,
   chatId: string | undefined,
-  snapshot: { turns: Bag[]; activeTurn?: Bag; hasMoreHistory: boolean },
+  snapshot: { turns: Bag[]; activeTurn?: Bag; hasMoreHistory: boolean; delivery?: Bag },
   detail: Detail,
   limit: number,
 ): Bag => {
@@ -258,6 +241,7 @@ export const serializeContext = (
     transcript,
     hasMoreHistory: snapshot.hasMoreHistory,
     truncated,
+    ...snapshot.delivery,
   };
 };
 
@@ -564,12 +548,13 @@ export const sessionTools = (): HostTool[] => [
     definition: {
       name: 'send_message',
       title: 'Send Message',
-      description: 'Send a message to an existing session or chat, starting a new turn there. Provide a session URI from `list_sessions` or an `agent-host-session://` link; a link carrying a chat id targets that specific chat. If the target chat is busy, the message is queued and starts after the active turn completes successfully. Delivery is asynchronous: this tool does not wait for or return the reply.',
+      description: 'Send a message to an existing session or chat, starting a new turn there. Provide a session URI from `list_sessions` or an `agent-host-session://` link; a link carrying a chat id targets that specific chat. If the target chat is busy, the message is queued and starts after the active turn completes successfully. Delivery is asynchronous: this tool does not wait for or return the reply. Returns a stable receipt; inspect get_session_context before sending again. Optional supersedes replaces only your exact still-pending delivery in place. Mid-turn steering is unsupported; interrupt_session is an explicit bounded stop and never retries work.',
       inputSchema: {
         type: 'object',
         properties: {
           session: { type: 'string', description: 'The session or chat to message: a session URI from `list_sessions`, or an `agent-host-session://` link. A link carrying a chat id targets that specific chat.' },
           message: { type: 'string', description: 'The message to send.' },
+          supersedes: { type: 'string', description: 'Replace this exact still-pending delivery from this calling chat in place. Never retries an uncertain or consumed message.' },
         },
         required: ['session', 'message'],
       },
@@ -583,20 +568,44 @@ export const sessionTools = (): HostTool[] => [
       const target = found.chatId === undefined ? chats[0]?.resource : chats.find((one) => idOf(one.resource) === found.chatId)?.resource;
       if (target === at.chat)
         throw new Error(`Invalid ${tool} input: refusing to send a message to the current chat.`);
-      const what = await at.send(found.session.resource, found.chatId, message, delegated(at));
-      return `Message ${what} (${openLink(found.session.resource, found.session.provider, found.chatId)}).`;
+      const receipt = await at.send(found.session.resource, found.chatId, message, delegated(at), optional(input.supersedes, 'supersedes', tool));
+      let what = 'accepted';
+      if (receipt.state === 'queued') what = 'queued';
+      if (receipt.state === 'uncertain') what = 'unconfirmed';
+      return JSON.stringify({ ...receipt, openLink: openLink(found.session.resource, found.session.provider, idOf(String(receipt.chat))),
+        message: `Message ${what}. This is not proof the model read it; inspect delivery before any deliberate new instruction.` });
+    },
+  },
+  {
+    definition: {
+      name: 'interrupt_session',
+      title: 'Interrupt Session',
+      description: 'Explicitly stop this exact active turn, bounded to five seconds. Preserves queued messages. Returns confirmed only for a matching terminal receipt; unconfirmed never authorizes resend. Does not undo side effects or approve tools. Worker-parent fallback and delegated mid-turn steering are unsupported.',
+      inputSchema: { type: 'object', properties: {
+        session: { type: 'string', description: 'Exact target session or chat link.' },
+        turnId: { type: 'string', description: 'Exact activeTurnId read from session context.' },
+      }, required: ['session', 'turnId'] },
+      annotations: { title: 'Interrupt Session', readOnlyHint: false, destructiveHint: true },
+    },
+    run: async (input, at) => {
+      const found = await known(at, required(input.session, 'session', 'interrupt_session'), 'interrupt_session');
+      const chats = at.chats(found.session.resource);
+      const target = found.chatId === undefined ? chats[0]?.resource : chats.find((one) => idOf(one.resource) === found.chatId)?.resource;
+      if (target === at.chat) throw new Error('Refusing to interrupt the current calling chat');
+      return JSON.stringify(await at.interrupt(found.session.resource, found.chatId, required(input.turnId, 'turnId', 'interrupt_session')));
     },
   },
   {
     definition: {
       name: 'get_session_context',
       title: 'Get Session Context',
-      description: 'Read the recent conversation of an existing session or chat: a compacted transcript of its turns (messages, replies, and tool calls). Use this to see what a session you created is doing, or to gather context before sending it a message. Returns a compacted summary by default (`detail: "summary"`); request `digest` or `full` for more detail. For session metadata (status, working directory, changes, ...) use `list_sessions` with the `session` argument.',
+      description: 'Read the recent conversation of an existing session or chat: a compacted transcript of its turns (messages, replies, and tool calls). Includes exact chat/active-turn identity, pending order/age, delivery receipts and safe control capabilities. Consumed means a correlated turn handoff, not model comprehension; absent receipts remain unknown and never authorize retry. Use this before sending a message. Returns a compacted summary by default (`detail: "summary"`); request `digest` or `full` for more detail. For session metadata (status, working directory, changes, ...) use `list_sessions` with the `session` argument.',
       inputSchema: {
         type: 'object',
         properties: {
           session: { type: 'string', description: 'The session or chat to read: a session URI from `list_sessions`, or an `agent-host-session://` link. A link carrying a chat id targets that specific chat.' },
           detail: { type: 'string', enum: ['summary', 'digest', 'full'], description: 'How much conversation detail to return. `summary` (default): status and a short per-turn gist (the message plus a compact snippet of the reply). `digest`: adds the full assistant reply text and tool-call names. `full`: adds tool-call inputs. Higher levels return more tokens.' },
+          pendingOffset: { type: 'integer', minimum: 0, description: 'Offset into pendingMessages, independently of transcript history.' },
           transcriptLimit: { type: 'number', description: 'Maximum number of most-recent turns to include. Defaults to 10; capped at 50.' },
         },
         required: ['session'],
@@ -612,12 +621,15 @@ export const sessionTools = (): HostTool[] => [
       if (asked !== undefined && (typeof asked !== 'number' || !Number.isFinite(asked) || asked < 1))
         throw new Error(`Invalid ${tool} input: transcriptLimit must be a positive number.`);
       const limit = Math.min(50, Math.floor(typeof asked === 'number' ? asked : 10));
-      const snapshot = await at.context(found.session.resource, found.chatId);
+      const pendingOffset = input.pendingOffset ?? 0;
+      if (!Number.isSafeInteger(pendingOffset) || Number(pendingOffset) < 0) throw new Error('pendingOffset must be a non-negative safe integer');
+      const snapshot = await at.context(found.session.resource, found.chatId, Number(pendingOffset));
       if (snapshot === undefined) {
         return JSON.stringify({
           session: found.session.resource,
           openLink: openLink(found.session.resource, found.session.provider, found.chatId),
           detail, transcript: [], hasMoreHistory: false, truncated: false,
+          deliveryState: 'unknown', reason: 'The host snapshot is unavailable; absence never authorizes retry',
         });
       }
       return JSON.stringify(serializeContext(found.session, found.chatId, snapshot, detail as Detail, limit));

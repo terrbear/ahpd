@@ -3,6 +3,7 @@ import { Status } from '../src/catalog.js';
 import {
   filterSessions, openLink, serializeContext, serializeSession, sessionMeant, sessionTools, statusWords,
 } from '../src/sessiontools.js';
+import type { ToolCall } from '../src/types/host.js';
 import type { Summary } from '../src/types/catalog.js';
 
 /*
@@ -194,16 +195,17 @@ describe('a transcript as get_session_context answers it', () => {
 });
 
 describe('the set itself', () => {
-  it('is the reference host\'s nine, by name, with the required fields it requires', () => {
+  it('retains the session tools and exposes explicit bounded interruption with required identities', () => {
     const tools = sessionTools();
     expect(tools.map((one) => one.definition.name)).toEqual([
       'list_sessions', 'get_current_session', 'set_workspace', 'create_session', 'create_chat',
-      'rename_chat', 'send_message', 'get_session_context', 'delete_session',
+      'rename_chat', 'send_message', 'interrupt_session', 'get_session_context', 'delete_session',
     ]);
     const schema = (name: string) => tools.find((one) => one.definition.name === name)?.definition.inputSchema as { required?: string[] };
     expect(schema('create_session').required).toEqual(['relationship', 'prompt', 'title']);
     expect(schema('set_workspace').required).toEqual(['workspaceFolder', 'isolation']);
     expect(schema('send_message').required).toEqual(['session', 'message']);
+    expect(schema('interrupt_session').required).toEqual(['session', 'turnId']);
     expect(schema('rename_chat').required).toEqual(['title']);
   });
 
@@ -227,4 +229,24 @@ describe('the set itself', () => {
     expect(Object.keys(definition.inputSchema?.properties ?? {})).toEqual(['session', 'chat', 'title']);
     expect(definition.inputSchema?.required).toEqual(['title']);
   });
+});
+
+it('reports unavailable host context as unknown rather than implying an empty delivery queue', async () => {
+  const tool = sessionTools().find((one) => one.definition.name === 'get_session_context')!;
+  const at = { sessions: () => [row()], context: async () => undefined } as unknown as ToolCall;
+  const answer = JSON.parse(await tool.run({ session: row().resource }, at));
+  expect(answer.deliveryState).toBe('unknown');
+  expect(answer.reason).toContain('never authorizes retry');
+  expect(answer).not.toHaveProperty('pendingCount');
+});
+
+it('never describes an uncertain backend delivery as accepted in the human acknowledgement', async () => {
+  const tool = sessionTools().find((one) => one.definition.name === 'send_message')!;
+  const at = { session: 'claude:/caller', chat: 'ahp-chat:/caller', turn: () => undefined,
+    sessions: () => [row()], chats: () => [{ resource: 'ahp-chat:/target' }],
+    send: async () => ({ state: 'uncertain', chat: 'ahp-chat:/target', deliveryId: 'uncertain-id' }),
+  } as unknown as ToolCall;
+  const answer = JSON.parse(await tool.run({ session: row().resource, message: 'instruction' }, at));
+  expect(answer.state).toBe('uncertain');
+  expect(answer.message).toMatch(/^Message unconfirmed\./);
 });
