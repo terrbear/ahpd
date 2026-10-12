@@ -35,7 +35,17 @@ Then add one entry per ACP server to `plugins` in the daemon's `config.json`:
 }
 ```
 
-The command has to be on the daemon's `PATH`. The `codex` CLI has no ACP mode of its own; `codex-acp` comes from `npm i -g @agentclientprotocol/codex-acp`. A command that is missing fails that provider's turns with a message and leaves the daemon running.
+The command must be an absolute executable path or available on the daemon's `PATH`. The `codex` CLI has no ACP mode of its own. This fork uses [terrbear/codex-acp](https://github.com/terrbear/codex-acp), including its native asynchronous question support.
+
+From the terrbear/ahpd repository, install the pinned adapter into a new directory:
+
+```bash
+node scripts/install-codex-acp.mjs "$HOME/.local/share/ahpd/codex-acp"
+```
+
+Set the Codex provider's `command` to the absolute `dist/index.js` path printed by the installer. The installer fetches the exact fork commit in `scripts/codex-acp.json`, installs its locked dependencies and builds it. It requires Git, npm and Node 22 or newer; Node must also be on the daemon's `PATH`. Existing install directories are never overwritten. For updates, install into a new directory, change the provider command and restart ahpd.
+
+Do not substitute the upstream `@agentclientprotocol/codex-acp` npm package: it may lack the fixes required by this daemon. Adapter changes and pull requests belong in `terrbear/codex-acp`; daemon changes belong in `terrbear/ahpd`. A missing command fails that provider's turns with a message and leaves the daemon running.
 
 ## In your own host
 

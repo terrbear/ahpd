@@ -25,7 +25,8 @@
     "boundary": "node scripts/boundary.mjs",
     "test": "node tools/schema.mjs && vitest run",
     "schema": "node tools/schema.mjs",
-    "wire": "node tools/validate.mjs"
+    "wire": "node tools/validate.mjs",
+    "install:codex": "node scripts/install-codex-acp.mjs"
   },
   "devDependencies": {
     "@ahpd/agent-claude": "workspace:*",
