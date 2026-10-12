@@ -64,6 +64,7 @@ await listen({ port: 9187 }, (peer) => host.accept(peer));
 | option | | |
 | --- | --- | --- |
 | `command` | required | the program to spawn as the ACP server |
+| `stateDirectory` | | private restart registry directory; defaults to `acp-sessions` beside daemon configuration when used as a plugin |
 | `args` | | the arguments to give it |
 | `env` | | environment variables merged over `process.env` for the child |
 | `cwd` | | the directory the server runs in; the session's working directory when absent |
@@ -90,3 +91,17 @@ A `session/request_permission` is a confirmation offering the server's own optio
 ## License
 
 MIT © Softov
+
+## Restart persistence
+
+When loaded as a daemon plugin, the bridge stores its host IDs, provider resume
+IDs and completed transcript turns in `acp-sessions` beside the daemon
+configuration. The index and per-session files are private (mode 0600), and
+writes replace files atomically. `stateDirectory` overrides that directory.
+Embedders calling `acpAgent` directly can opt in with the same option.
+
+Reopening a saved host ID uses ACP `session/load` with its original provider
+ID. A backend that cannot load sessions reports an error instead of silently
+starting another conversation. Interrupted turns are restored as cancelled.
+Sessions created before this registry existed require recovery because their
+host-to-provider mapping was not persisted.

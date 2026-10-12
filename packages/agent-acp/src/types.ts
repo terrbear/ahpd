@@ -43,6 +43,7 @@ import type { Bag, MessageFrom } from '@ahpd/sdk';
 
 /** What an embedder, or a plugin's options, may set. */
 export interface AcpOptions {
+  stateDirectory?: string;
   /** The program to spawn as the ACP server. */
   command: string;
   /** The arguments to give it. */

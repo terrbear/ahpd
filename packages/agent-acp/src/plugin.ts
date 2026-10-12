@@ -11,6 +11,7 @@
  * collision - which is how one package serves Copilot and Codex at once.
  */
 
+import { join } from 'node:path';
 import type { PluginHost } from '@ahpd/sdk';
 import { acpAgent } from './agent.js';
 import type { AcpOptions } from './types.js';
@@ -35,6 +36,7 @@ export const title = 'ACP';
 export const optionsSchema = {
   type: 'object',
   properties: {
+    stateDirectory: { type: 'string', description: 'Private ACP session registry directory; defaults to acp-sessions beside the daemon configuration.' },
     command: { type: 'string', description: 'The program to spawn as the ACP server.' },
     args: { type: 'array', items: { type: 'string' }, description: 'The arguments to give it.' },
     env: { type: 'object', description: 'Environment variables merged over process.env for the child.' },
@@ -58,5 +60,6 @@ const optionsOf = (values: Record<string, unknown>): AcpOptions => values as unk
  * two commands and two providers are two backends that do not collide.
  */
 export function apply(host: PluginHost, options: Record<string, unknown>): void {
-  host.registerAgent(acpAgent(optionsOf(options)));
+  const configured = optionsOf(options);
+  host.registerAgent(acpAgent({ ...configured, stateDirectory: configured.stateDirectory ?? join(host.configDir, 'acp-sessions') }));
 }

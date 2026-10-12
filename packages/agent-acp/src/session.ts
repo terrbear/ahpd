@@ -23,6 +23,9 @@
  * not have yet.
  */
 
+import { idOf } from '@ahpd/sdk';
+import type { AcpCatalog } from './persistence.js';
+import { turnsOf } from './transcript.js';
 import { pathToFileURL } from 'node:url';
 import type {
   AvailableCommand,
@@ -56,7 +59,7 @@ import { connectAcp } from './connection.js';
 import { clientTools } from './clienttools.js';
 import { elicitations } from './elicitation.js';
 import { confirmationOptions, mapUpdate } from './mapping.js';
-import type { AcpConnection, AcpOptions, AcpTurn, ConfirmationOption, PermissionAnswer, WatchedSession, WatchedTurn } from './types.js';
+import type { AcpConnection, AcpOptions, AcpTurn, ConfirmationOption, PermissionAnswer, WatchedTurn } from './types.js';
 
 const bag = (value: unknown): Bag => (typeof value === 'object' && value !== null ? value as Bag : {});
 
@@ -70,7 +73,9 @@ const UNTITLED = 'ACP session';
  * particular session was told. The server is spawned lazily, on the first
  * turn, so a session somebody opened and never used costs no subprocess.
  */
-export function acpSession(options: AcpOptions, start: Start): Session {
+export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatalog): Session {
+  const hostId = idOf(start.uri);
+  let record = catalog?.get(start.resume ?? hostId);
   const provider = options.provider ?? 'acp';
   const emit = start.emit;
   /*
@@ -85,7 +90,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
   /** The config in force, by key. `session/configChanged` merges into this. */
   const settings: Record<string, unknown> = { ...start.settings };
   /** Finished turns. The running one is `active` and is deliberately not here. */
-  const turns: Bag[] = [...(start.seed ?? [])];
+  const turns: Bag[] = [...(start.seed ?? (record === undefined ? [] : turnsOf(record)))];
   /** What the host offered until the server reports its own. */
   const seeds: Bag[] = [...(start.seedCustomizations ?? [])];
   /** The commands the server last advertised, as customizations. */
@@ -161,7 +166,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
   /** The connection this session spawned, once it has one. */
   let live: AcpConnection | undefined;
   /** The server's own id for this conversation, once `session/new` answered. */
-  let acpSessionId: string | undefined;
+  let acpSessionId: string | undefined = record?.id;
   const inputs = elicitations(emit, start.chatUri, () => ({ sessionId: acpSessionId, turn: mapping }));
   /** The one opening, shared by every caller, so one server is spawned. */
   let opening: Promise<{ connection: AcpConnection; sessionId: string }> | undefined;
@@ -172,14 +177,12 @@ export function acpSession(options: AcpOptions, start: Start): Session {
   let failed: string | undefined;
   /** What it is doing, or nothing while it is idle. */
   let activity: string | undefined;
-  let title = UNTITLED;
+  let title = record?.title ?? UNTITLED;
   let modified = new Date().toISOString();
   /** Messages waiting for the running turn to end. The host's, not a client's. */
   const queued: Bag[] = [];
   /** What somebody is part-way through typing. */
   let draft: Bag | undefined;
-  /** The catalogue's record of this session, once the server has named it. */
-  let record: WatchedSession | undefined;
   /** The turn being watched, while one runs. Kept for the transcript. */
   let watchedTurn: WatchedTurn | undefined;
   /**
@@ -342,7 +345,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
       }
       return;
     }
-    if (current === undefined) return;
+    if (current === undefined || current.prompted !== true) return;
     // Kept before it is mapped, so a transcript rebuilt later sees the same
     // notifications the live client did, in the same order.
     watchedTurn?.updates.push(update);
@@ -667,17 +670,18 @@ export function acpSession(options: AcpOptions, start: Start): Session {
         ? { additionalDirectories: start.additional }
         : {};
       const mcpServers = await mcpServersFor(handshake.agentCapabilities?.mcpCapabilities);
-      if (start.resume !== undefined) {
+      const resume = acpSessionId ?? start.resume;
+      if (resume !== undefined) {
         if (handshake.agentCapabilities?.loadSession !== true) {
-          throw new Error(`${provider}: this ACP server cannot load a session, so "${start.resume}" cannot be resumed`);
+          throw new Error(`${provider}: this ACP server cannot load a session, so "${resume}" cannot be resumed`);
         }
         const loaded = await connection.loadSession({
-          sessionId: start.resume,
+          sessionId: resume,
           cwd: where,
           mcpServers,
           ...extra,
         });
-        acpSessionId = start.resume;
+        acpSessionId = resume;
         learnModes(loaded.modes);
         learnOffers(loaded.configOptions);
         start.onHandshake?.();
@@ -699,7 +703,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
        * because `begin` opens it before the server does, and a transcript that
        * dropped the first turn would be a conversation missing its question.
        */
-      record = watchSession({
+      record = record ?? watchSession({
         provider,
         id: acpSessionId,
         cwd: where,
@@ -707,6 +711,7 @@ export function acpSession(options: AcpOptions, start: Start): Session {
         title,
       });
       if (watchedTurn !== undefined && !record.turns.includes(watchedTurn)) record.turns.push(watchedTurn);
+      catalog?.save(record, hostId);
       return { connection, sessionId: acpSessionId };
     })();
     opening = pending;
@@ -749,6 +754,9 @@ export function acpSession(options: AcpOptions, start: Start): Session {
       state: 'complete',
       updates: [],
     };
+    if (record !== undefined) {
+      record.turns.push(watchedTurn);
+    }
     emit('chat', {
       type: 'chat/turnStarted',
       turnId,
@@ -782,6 +790,15 @@ export function acpSession(options: AcpOptions, start: Start): Session {
       watchedTurn.state = ending;
       watchedTurn.duration = Number.isFinite(duration) ? duration : 0;
       watchedTurn = undefined;
+    }
+    try {
+      if (record !== undefined) catalog?.save(record, hostId);
+    } catch (error) {
+      ending = 'error';
+      why = `Unable to save ACP session state: ${messageOf(error)}`;
+      turn.state = ending;
+      const watched = record?.turns.find((one) => one.turnId === turnId);
+      if (watched !== undefined) watched.state = ending;
     }
     // Before the ending action, not after: the host reads `status()` as it
     // passes that action on, and a turn still active there reads as running.
