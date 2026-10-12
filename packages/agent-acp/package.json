@@ -86,6 +86,9 @@
       },
       "hostTools": {
         "required": false
+      },
+      "stateDirectory": {
+        "required": false
       }
     }
   }

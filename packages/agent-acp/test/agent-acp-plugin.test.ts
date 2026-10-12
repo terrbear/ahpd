@@ -31,9 +31,11 @@ const FIXTURE = fileURLToPath(new URL('./fixtures/acp-server.mjs', import.meta.u
 
 /** A temporary directory removed after the one test that made it. */
 let loose: string | undefined;
+const configs: string[] = [];
 afterEach(() => {
   if (loose !== undefined) rmSync(loose, { recursive: true, force: true });
   loose = undefined;
+  for (const path of configs.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
 const peer = (): Peer & { notes: { method: string; params: unknown }[] } => {
@@ -70,8 +72,11 @@ const base = (): HostOptions => ({
   agents: [{ ...echo({ path: '/tmp/plugin-acp', pace: 0 }), provider: 'base', displayName: 'Base backend' }],
 });
 
-const load = (specs: PluginSpec[], over: Partial<HostOptions> = {}) =>
-  loadPlugins(specs, { base: { ...base(), ...over }, configDir: REPO, cwd: REPO, log: () => {} });
+const load = (specs: PluginSpec[], over: Partial<HostOptions> = {}) => {
+  const configDir = mkdtempSync(join(tmpdir(), 'ahpd-acp-plugin-config-'));
+  configs.push(configDir);
+  return loadPlugins(specs, { base: { ...base(), ...over }, configDir, cwd: REPO, log: () => {} });
+};
 
 /** The spec for the scripted server, under whatever provider the case wants. */
 const spec = (provider: string, over: Record<string, unknown> = {}): PluginSpec => ({

@@ -483,6 +483,7 @@ const onLine = (line) => {
       session = String(message.params?.sessionId ?? nextSession());
       if (typeof message.params?.cwd === 'string' && message.params.cwd !== '') cwd = message.params.cwd;
       mcpServers = message.params?.mcpServers ?? [];
+      if (process.env.ACP_LOAD_REPLAY === '1') notify({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'historic reply' } });
       respond(message.id, { modes: modes(), configOptions: configOptions() });
       return;
     }

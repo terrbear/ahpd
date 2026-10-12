@@ -12,6 +12,7 @@
  * catalogue is `catalog.ts`.
  */
 
+import { persistentCatalog } from './persistence.js';
 import type { Agent, Bag, Listed, Offered } from '@ahpd/sdk';
 import { isAbsolute } from 'node:path';
 import { catalogueOf, stateFile, watchedSession } from './catalog.js';
@@ -29,6 +30,7 @@ import type { AcpOptions } from './types.js';
  */
 export function acpAgent(options: AcpOptions): Agent {
   const provider = options.provider ?? 'acp';
+  const catalog = options.stateDirectory === undefined ? undefined : persistentCatalog(options.stateDirectory, provider);
   const displayName = options.displayName ?? 'ACP';
 
   /**
@@ -124,22 +126,17 @@ export function acpAgent(options: AcpOptions): Agent {
      * where it does not. Both are read in `catalog.ts`, because the registry is
      * process-wide and outlives any one session.
      */
-    list: (): Promise<Listed[]> => catalogueOf(options, provider),
+    list: async (): Promise<Listed[]> => {
+      const rows = await catalogueOf(options, provider);
+      return [...new Map([...rows, ...(catalog?.list() ?? [])].map((row) => [row.id, row])).values()];
+    },
 
-    /*
-     * What this process watched of a session. `undefined` for one it never
-     * opened, which is the contract's way of saying the host has no such row:
-     * the ACP server owns the conversation and this bridge does not read it
-     * back off disk.
-     */
     transcript: async (id) => {
-      const watched = watchedSession(provider, id);
+      const watched = catalog?.get(id) ?? watchedSession(provider, id);
       return watched === undefined ? undefined : turnsOf(watched);
     },
 
-    // The bridge writes no per-session file, so undefined is the real answer
-    // rather than a path to something that does not exist.
     stateFile,
-    create: (start) => acpSession(options, start),
+    create: (start) => acpSession(options, start, catalog),
   };
 }
