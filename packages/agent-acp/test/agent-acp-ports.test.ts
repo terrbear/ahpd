@@ -206,6 +206,8 @@ it('asks the person, and answers with the once option they chose', async () => {
   };
   expect(entry?.kind).toBe('toolConfirmation');
   expect(entry?.toolCall?.toolCallId).toBe('call-perm');
+  const pending = await client.handle({ method: 'subscribe', params: { channel: uri } });
+  expect(pending).toMatchObject({ snapshot: { state: { inputNeeded: [entry] } } });
 
   client.handle({
     method: 'dispatchAction',
@@ -218,6 +220,8 @@ it('asks the person, and answers with the once option they chose', async () => {
   // `allow_once`, never `allow_always`: the server offered both, and approving
   // one call is not agreeing to every call.
   expect(prose(p, chatUri)).toContain('perm=yes-once');
+  const settled = await client.handle({ method: 'subscribe', params: { channel: uri } });
+  expect(settled).toMatchObject({ snapshot: { state: { inputNeeded: [] } } });
 });
 
 /** The fixture's three options, as the protocol offers them: approve before deny, in the server's order. */
@@ -324,4 +328,19 @@ it('answers a refusal with the reject option, not with an approval', async () =>
   });
   await endedTurn(p, chatUri, 1);
   expect(prose(p, chatUri)).toContain('perm=no-once');
+});
+
+it('cancels a pending permission and removes it from the snapshot without user approval', async () => {
+  const { client, peer: p, uri, chatUri } = await talking();
+  begin(client, chatUri, 't1', 'ask me first');
+  await until(() => types(p, uri).includes('session/inputNeededSet'));
+  await client.handle({
+    method: 'dispatchAction',
+    params: { channel: chatUri, action: { type: 'chat/turnCancelled', turnId: 't1', duration: 0 } },
+  });
+  await until(() => types(p, chatUri).includes('chat/turnCancelled'));
+  expect(types(p, chatUri)).toContain('chat/turnCancelled');
+  const snapshot = await client.handle({ method: 'subscribe', params: { channel: uri } });
+  expect(snapshot).toMatchObject({ snapshot: { state: { inputNeeded: [] } } });
+  expect(prose(p, chatUri)).not.toContain('perm=yes-once');
 });
