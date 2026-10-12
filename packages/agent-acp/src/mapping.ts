@@ -118,9 +118,6 @@ const contentBlocks = (content: ToolCallUpdate['content']): Bag[] => {
   return blocks;
 };
 
-/** Everything a tool call's content says, as one string. */
-const contentText = (content: ToolCallUpdate['content']): string =>
-  contentBlocks(content).map((block) => String(block.text ?? '')).join('\n');
 
 /** One update's actions, in the order they must be sent. */
 export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
@@ -178,6 +175,8 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
       const input = written(update.rawInput);
       if (input !== undefined) {
         call.readied = true;
+        const held = callPartOf(turn, call.toolCallId);
+        if (held !== undefined) Object.assign(bag(held.toolCall), { toolInput: input, invocationMessage: call.displayName, confirmed: 'not-needed' });
         actions.push({
           type: 'chat/toolCallReady',
           turnId: turn.turnId,
@@ -201,11 +200,25 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
      */
     case 'tool_call_update': {
       const call = callOf(turn, update);
+      const part = callPartOf(turn, call.toolCallId);
+      const held = part === undefined ? undefined : bag(part.toolCall);
+      const input = written(update.rawInput);
+      if (held !== undefined && input !== undefined) held.toolInput = input;
+      if (held !== undefined && update.content !== undefined && update.content !== null) held.content = contentBlocks(update.content);
+      const meta = bag(update._meta);
+      const terminal = bag(meta.terminal_output_delta ?? meta.terminal_output);
+      if (held !== undefined && typeof terminal.data === 'string') {
+        const previous = (held.content ?? []) as Bag[];
+        held.content = [{ type: 'text', text: previous.map((block) => String(block.text ?? '')).join('\n') + terminal.data }];
+      }
+      if (held !== undefined && 'name' in update && typeof update.name === 'string') {
+        call.toolName = update.name;
+        held.toolName = update.name;
+      }
       if (update.status === 'completed' || update.status === 'failed') {
         const success = update.status === 'completed';
-        const text = contentText(update.content);
-        const part = callPartOf(turn, call.toolCallId);
-        const held = part === undefined ? undefined : bag(part.toolCall);
+        const content = (held?.content ?? []) as Bag[];
+        const text = content.map((block) => String(block.text ?? '')).join('\n');
         if (held !== undefined) {
           held.status = 'completed';
           held.success = success;
@@ -223,7 +236,7 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
           },
         }];
       }
-      const content = contentBlocks(update.content);
+      const content = (held?.content ?? []) as Bag[];
       if (content.length === 0) return [];
       return [{
         type: 'chat/toolCallContentChanged',
