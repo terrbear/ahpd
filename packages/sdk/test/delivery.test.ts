@@ -300,3 +300,61 @@ it('does not consume a superseding revision from an unverified same-token handof
   ]));
   expect(f.session.begin).not.toHaveBeenCalled();
 });
+
+it.each(['origin', 'delivery', 'delegation-session', 'delegation-chat', 'delegation-turn'])('rejects distinguishable same-text foreign %s on snapshot before another write', (kind) => {
+  const f = fixture();
+  const owned = f.send('same text');
+  const message = { ...f.queue[0]!.message as Bag };
+  if (kind === 'origin') message.origin = { kind: 'user' };
+  else if (kind === 'delivery') message._meta = { 'ahpd.delivery': 'foreign-explicit-delivery' };
+  else {
+    const key = { 'delegation-session': 'sourceSession', 'delegation-chat': 'sourceChat', 'delegation-turn': 'sourceTurnId' }[kind]!;
+    message._meta = { 'vscode.chat.delegation': { [key]: 'foreign-explicit-source' } };
+  }
+  f.queue[0] = { id: owned.queueId, message };
+  expect(() => f.send('overwrite', String(owned.deliveryId))).toThrow(/not your confirmed pending/);
+  expect(f.session.queue).toHaveBeenCalledTimes(1);
+  const context = f.ledger.context(f.target);
+  expect(context.deliveries).toEqual(expect.arrayContaining([
+    expect.objectContaining({ deliveryId: owned.deliveryId, state: 'uncertain' }),
+  ]));
+  expect((context.pendingMessages as Bag[])[0]).not.toHaveProperty('source');
+});
+
+it('does not accept a same-text foreign-identity callback as own pending or consumption', () => {
+  const f = fixture();
+  const owned = f.send('same text');
+  const message = { text: 'same text', origin: { kind: 'user' }, _meta: { 'ahpd.delivery': 'foreign-explicit-delivery' } };
+  f.queue[0] = { id: owned.queueId, message };
+  f.ledger.observe(f.target.chat, { type: 'chat/pendingMessageSet', kind: 'queued', id: owned.queueId, message }, f.target.session);
+  expect(f.ledger.context(f.target).deliveries).toEqual(expect.arrayContaining([
+    expect.objectContaining({ deliveryId: owned.deliveryId, state: 'uncertain' }),
+  ]));
+  f.ledger.observe(f.target.chat, { type: 'chat/turnStarted', queuedMessageId: owned.queueId, turnId: 'foreign-turn', message }, f.target.session);
+  expect(f.ledger.context(f.target).deliveries).toEqual(expect.arrayContaining([
+    expect.objectContaining({ deliveryId: owned.deliveryId, state: 'uncertain' }),
+  ]));
+  expect(() => f.send('overwrite', String(owned.deliveryId))).toThrow();
+  expect(f.session.queue).toHaveBeenCalledTimes(1);
+});
+
+it('retains own identity positives and genuinely omitted pending provenance compatibility', () => {
+  const f = fixture();
+  Object.assign(f.from._meta['vscode.chat.delegation'], { sourceTurnId: 'own-source-turn' });
+  const owned = f.send('same text');
+  expect(f.queue[0]?.message).toMatchObject({ origin: { kind: 'agent' }, _meta: {
+    'ahpd.delivery': owned.deliveryId, 'vscode.chat.delegation': { sourceSession: f.source.session, sourceChat: f.source.chat },
+  } });
+  expect(f.ledger.context(f.target).deliveries).toEqual([expect.objectContaining({ state: 'queued' })]);
+  const current = f.send('own revision', String(owned.deliveryId));
+  f.queue[0] = { id: current.queueId, message: { text: 'own revision' } };
+  expect(f.ledger.context(f.target).deliveries).toEqual(expect.arrayContaining([
+    expect.objectContaining({ deliveryId: current.deliveryId, state: 'queued' }),
+  ]));
+  const compatible = f.send('still own', String(current.deliveryId));
+  f.finish(compatible);
+  expect(f.ledger.context(f.target).deliveries).toEqual(expect.arrayContaining([
+    expect.objectContaining({ deliveryId: compatible.deliveryId, state: 'consumed' }),
+  ]));
+  expect(f.session.queue).toHaveBeenCalledTimes(3);
+});

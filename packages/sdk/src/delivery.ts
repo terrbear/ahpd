@@ -17,6 +17,8 @@ type Entry = Source & {
   supersededBy?: string;
   reason?: string;
   fingerprint: string;
+  origin: string;
+  sourceTurnId?: string;
 };
 type Waiter = { owner: Session; resource: string; chat: string; turnId: string; finish: (confirmed: boolean) => void };
 
@@ -26,7 +28,23 @@ const pending = (target: Target): Bag[] => {
   return Array.isArray(held) ? held as Bag[] : [];
 };
 const fingerprint = (text: string): string => createHash('sha256').update(text).digest('hex');
-const matches = (held: Bag, entry: Entry): boolean => fingerprint(String(object(held.message).text ?? '')) === entry.fingerprint;
+const matches = (held: Bag, entry: Entry): boolean => {
+  const message = object(held.message);
+  if (fingerprint(String(message.text ?? '')) !== entry.fingerprint) return false;
+  if (message.origin !== undefined && object(message.origin).kind !== entry.origin) return false;
+  const meta = object(message._meta);
+  if (Object.hasOwn(meta, 'ahpd.delivery') && meta['ahpd.delivery'] !== entry.deliveryId) return false;
+  const raw = meta['vscode.chat.delegation'];
+  if (raw !== undefined) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return false;
+    const delegation = object(raw);
+    const expected: Bag = { sourceSession: entry.session, sourceChat: entry.chat, sourceTurnId: entry.sourceTurnId };
+    for (const key of Object.keys(expected)) {
+      if (Object.hasOwn(delegation, key) && delegation[key] !== expected[key]) return false;
+    }
+  }
+  return true;
+};
 const terminal = (target: Target, turnId: string): boolean => target.session.allTurns().some((turn) =>
   turn.id === turnId && ['complete', 'cancelled', 'error'].includes(String(turn.state)));
 const preview = (text: string): Bag => {
@@ -107,8 +125,10 @@ export class Deliveries {
     const state = target.session.chatState();
     const busy = old !== undefined || state.activeTurn !== undefined || state.steeringMessage !== undefined || queue.length > 0;
     const id = crypto.randomUUID();
+    const sourceTurnId = object(from._meta?.['vscode.chat.delegation']).sourceTurnId;
     const entry: Entry = { ...source, deliveryId: id, generation: this.instance(target.session), resource: target.resource,
-      targetChat: target.chat, targetSession: target.session, fingerprint: fingerprint(text), acceptedAt: new Date(this.now()).toISOString(), state: 'accepted',
+      targetChat: target.chat, targetSession: target.session, fingerprint: fingerprint(text),
+      origin: from.origin?.kind ?? 'user', ...(typeof sourceTurnId === 'string' ? { sourceTurnId } : {}), acceptedAt: new Date(this.now()).toISOString(), state: 'accepted',
       ...(busy ? { queueId: old?.queueId ?? id } : {}) };
     this.entries.set(id, entry);
     if (entry.queueId !== undefined) this.queued.set(this.queueKey(target.chat, entry.queueId), id);

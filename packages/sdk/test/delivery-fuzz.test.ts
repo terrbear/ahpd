@@ -84,7 +84,7 @@ function random(seed: number) {
 }
 
 const operations = ['send', 'supersede', 'foreign', 'complete', 'consume', 'remove', 'edit', 'duplicate',
-  'reorder', 'unverifiable', 'missing', 'reconnect', 'recreate', 'interrupt', 'permission', 'elicitation', 'release', 'capacity', 'evict', 'close'];
+  'reorder', 'foreign-revision', 'unverifiable', 'missing', 'reconnect', 'recreate', 'interrupt', 'permission', 'elicitation', 'release', 'capacity', 'evict', 'close'];
 
 async function sequence(seed: number, count: number) {
   const rng = random(seed);
@@ -137,6 +137,20 @@ async function sequence(seed: number, count: number) {
       } else if (operation === 'reorder') {
         world.callbacks.reverse();
         for (const callback of world.callbacks.splice(0)) callback();
+      } else if (operation === 'foreign-revision') {
+        const entry = world.queue[0];
+        if (entry !== undefined) {
+          const owned = (ledger.context(world.target).pendingMessages as Bag[])[0]?.deliveryId;
+          entry.message = { ...(entry.message as Bag), origin: { kind: 'user' },
+            _meta: { 'ahpd.delivery': 'foreign-explicit-delivery' } };
+          ledger.observe(world.target.chat, { type: 'chat/pendingMessageSet', kind: 'queued', ...entry }, world.target.session);
+          const page = ledger.context(world.target).pendingMessages as Bag[];
+          expect(page[0]).not.toHaveProperty('source');
+          if (owned !== undefined) {
+            expect(() => world.send('foreign-overwrite', String(owned))).toThrow(/not your confirmed pending/);
+            expect(world.calls()).toBe(before);
+          }
+        }
       } else if (operation === 'unverifiable') {
         const entry = world.queue[0];
         if (entry !== undefined) ledger.observe(world.target.chat, { type: 'chat/turnStarted',
