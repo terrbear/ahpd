@@ -450,7 +450,7 @@ export interface Session {
    */
   clientGone?(clientId: string): void;
   /** Answer a question the agent asked, keyed by question id. */
-  answer(requestId: string, accepted: boolean, answers: Bag): void;
+  answer(requestId: string, accepted: boolean, answers: Bag): void | { text: string };
   /**
    * One question of an open request, as somebody types the answer.
    *
