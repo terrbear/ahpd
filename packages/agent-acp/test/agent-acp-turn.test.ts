@@ -54,11 +54,11 @@ const types = (p: ReturnType<typeof peer>, channel: string): string[] =>
   actions(p, channel).map((e) => String(e.action.type));
 
 /** A connected client with one ACP session, watching both its channels. */
-async function talking() {
+async function talking(attachments = false) {
   const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-'));
   const host = createHost({
     path,
-    agents: [acpAgent({ command: process.execPath, args: [FIXTURE], provider: 'acp' })],
+    agents: [acpAgent({ command: process.execPath, args: [FIXTURE], provider: 'acp', env: attachments ? { ACP_ATTACHMENTS: '1' } : {} })],
     // The composer's `!` prefix is the host's shell, so the host has to hold one.
     terminals: shellTerminals(),
   });
@@ -302,4 +302,33 @@ it('announces the session idle with the turnComplete that ends a !command', asyn
   begin(client, chatUri, 't1', '!echo acp-ran-it');
   await until(() => ended(p, chatUri));
   expect(statusAtEnd(p, uri, chatUri, 'chat/turnComplete')).toBe(Status.Idle);
+});
+
+it('delivers image pixels and file bytes as native blocks on an attachment-only turn', async () => {
+  const { client, peer: p, chatUri } = await talking(true);
+  const attachments = [
+    { type: 'embeddedResource', label: 'red.png', contentType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==' },
+    { type: 'embeddedResource', label: 'note.txt', contentType: 'text/plain', data: Buffer.from('actual file').toString('base64') },
+  ];
+  await client.handle({ method: 'dispatchAction', params: { channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'image', message: { text: '', attachments } } } });
+  await until(() => ended(p, chatUri));
+  expect(actions(p, chatUri).filter((e) => e.action.type === 'chat/delta').map((e) => e.action.content).join('')).toBe('red pixel; file=actual file');
+  const snapshot = await client.handle({ method: 'subscribe', params: { channel: chatUri } }) as { snapshot: { state: { turns: { message: { attachments: unknown } }[] } } };
+  expect(snapshot.snapshot.state.turns[0]?.message.attachments).toEqual(attachments);
+});
+
+it('fails visibly when the ACP provider does not accept images', async () => {
+  const { client, peer: p, chatUri } = await talking();
+  await client.handle({ method: 'dispatchAction', params: { channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'unsupported-image', message: { text: '', attachments: [{ type: 'embeddedResource', label: 'red.png', contentType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==' }] } } } });
+  await until(() => types(p, chatUri).includes('chat/error'));
+  expect(JSON.stringify(actions(p, chatUri))).toContain('does not support image');
+});
+
+it('rejects invalid attachment metadata before starting or retaining a provider turn', async () => {
+  const { client, peer: p, chatUri } = await talking(true);
+  await client.handle({ method: 'dispatchAction', params: { channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'invalid-label', message: { text: '', attachments: [{ type: 'embeddedResource', label: '../secret.png', contentType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==' }] } } } });
+  expect(JSON.stringify(p.notes)).toContain('rejectionReason');
+  expect(JSON.stringify(p.notes)).toContain('label');
+  const snapshot = await client.handle({ method: 'subscribe', params: { channel: chatUri } }) as { snapshot: { state: { turns: unknown[] } } };
+  expect(snapshot.snapshot.state.turns).toEqual([]);
 });

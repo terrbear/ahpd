@@ -156,3 +156,10 @@ Sessions use whatever the Claude CLI is signed in with. A client can push a toke
 ## License
 
 MIT © Softov
+
+AHP `embeddedResource` attachments are delivered through the Claude SDK as native
+image and PDF document blocks, or decoded UTF-8 text with its filename. Files
+remain attached to queued and resumed turns. PNG, JPEG, GIF, WebP, PDF, and UTF-8
+text are supported, with a 5 MB image limit and a 25 MB total per message. The
+host advertises this transport as `_meta["ahpd.messageAttachments"]` during
+initialization.

@@ -21,6 +21,7 @@ import type {
   NewSessionRequest,
   NewSessionResponse,
   PromptResponse,
+  ContentBlock,
   ReadTextFileRequest,
   ReadTextFileResponse,
   ReleaseTerminalRequest,
@@ -157,7 +158,7 @@ export interface AcpConnection {
   /** Set one of the server's own session config options. */
   setSessionConfigOption(request: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse>;
   /** Send one prompt and wait for the turn to stop. */
-  prompt(sessionId: string, text: string): Promise<PromptResponse>;
+  prompt(sessionId: string, text: string, attachments?: ContentBlock[]): Promise<PromptResponse>;
   /** The ACP cancel notification, which asks the server to stop a running prompt. */
   cancel(sessionId: string): Promise<void>;
   /**
@@ -230,7 +231,7 @@ export interface WatchedTurn {
   /** ISO 8601 timestamp, taken from the action the turn began with. */
   startedAt: string;
   /** What began the turn, as the transcript reports it. */
-  message: { text: string; origin?: MessageFrom['origin'] };
+  message: { text: string; origin?: MessageFrom['origin']; attachments?: MessageFrom['attachments'] };
   /** How it ended, once it has. */
   state: 'complete' | 'cancelled' | 'error';
   /** How long it took, in milliseconds, once it has ended. */

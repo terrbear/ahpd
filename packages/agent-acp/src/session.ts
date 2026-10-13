@@ -24,7 +24,8 @@
  */
 
 import { asyncInputs } from './async-input.js';
-import { idOf } from '@ahpd/sdk';
+import { idOf, embeddedAttachments } from '@ahpd/sdk';
+import { attachmentBlocks } from './attachments.js';
 import type { AcpCatalog } from './persistence.js';
 import { turnsOf } from './transcript.js';
 import { pathToFileURL } from 'node:url';
@@ -761,6 +762,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       message: {
         text,
         ...(from?.origin !== undefined ? { origin: from.origin } : {}),
+        ...(from?.attachments !== undefined ? { attachments: from.attachments } : {}),
         ...(from?._meta !== undefined ? { _meta: from._meta } : {}),
       },
       responseParts: [],
@@ -780,6 +782,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       message: {
         text,
         ...(from?.origin !== undefined ? { origin: from.origin } : {}),
+        ...(from?.attachments !== undefined ? { attachments: from.attachments } : {}),
       },
       state: 'complete',
       updates: [],
@@ -957,7 +960,11 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       }
       await chooseModel(held, chosen);
       if (mapping !== undefined) mapping.prompted = true;
-      const response = await held.connection.prompt(held.sessionId, text);
+      const attachments = attachmentBlocks(embeddedAttachments(bag(active.message).attachments));
+      const capabilities = (await held.connection.initialize()).agentCapabilities?.promptCapabilities;
+      if (attachments.some((part) => part.type === 'image') && !capabilities?.image) throw new Error('This ACP agent does not support image prompts');
+      if (attachments.some((part) => part.type === 'resource') && !capabilities?.embeddedContext) throw new Error('This ACP agent does not support embedded files');
+      const response = await held.connection.prompt(held.sessionId, text, attachments);
       saidUsage(response.usage);
       finish(turnId, cancelRequested || response.stopReason === 'cancelled' ? 'cancelled' : 'complete');
     }
@@ -1145,6 +1152,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   };
 
   return {
+    supportsAttachments: true,
     uri: start.uri,
     chatUri: start.chatUri,
 
@@ -1253,7 +1261,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     queue: (id, text, model, from) => {
       const entry: Bag = {
         id,
-        message: { text },
+        message: { text, ...(from?.attachments !== undefined ? { attachments: from.attachments } : {}) },
         ...(model !== undefined ? { model } : {}),
         ...(from !== undefined ? { from } : {}),
       };

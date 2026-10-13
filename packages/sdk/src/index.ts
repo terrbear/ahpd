@@ -69,3 +69,6 @@ export { uriFor, idFor, idOf, Status } from './catalog.js';
 export { tail, older, PAGE } from './paging.js';
 
 export type * from './types/index.js';
+
+export { embeddedAttachments } from './attachments.js';
+export type { EmbeddedAttachment } from './attachments.js';

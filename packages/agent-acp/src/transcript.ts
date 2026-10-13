@@ -61,6 +61,7 @@ export function turnsOf(session: WatchedSession): TranscriptTurn[] {
        */
       message: {
         text: watched.message.text,
+        ...(watched.message.attachments !== undefined ? { attachments: watched.message.attachments } : {}),
         origin: watched.message.origin ?? { kind: 'user' },
       },
       responseParts: replay.parts,
