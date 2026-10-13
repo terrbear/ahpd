@@ -15,6 +15,7 @@ import { Readable, Writable } from 'node:stream';
 import { client as clientApp, PROTOCOL_VERSION, ndJsonStream } from '@agentclientprotocol/sdk';
 import type {
   ClientCapabilities,
+  ContentBlock,
   InitializeRequest,
   InitializeResponse,
   ListSessionsRequest,
@@ -199,9 +200,9 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
       heard(() => connection.agent.request('session/set_mode', request)),
     setSessionConfigOption: (request: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> =>
       heard(() => connection.agent.request('session/set_config_option', request)),
-    prompt: (sessionId: string, text: string): Promise<PromptResponse> => heard(() => connection.agent.request('session/prompt', {
+    prompt: (sessionId: string, text: string, attachments: ContentBlock[] = []): Promise<PromptResponse> => heard(() => connection.agent.request('session/prompt', {
       sessionId,
-      prompt: [{ type: 'text', text }],
+      prompt: [...(text ? [{ type: 'text' as const, text }] : []), ...attachments],
     })),
     cancel: (sessionId: string): Promise<void> => heard(() => connection.agent.notify('session/cancel', { sessionId })),
     ended,

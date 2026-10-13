@@ -1,3 +1,4 @@
+import { inflateSync } from 'node:zlib';
 /*
  * A scripted ACP server for the tests.
  *
@@ -290,6 +291,23 @@ let commandsSent = false;
  */
 const promptScript = async (id, params) => {
   const text = textOf(params);
+  const image = params.prompt?.find((block) => block.type === 'image');
+  if (image) {
+    const bytes = Buffer.from(image.data, 'base64');
+    let offset = 8;
+    const chunks = [];
+    while (offset < bytes.length) {
+      const length = bytes.readUInt32BE(offset);
+      if (bytes.subarray(offset + 4, offset + 8).toString() === 'IDAT') chunks.push(bytes.subarray(offset + 8, offset + 8 + length));
+      offset += length + 12;
+    }
+    const pixels = inflateSync(Buffer.concat(chunks));
+    const red = pixels.equals(Buffer.from([0, 255, 0, 0, 255]));
+    const file = params.prompt.find((block) => block.type === 'resource');
+    notify({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: red ? `red pixel; file=${file?.resource?.text ?? ''}` : 'wrong pixels' } });
+    respond(id, { stopReason: 'end_turn' });
+    return;
+  }
   if (!commandsSent) {
     commandsSent = true;
     notify({
@@ -458,6 +476,7 @@ const onLine = (line) => {
         protocolVersion: 1,
         agentCapabilities: {
           loadSession: true,
+          ...(process.env.ACP_ATTACHMENTS === '1' ? { promptCapabilities: { image: true, embeddedContext: true } } : {}),
           ...(process.env.ACP_MCP_HTTP === '1' ? { mcpCapabilities: { http: true } } : {}),
           sessionCapabilities: { list: {}, resume: {} },
         },

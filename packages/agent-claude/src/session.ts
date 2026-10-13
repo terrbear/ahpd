@@ -3,13 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { HookCallback, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { protectedResource, urlOf } from './mcp.js';
 import { lineOf, pastLineOf, summarize, toolInputOf } from './input.js';
 import { toolMetaOf } from './kinds.js';
 import { flagSettingsOf, optionDefaults, presetValues, queryOptionsOf } from './options.js';
 import type { ActiveTurn, McpServerState, StringOrMarkdown, ToolCallCompletedState, ToolCallRunningState, ToolResultContent, ToolResultTerminalContent, ToolResultTextContent } from '@microsoft/agent-host-protocol';
 import { Status, idOf, tail } from '@ahpd/sdk';
+import { attachmentContent } from './attachments.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
 import { idleQuery } from './idle.js';
@@ -1308,7 +1309,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
   // The input stream. A query with a live stream stays open between turns,
   // which is what makes a session a session rather than a series of them.
-  const waiting: { type: 'user'; message: { role: 'user'; content: string }; parent_tool_use_id: null }[] = [];
+  const waiting: { type: 'user'; message: { role: 'user'; content: SDKUserMessage['message']['content'] }; parent_tool_use_id: null }[] = [];
   let wake: (() => void) | undefined;
   let closed = false;
 
@@ -2650,6 +2651,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         text,
         origin: from?.origin ?? { kind: 'user' },
         ...(from?._meta ? { _meta: from._meta } : {}),
+        ...(from?.attachments ? { attachments: from.attachments } : {}),
       },
       responseParts: [],
       state: 'error',
@@ -2691,6 +2693,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const beginTurn = async (turnId: string, text: string, model?: Chosen, queuedMessageId?: string, from?: MessageFrom): Promise<void> => {
+    try { attachmentContent(text, from?.attachments); }
+    catch (error) { refuseTurn(turnId, text, error instanceof Error ? error.message : String(error), queuedMessageId, from); return; }
     if (gone !== undefined) {
       refuseTurn(turnId, text, gone, queuedMessageId, from);
       return;
@@ -2722,6 +2726,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         text,
         origin: from?.origin ?? { kind: 'user' },
         ...(from?._meta ? { _meta: from._meta } : {}),
+        ...(from?.attachments ? { attachments: from.attachments } : {}),
         ...(selected ? { model: { id: selected, ...(model?.config ? { config: model.config } : {}) } } : {}),
       },
       responseParts: [],
@@ -2772,7 +2777,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     carried = undefined;
     hasNativePrompt = true;
     nativePromptSent = true;
-    waiting.push({ type: 'user', message: { role: 'user', content: sent }, parent_tool_use_id: null });
+    waiting.push({ type: 'user', message: { role: 'user', content: attachmentContent(sent, from?.attachments) }, parent_tool_use_id: null });
     wake?.();
     wake = undefined;
     touch();
@@ -2819,6 +2824,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const from: MessageFrom = {};
     if (message.origin !== undefined) from.origin = bag(message.origin) as NonNullable<MessageFrom['origin']>;
     if (message._meta !== undefined) from._meta = bag(message._meta);
+    if (Array.isArray(message.attachments)) from.attachments = message.attachments as NonNullable<MessageFrom['attachments']>;
     void beginTurn(crypto.randomUUID(), str(message.text) ?? '', model, str(next.id), from);
   };
 
@@ -3669,6 +3675,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * naming a model the CLI will not take fails with its reason instead of
      * being labelled with it and answered by another one.
      */
+    supportsAttachments: true,
     begin: (turnId, text, model, from) => { void beginTurn(turnId, text, model, undefined, from); },
     setTitle: (said) => { if (said !== '') title = said; },
 
@@ -3751,6 +3758,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
           text,
           origin: from?.origin ?? { kind: 'user' },
           ...(from?._meta ? { _meta: from._meta } : {}),
+        ...(from?.attachments ? { attachments: from.attachments } : {}),
           ...(model ? { model: { id: model.id, ...(model.config ? { config: model.config } : {}) } } : {}),
         },
       };
@@ -3836,7 +3844,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         nativePromptSent = true;
         waiting.push({
           type: 'user',
-          message: { role: 'user', content: str(message.text) ?? '' },
+          message: { role: 'user', content: attachmentContent(str(message.text) ?? '', message.attachments) },
           parent_tool_use_id: null,
         });
         wake?.();

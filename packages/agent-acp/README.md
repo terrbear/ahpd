@@ -129,3 +129,13 @@ A form answer queues a new user turn through the host's normal message queue.
 The prompt includes each original question and the user's answer, including
 free text. The SDK's `Session.answer` may return `{text}` for this asynchronous
 follow-up; existing backends that return nothing keep their current behavior.
+
+File attachments use AHP `embeddedResource` messages. Images become native ACP
+image blocks; UTF-8 text files become embedded resource blocks. PDFs are rejected
+with a recovery message because ACP providers may expose binary resources as
+base64 text instead of native documents. The
+provider must advertise `promptCapabilities.image` or `embeddedContext` for the
+corresponding content. Unsupported content fails visibly instead of being
+silently discarded. Attachments are preserved in queued turns and recorded
+transcripts. Images have a 5 MB limit and all files together have a 25 MB limit
+per message.

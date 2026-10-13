@@ -17,6 +17,7 @@
  *   the host reporting what it did.
  */
 
+import { embeddedAttachments } from './attachments.js';
 import { annotationsReducer, chatReducer, IS_CLIENT_DISPATCHABLE, SUPPORTED_PROTOCOL_VERSIONS } from '@microsoft/agent-host-protocol';
 import type { AnnotationsAction, AnnotationsState, ChangesetFile, ChatAction, ChatState, SessionInputRequestKind, TerminalInfo, ToolDefinition, Turn } from '@microsoft/agent-host-protocol';
 import type { OnWire, WireTurn } from './types/wire.js';
@@ -5285,6 +5286,9 @@ export function createHost(options: HostOptions): Host {
      * and then says something - and refused here rather than at the picker,
      * because a picker is a suggestion and this is the thing being asked for.
      */
+    if (from?.attachments?.length && !session.supportsAttachments) return `${provider} does not support file attachments`;
+    try { embeddedAttachments(from?.attachments); }
+    catch (why) { return why instanceof Error ? why.message : 'Invalid attachments'; }
     const uncharged = charged.get(session.uri)?.refusal;
     if (uncharged !== undefined) return uncharged;
     /*
@@ -6473,10 +6477,12 @@ export function createHost(options: HostOptions): Host {
     const meta = typeof message._meta === 'object' && message._meta !== null
       ? message._meta as Bag
       : undefined;
-    if (origin === undefined && meta === undefined) return undefined;
+    const attachments = message.attachments === undefined ? undefined : message.attachments as NonNullable<MessageFrom['attachments']>;
+    if (origin === undefined && meta === undefined && attachments === undefined) return undefined;
     return {
       ...(origin === undefined ? {} : { origin }),
       ...(meta === undefined ? {} : { _meta: meta }),
+      ...(attachments === undefined ? {} : { attachments }),
     };
   };
 
@@ -7314,6 +7320,7 @@ export function createHost(options: HostOptions): Host {
              */
             _meta: {
               'ahpd.activeClientSetReceipts': true,
+              'ahpd.messageAttachments': true,
               ...(Array.from(agents.values()).some((agent) => agent.acceptsSystemInstructions === true)
                 ? { [CLIENT_SYSTEM_INSTRUCTIONS]: Array.from(agents.values())
                   .filter((agent) => agent.acceptsSystemInstructions === true)

@@ -1,6 +1,8 @@
 /** One agent session: its lifecycle, its turns, and what it is waiting for. */
 
 import type { Bag } from './common.js';
+import type { Message } from '@microsoft/agent-host-protocol';
+import type { OnWire } from './wire.js';
 import type { BoundTool } from './agent.js';
 
 /**
@@ -212,6 +214,7 @@ export interface Ran {
 
 /** Who a message came from, when not the person at the keyboard. */
 export interface MessageFrom {
+  attachments?: NonNullable<OnWire<Message>['attachments']>;
   /** `Message.origin`. The user's when absent. */
   origin?: { kind: 'user' | 'agent' | 'tool' | 'automation' | 'systemNotification' };
   /** `Message._meta`, carried whole. */
@@ -220,6 +223,7 @@ export interface MessageFrom {
 
 /** A live session. */
 export interface Session {
+  supportsAttachments?: boolean;
   /** The session channel URI. */
   readonly uri: string;
   /** The chat channel URI. */
