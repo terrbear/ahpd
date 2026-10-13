@@ -512,6 +512,10 @@ const onLine = (line) => {
       return;
 
     case 'session/set_mode':
+      if (!['ask', 'code'].includes(message.params?.modeId)) {
+        write({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'Unsupported mode' } });
+        return;
+      }
       mode = String(message.params?.modeId ?? mode);
       respond(message.id, {});
       notify({ sessionUpdate: 'current_mode_update', currentModeId: mode });

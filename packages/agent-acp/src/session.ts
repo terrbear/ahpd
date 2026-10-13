@@ -701,6 +701,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
         ? { additionalDirectories: start.additional }
         : {};
       const mcpServers = await mcpServersFor(handshake.agentCapabilities?.mcpCapabilities);
+      const requestedMode = settings.permissionMode;
       const resume = acpSessionId ?? start.resume;
       if (resume !== undefined) {
         if (handshake.agentCapabilities?.loadSession !== true) {
@@ -727,6 +728,11 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
         learnModes(created.modes);
         learnOffers(created.configOptions);
         start.onHandshake?.();
+      }
+      if (typeof requestedMode === 'string' && requestedMode !== settings.permissionMode) {
+        await connection.setSessionMode({ sessionId: acpSessionId, modeId: requestedMode });
+        settings.permissionMode = requestedMode;
+        if (modes !== undefined) modes = { ...modes, currentModeId: requestedMode };
       }
       /*
        * The catalogue's record starts here, where the server has named the

@@ -299,3 +299,38 @@ it('loads a session on resume rather than opening a new one', async () => {
   expect(asked.some((one) => one.method === 'session/load')).toBe(true);
   expect(asked.some((one) => one.method === 'session/new')).toBe(false);
 });
+
+for (const resume of [undefined, 'saved-mode-session']) {
+  it(`applies the configured permission mode before prompting ${resume ?? 'a new session'}`, async () => {
+    const { agent, log } = backend();
+    const { session, watch } = start(agent, 'configured-mode', {
+      settings: { permissionMode: 'code' },
+      ...(resume === undefined ? {} : { resume }),
+    });
+    await runTurn(session, watch, 't1', 'hi');
+    const wire = requests(log);
+    const modeIndex = wire.findIndex((one) => one.method === 'session/set_mode');
+    const promptIndex = wire.findIndex((one) => one.method === 'session/prompt');
+    expect(modeIndex).toBeGreaterThanOrEqual(0);
+    expect(promptIndex).toBeGreaterThan(modeIndex);
+    expect(wire[modeIndex]?.params).toMatchObject({ modeId: 'code' });
+    expect(session.settings().permissionMode).toBe('code');
+    expect(configOf(session).values.permissionMode).toBe('code');
+  });
+}
+
+it('does not override the server mode without a configured permission mode', async () => {
+  const { agent, log } = backend();
+  const { session, watch } = start(agent, 'default-mode');
+  await runTurn(session, watch, 't1', 'hi');
+  expect(requests(log).filter((one) => one.method === 'session/set_mode')).toEqual([]);
+  expect(session.settings().permissionMode).toBe('ask');
+});
+
+it('does not send a prompt when the server rejects the configured mode', async () => {
+  const { agent, log } = backend();
+  const { session, watch } = start(agent, 'rejected-mode', { settings: { permissionMode: 'unsupported-mode' } });
+  await runTurn(session, watch, 't1', 'hi');
+  expect(watch.endings()).toContain('chat/error');
+  expect(requests(log).some((one) => one.method === 'session/prompt')).toBe(false);
+});
