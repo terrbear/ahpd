@@ -19,7 +19,7 @@ async function fixture() {
     start = given;
     const session = create(given);
     if (session instanceof Promise) throw new Error('Expected synchronous echo backend');
-    return { ...session, chatState: () => {
+    return { ...session, allTurns: () => [{ id: 'turn', responseParts: turn.parts }], chatState: () => {
       onSnapshot?.();
       return { ...session.chatState(), turns: [{ id: 'turn', responseParts: turn.parts }] };
     } };

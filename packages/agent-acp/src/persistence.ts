@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { constants, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Listed } from '@ahpd/sdk';
 import type { WatchedSession } from './types.js';
+import { turnsOf } from './transcript.js';
 
 type Entry = Omit<WatchedSession, 'turns'> & { hostIds: string[] };
 export interface AcpCatalog {
@@ -41,6 +42,7 @@ export function persistentCatalog(directory: string, provider: string): AcpCatal
     entries.set(entry.id, entry);
   }
   const loaded = new Map<string, WatchedSession>();
+  const legacy = new Set([...entries.values()].filter((entry) => entry.formatVersion !== 2).map((entry) => entry.id));
   return {
     get: (id) => {
       const entry = entries.get(id) ?? [...entries.values()].find((one) => one.hostIds.includes(id));
@@ -51,6 +53,7 @@ export function persistentCatalog(directory: string, provider: string): AcpCatal
       if (record === undefined || record.id !== entry.id || record.provider !== provider || !Array.isArray(record.turns)) {
         throw new Error('ACP session record is missing or invalid');
       }
+      turnsOf(record, directory);
       loaded.set(entry.id, record);
       return record;
     },
@@ -60,13 +63,22 @@ export function persistentCatalog(directory: string, provider: string): AcpCatal
     }))),
     save: (record, hostId) => {
       mkdirSync(folder, { recursive: true, mode: 0o700 });
+      const recordPath = join(folder, `${hash(record.id)}.json`);
+      if (record.formatVersion === 2 && legacy.has(record.id)) {
+        // Keep the previous durable representation when first replacing a
+        // legacy record, so an operator can restore it on a software rollback.
+        try { copyFileSync(recordPath, `${recordPath}.v1.bak`, constants.COPYFILE_EXCL); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      }
       const previous = entries.get(record.id);
       const { turns, ...fields } = record;
       const entry = { ...fields, hostIds: [...new Set([...(previous?.hostIds ?? []), hostId])] };
-      write(join(folder, `${hash(record.id)}.json`), {
+      write(recordPath, {
         ...record,
         turns: turns.map((turn) => turn.duration === undefined ? { ...turn, state: 'cancelled', duration: 0 } : turn),
       });
+      if (record.formatVersion === 2) legacy.delete(record.id);
+      else legacy.add(record.id);
       entries.set(record.id, entry);
       write(indexPath, { version: 1, entries: [...entries.values()] });
       loaded.set(record.id, record);

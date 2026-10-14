@@ -5978,6 +5978,11 @@ export function createHost(options: HostOptions): Host {
       return touched ? { ...turn, responseParts: next } : turn;
     });
   };
+  /** Select the same backend page as fetchTurns before adding host metadata. */
+  const snapshotTurns = (session: string, turns: Bag[], workers: Bag[]) => {
+    const page = tail(turns);
+    return { ...page, turns: withSender(session, stampedCalls(session, linkedTurns(session, page.turns, workers))) };
+  };
   /**
    * The catalogue's own title, kept when a row is opened.
    *
@@ -6302,8 +6307,8 @@ export function createHost(options: HostOptions): Host {
         : [];
       const state: Bag = { ...talking.chat.chatState(), ...startedBy(talking.uri, channel) };
       if (Array.isArray(state.turns)) {
-        const turns = linkedTurns(talking.uri, state.turns as Bag[], restored);
-        state.turns = withSender(talking.uri, stampedCalls(talking.uri, turns));
+        delete state.turnsNextCursor;
+        Object.assign(state, snapshotTurns(talking.uri, talking.chat.allTurns(), restored));
       }
       if (typeof state.activeTurn === 'object' && state.activeTurn !== null) {
         state.activeTurn = withSender(talking.uri, stampedCalls(talking.uri, [state.activeTurn as Bag]))[0];
@@ -6348,11 +6353,11 @@ export function createHost(options: HostOptions): Host {
             origin: { kind: 'tool', chat: parentChat, toolCallId: wanted },
             interactivity: 'read-only',
             // With each worker it spawned linked from the call that ran it.
-            ...tail(withSender(owning, stampedCalls(owning, linkedTurns(
+            ...snapshotTurns(
               owning,
               (one.turns ?? []) as Bag[],
               workers.filter((held) => String(held.parentToolCallId ?? '') === wanted),
-            )))),
+            ),
             queuedMessages: [],
           },
           fromSeq: serverSeq,
@@ -6367,7 +6372,7 @@ export function createHost(options: HostOptions): Host {
             status: Status.Idle,
             modifiedAt: moves.get(owning) ?? new Date().toISOString(),
             ...startedBy(nameOf(id)),
-            ...tail(withSender(owning, stampedCalls(owning, linkedTurns(owning, turns, workers)))),
+            ...snapshotTurns(owning, turns, workers),
             queuedMessages: [],
             // Held here rather than by a chat, because there is no chat. A
             // client that typed into this row and came back finds what it

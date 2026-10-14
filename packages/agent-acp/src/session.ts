@@ -28,6 +28,7 @@ import { idOf, embeddedAttachments } from '@ahpd/sdk';
 import { attachmentBlocks } from './attachments.js';
 import type { AcpCatalog } from './persistence.js';
 import { turnsOf } from './transcript.js';
+import { outputDirectory, toolLabel, ToolOutputs } from './output.js';
 import { pathToFileURL } from 'node:url';
 import type {
   AvailableCommand,
@@ -60,7 +61,7 @@ import { watchSession } from './catalog.js';
 import { connectAcp } from './connection.js';
 import { clientTools } from './clienttools.js';
 import { elicitations } from './elicitation.js';
-import { confirmationOptions, mapUpdate } from './mapping.js';
+import { confirmationOptions, contentBlocks, mapUpdate } from './mapping.js';
 import type { AcpConnection, AcpOptions, AcpTurn, ConfirmationOption, PermissionAnswer, WatchedTurn } from './types.js';
 
 const bag = (value: unknown): Bag => (typeof value === 'object' && value !== null ? value as Bag : {});
@@ -102,7 +103,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   /** The config in force, by key. `session/configChanged` merges into this. */
   const settings: Record<string, unknown> = { ...start.settings };
   /** Finished turns. The running one is `active` and is deliberately not here. */
-  const turns: Bag[] = [...(start.seed ?? (record === undefined ? [] : turnsOf(record)))];
+  const turns: Bag[] = [...(start.seed ?? (record === undefined ? [] : turnsOf(record, options.stateDirectory)))];
   /** What the host offered until the server reports its own. */
   const seeds: Bag[] = [...(start.seedCustomizations ?? [])];
   /** The commands the server last advertised, as customizations. */
@@ -372,15 +373,23 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       return;
     }
     if (current === undefined || current.prompted !== true) return;
-    // Kept before it is mapped, so a transcript rebuilt later sees the same
-    // notifications the live client did, in the same order.
-    watchedTurn?.updates.push(update);
+    // New records share the bounded mapped parts, never the raw output stream.
     /*
      * A usage is the turn's own total, held on the turn as well as sent, so a
      * client reading the snapshot mid-turn reads the same number the stream
      * last carried.
      */
-    for (const action of mapUpdate(current, update)) {
+    let actions: Bag[];
+    try { actions = mapUpdate(current, update); }
+    catch (error) {
+      const connection = live;
+      live = undefined;
+      opening = undefined;
+      void connection?.close();
+      finish(current.turnId, 'error', `Unable to retain tool output: ${messageOf(error)}`);
+      return;
+    }
+    for (const action of actions) {
       if (action.type === 'chat/inputRequested') {
         if (record !== undefined) catalog?.save(record, hostId);
         const part = current.parts.find((one) => bag(one.request).id === bag(action.request).id);
@@ -534,13 +543,13 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     const existing = mapping?.parts.find((one) => one.id === toolCallId);
     const call = existing === undefined ? {
       toolCallId,
-      toolName: request.toolCall.name ?? request.toolCall.title ?? toolCallId,
-      displayName: request.toolCall.title ?? request.toolCall.name ?? toolCallId,
+      toolName: request.toolCall.name ?? toolLabel(request.toolCall.title ?? toolCallId),
+      displayName: toolLabel(request.toolCall.title ?? request.toolCall.name ?? toolCallId),
       ...(request.toolCall.rawInput === undefined ? {} : { toolInput: JSON.stringify(request.toolCall.rawInput) }),
     } as Bag : bag(bag(existing).toolCall);
     call.status = 'pending-confirmation';
-    call.invocationMessage = request.toolCall.title ?? call.toolName;
-    call.confirmationTitle = request.toolCall.title ?? call.displayName;
+    call.invocationMessage = toolLabel(String(request.toolCall.title ?? call.toolName));
+    call.confirmationTitle = toolLabel(String(request.toolCall.title ?? call.displayName));
     if (offered.length > 0) call.options = offered;
     delete call.confirmed;
     if (existing === undefined && mapping !== undefined) {
@@ -747,6 +756,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
         additional: start.additional ?? [],
         title,
       });
+      record.formatVersion = 2;
       if (watchedTurn !== undefined && !record.turns.includes(watchedTurn)) record.turns.push(watchedTurn);
       catalog?.save(record, hostId);
       return { connection, sessionId: acpSessionId };
@@ -778,6 +788,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       parts: active.responseParts as Bag[],
       calls: new Map(),
       clientOf: offered.clientOf,
+      outputs: new ToolOutputs(outputDirectory(options.stateDirectory), `${provider}:${hostId}`, turnId),
       // From where the last update left the session's books, so this turn's
       // cost is its own and not the session's whole.
       ...(cumulative !== undefined ? { costAtStart: cumulative } : {}),
@@ -792,6 +803,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       },
       state: 'complete',
       updates: [],
+      responseParts: active.responseParts as Bag[],
     };
     if (record !== undefined) {
       record.turns.push(watchedTurn);
@@ -1028,8 +1040,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       toolCallId,
       toolName: 'terminal',
       displayName: 'Terminal',
-      intention: command,
-      invocationMessage: command,
+      intention: toolLabel(command),
+      invocationMessage: toolLabel(command),
       toolInput: command,
       confirmed: 'not-needed',
       status: 'running',
@@ -1049,15 +1061,21 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       ...(queuedMessageId !== undefined ? { queuedMessageId } : {}),
     });
     emit('chat', {
-      type: 'chat/toolCallStart', turnId, toolCallId, toolName: 'terminal', displayName: 'Terminal', intention: command,
+      type: 'chat/toolCallStart', turnId, toolCallId, toolName: 'terminal', displayName: 'Terminal', intention: toolLabel(command),
     });
     emit('chat', {
-      type: 'chat/toolCallReady', turnId, toolCallId, invocationMessage: command, confirmed: 'not-needed', toolInput: command,
+      type: 'chat/toolCallReady', turnId, toolCallId, invocationMessage: toolLabel(command), confirmed: 'not-needed', toolInput: command,
     });
     doing('Running');
     touch();
     void run(toolCallId).then((done) => {
       if (active === undefined || String(active.id) !== turnId) return;
+      const output = new ToolOutputs(outputDirectory(options.stateDirectory), `${provider}:${hostId}`, turnId).update({
+        sessionUpdate: 'tool_call_update', toolCallId,
+        content: [{ type: 'content', content: { type: 'text', text: done.output } }],
+      });
+      const blocks = output.sessionUpdate === 'tool_call_update' ? contentBlocks(output.content) : [];
+      const preview = blocks.filter((block) => block.type === 'text').map((block) => String(block.text)).join('\n');
       /*
        * The terminal first, so a client can watch the output arrive, then the
        * text it printed. `content` replaces rather than appends, so the two go
@@ -1073,10 +1091,10 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
           isPty: false,
           result: {
             ...(done.code !== undefined ? { exitCode: done.code } : {}),
-            ...(done.output === '' ? {} : { preview: done.output }),
+            ...(preview === '' ? {} : { preview }),
           },
         }]),
-        ...(done.output === '' ? [] : [{ type: 'text', text: done.output }]),
+        ...(done.output === '' ? [] : blocks),
       ];
       const result: Bag = {
         success: done.success,
@@ -1106,6 +1124,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       doing(undefined);
       touch();
       startNext();
+    }).catch((error: unknown) => {
+      if (active !== undefined && String(active.id) === turnId) finish(turnId, 'error', messageOf(error));
     });
   };
 

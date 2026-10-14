@@ -1,4 +1,5 @@
 import { mapAsyncInput } from './async-input.js';
+import { toolLabel } from './output.js';
 /**
  * The one place a `session/update` becomes an AHP `chat/*` action.
  *
@@ -89,7 +90,7 @@ const chunk = (turn: AcpTurn, kind: 'markdown' | 'reasoning', written: string): 
 const callOf = (turn: AcpTurn, update: ToolCall | ToolCallUpdate): AcpCall => {
   const known = turn.calls.get(update.toolCallId);
   if (known !== undefined) return known;
-  const title = 'title' in update && update.title !== undefined && update.title !== null ? update.title : update.toolCallId;
+  const title = toolLabel('title' in update && update.title !== undefined && update.title !== null ? update.title : update.toolCallId);
   const name = 'name' in update && update.name !== undefined && update.name !== null ? update.name : title;
   const call: AcpCall = { toolCallId: update.toolCallId, toolName: name, displayName: title, readied: false };
   turn.calls.set(update.toolCallId, call);
@@ -108,11 +109,15 @@ const callPartOf = (turn: AcpTurn, callId: string): Bag | undefined =>
   partOf(turn, callId);
 
 /** The text blocks of a tool call's content, in the order the server sent them. */
-const contentBlocks = (content: ToolCallUpdate['content']): Bag[] => {
+export const contentBlocks = (content: ToolCallUpdate['content']): Bag[] => {
   const blocks: Bag[] = [];
   for (const entry of content ?? []) {
     if (entry.type === 'content' && entry.content.type === 'text') {
       blocks.push({ type: 'text', text: entry.content.text });
+    }
+    if (entry.type === 'content' && entry.content.type === 'resource_link') {
+      blocks.push({ type: 'resource', uri: entry.content.uri, contentType: entry.content.mimeType ?? 'text/plain',
+        ...(entry.content.size == null ? {} : { sizeHint: entry.content.size }) });
     }
   }
   return blocks;
@@ -121,6 +126,7 @@ const contentBlocks = (content: ToolCallUpdate['content']): Bag[] => {
 
 /** One update's actions, in the order they must be sent. */
 export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
+  update = turn.outputs?.update(update) ?? update;
   switch (update.sessionUpdate) {
     /*
      * Prose and thinking, each appended to the run it continues.
@@ -187,6 +193,12 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
           ...(contributor === undefined ? {} : { contributor }),
         });
       }
+      if (update.content != null) {
+        const content = contentBlocks(update.content);
+        const held = callPartOf(turn, call.toolCallId);
+        if (held !== undefined) bag(held.toolCall).content = content;
+        if (content.length > 0) actions.push({ type: 'chat/toolCallContentChanged', turnId: turn.turnId, toolCallId: call.toolCallId, content });
+      }
       return actions;
     }
 
@@ -218,7 +230,7 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
       if (update.status === 'completed' || update.status === 'failed') {
         const success = update.status === 'completed';
         const content = (held?.content ?? []) as Bag[];
-        const text = content.map((block) => String(block.text ?? '')).join('\n');
+        const text = content.filter((block) => block.type === 'text').map((block) => String(block.text ?? '')).join('\n');
         if (held !== undefined) {
           held.status = 'completed';
           held.success = success;
@@ -231,7 +243,7 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
           result: {
             success,
             pastTenseMessage: call.displayName,
-            ...(text === '' ? {} : { content: [{ type: 'text', text }] }),
+            ...(content.length === 0 ? {} : { content }),
             ...(success ? {} : { error: { message: text === '' ? 'The tool failed' : text } }),
           },
         }];
