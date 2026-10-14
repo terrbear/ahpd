@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import type { Socket } from 'node:net';
 import { WebSocket } from 'ws';
 import { listen } from '../src/listen.js';
 import { createPeer, OUTBOUND_LIMIT, RpcClosed } from '../src/rpc.js';
@@ -54,6 +55,116 @@ it('stops serializing a stalled Node socket after one frame crosses the high-wat
   // Keep the synthetic model's storage small even on a failing baseline.
   queued = 0;
 });
+
+it('keeps a healthy reading Node client connected after a frame over 8 MiB and a same-turn notification', async () => {
+  let peer!: Peer;
+  let serverSocket: WebSocket | undefined;
+  const backlogs: number[] = [];
+  const amount = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!.get!;
+  vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
+    serverSocket = this;
+    const bytes = amount.call(this) as number;
+    backlogs.push(bytes);
+    return bytes;
+  });
+  const closed = vi.fn();
+  listener = await listen({ port: 0 }, (arrival) => {
+    peer = arrival;
+    return { handle: async () => ({}), close: closed };
+  });
+  client = new WebSocket(`ws://127.0.0.1:${listener.port}`);
+  const text = 'x'.repeat(OUTBOUND_LIMIT + 1024);
+  const received: Array<{ id?: number; method?: string; bytes?: number; matches?: boolean }> = [];
+  const errors: Error[] = [];
+  client.on('error', (error) => { errors.push(error); });
+  client.on('message', (raw) => {
+    const rawText = String(raw);
+    const frame = JSON.parse(rawText) as { id?: number; method?: string; result?: { text?: string } };
+    received.push(frame.id === 1
+      ? { id: frame.id, bytes: Buffer.byteLength(rawText), matches: frame.result?.text === text }
+      : (frame.method === undefined ? {} : { method: frame.method }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    client!.once('open', resolve);
+    client!.once('error', reject);
+  });
+  peer.notify('ready', {});
+  await vi.waitFor(() => expect(received).toEqual([{ method: 'ready' }]), { timeout: 5000 });
+
+  const transport = (serverSocket! as unknown as { _socket: Socket })._socket;
+  backlogs.length = 0;
+  transport.cork();
+  try {
+    peer.send({ jsonrpc: '2.0', id: 1, result: { text } });
+    peer.notify('after-large', {});
+  } finally { transport.uncork(); }
+  expect(backlogs[0]).toBe(0);
+  expect(backlogs.some((bytes) => bytes > OUTBOUND_LIMIT)).toBe(true);
+
+  await vi.waitFor(() => {
+    expect(errors).toEqual([]);
+    expect(closed).not.toHaveBeenCalled();
+    expect(client!.readyState).toBe(WebSocket.OPEN);
+    expect(received).toHaveLength(3);
+  }, { timeout: 5000 });
+  const largeFrame = received[1];
+  if (largeFrame === undefined) throw new Error('Expected the oversized frame');
+  expect(largeFrame).toMatchObject({ id: 1, matches: true });
+  expect(largeFrame.bytes).toBeGreaterThan(OUTBOUND_LIMIT);
+  expect(received[2]).toEqual({ method: 'after-large' });
+}, 15_000);
+
+it('starts a fresh Node connection after closing with oversized output and a deferred FIFO', async () => {
+  let peer!: Peer;
+  let serverSocket: WebSocket | undefined;
+  const amount = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!.get!;
+  vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
+    serverSocket = this;
+    return amount.call(this) as number;
+  });
+  const closed = vi.fn();
+  listener = await listen({ port: 0 }, (arrival) => {
+    peer = arrival;
+    return { handle: async () => ({}), close: closed };
+  });
+  const text = 'x'.repeat(OUTBOUND_LIMIT + 1);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    client = new WebSocket(`ws://127.0.0.1:${listener.port}`);
+    const received: Array<{ method?: string | undefined; matches?: boolean }> = [];
+    const errors: Error[] = [];
+    client.on('error', (error) => { errors.push(error); });
+    client.on('message', (raw) => {
+      const frame = JSON.parse(String(raw)) as { method?: string; result?: { text?: string } };
+      received.push(frame.result === undefined ? { method: frame.method } : { matches: frame.result.text === text });
+    });
+    await new Promise<void>((resolve, reject) => {
+      client!.once('open', resolve);
+      client!.once('error', reject);
+    });
+    peer.notify('ready', {});
+    await vi.waitFor(() => expect(received).toEqual([{ method: 'ready' }]), { timeout: 5000 });
+    const transport = (serverSocket! as unknown as { _socket: Socket })._socket;
+    const dropped = attempt === 0 ? new Promise<void>((resolve) => { client!.once('close', resolve); }) : undefined;
+    transport.cork();
+    try {
+      peer.send({ jsonrpc: '2.0', id: 1, result: { text } });
+      peer.notify(attempt === 0 ? 'discard' : 'fresh', {});
+      if (attempt === 0) peer.close();
+    } finally { transport.uncork(); }
+    if (dropped !== undefined) {
+      await dropped;
+      await vi.waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
+      expect(received).toEqual([{ method: 'ready' }]);
+    } else {
+      await vi.waitFor(() => {
+        expect(errors).toEqual([]);
+        expect(client!.readyState).toBe(WebSocket.OPEN);
+        expect(received).toEqual([{ method: 'ready' }, { matches: true }, { method: 'fresh' }]);
+      }, { timeout: 5000 });
+      expect(closed).toHaveBeenCalledTimes(1);
+    }
+  }
+}, 15_000);
 
 it.each(['high-water', 'peer-close'])('releases a real paused Node queue on %s within a finite traffic budget', async (ending) => {
   let peer!: Peer;

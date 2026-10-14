@@ -22,12 +22,38 @@ export interface Wire {
    * before serializing a new message if the backlog is already at or above
    * the high-water mark. One admitted frame may overshoot the mark, regardless
    * of size; `close` must release the queue without waiting for it to drain.
+   * Node wires with sendCompleted get bounded grace for one oversized frame.
    */
   bufferedBytes?(): number;
+  /**
+   * Node WebSocket opt-in: report local write completion exactly once. With
+   * bufferedBytes, enables bounded drain grace for one oversized frame.
+   * Completion is not acknowledgement by the client.
+   */
+  sendCompleted?(text: string, done: (error?: Error) => void): void;
+  /** Optional payload-free overload diagnostic. Exceptions are contained. */
+  onOutboundClose?(diagnostic: OutboundClose): void;
   /** Close the connection. */
   close(): void;
   /** Whether a `send` would still reach the client. */
   isOpen(): boolean;
+}
+
+/** Fixed reasons; never transport error text or message metadata. */
+export type OutboundCloseReason = 'backlog_limit' | 'frame_count_limit'
+  | 'deferred_byte_limit' | 'deferred_count_limit' | 'drain_timeout' | 'write_error';
+
+/** One overload close, with only byte/count/timing measurements. */
+export interface OutboundClose {
+  readonly event: 'outbound_close';
+  readonly runtime: 'node';
+  readonly reason: OutboundCloseReason;
+  readonly bufferedBytes: number;
+  readonly deferredBytes: number;
+  readonly deferredFrames: number;
+  readonly outstandingWrites: number;
+  readonly oversizedFrameBytes: number | null;
+  readonly drainElapsedMs: number;
 }
 
 /**

@@ -14,7 +14,7 @@ export type { Bag } from './common.js';
  * cannot implement that without being able to say it.
  */
 export type { OnWire, WireTurn } from './wire.js';
-export type { Request, Wire, Peer, Handler } from './rpc.js';
+export type { Request, Wire, Peer, Handler, OutboundClose, OutboundCloseReason } from './rpc.js';
 export type { Summary } from './catalog.js';
 export type { Emit, SessionOptions, Session, Ran, Chosen, MessageFrom, SubagentChat, SubagentRequest } from './session.js';
 export type { HostOptions, Connection, Credential, Host, Diagnostics, HostTool, ToolCall } from './host.js';

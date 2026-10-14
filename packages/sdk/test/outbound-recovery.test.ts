@@ -1,10 +1,13 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import type { Socket } from 'node:net';
 import { WebSocket } from 'ws';
 import { chatReducer } from '@microsoft/agent-host-protocol';
 import { echo } from '../../../examples/echo/agent.js';
 import { createHost } from '../src/host.js';
 import { listen } from '../src/listen.js';
 import { OUTBOUND_LIMIT } from '../src/rpc.js';
+import { DEFERRED_BYTE_LIMIT, DEFERRED_FRAME_LIMIT } from '../src/outbound-node.js';
+import type { Peer } from '../src/types/rpc.js';
 import type { Host } from '../src/types/host.js';
 import type { Listener } from '../src/types/listen.js';
 import { BASE, REJECTED, historicalSourcesAvailable, versions } from './outbound-versions.js';
@@ -40,6 +43,86 @@ async function seeded() {
   const truth = await setup.handle({ method: 'subscribe', params: { channel } }) as Bag;
   expect(truth.snapshot.state.turns).toHaveLength(1);
   return { setup, text };
+}
+
+/** Smaller, genuine host recovery replies that can share a deferred budget. */
+async function smaller(setup: ReturnType<Host['accept']>) {
+  const smallChannel = 'ahp-chat:/small';
+  const smallText = 's'.repeat(16 * 1024);
+  await setup.handle({ method: 'createSession', params: { channel: 'ahp-session:/small', provider: 'echo' } });
+  await setup.handle({
+    method: 'dispatchAction',
+    params: { channel: smallChannel, action: { type: 'chat/turnStarted', turnId: 'small-turn', message: { text: smallText, origin: { kind: 'user' } } } },
+  });
+  const snapshot = await setup.handle({ method: 'subscribe', params: { channel: smallChannel } });
+  const replay = await setup.handle({ method: 'reconnect', params: { clientId: 'setup', subscriptions: [smallChannel], lastSeenServerSeq: 0 } });
+  return { smallText, snapshot, replay };
+}
+
+function toolOutput(index: number, text: string) {
+  return {
+    jsonrpc: '2.0', method: 'action',
+    params: {
+      channel: 'ahp-chat:/small', serverSeq: 1000 + index,
+      action: {
+        type: 'chat/toolCallComplete', turnId: 'small-turn', toolCallId: `synthetic-tool-${index}`,
+        result: { success: true, content: [{ type: 'text', text }] },
+      },
+    },
+  };
+}
+
+async function readingBurst(largeText: string, smallText: string, toolText: string) {
+  let peer!: Peer;
+  let serverSocket: WebSocket | undefined;
+  const amount = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!.get!;
+  const observed = vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
+    serverSocket = this;
+    return amount.call(this) as number;
+  });
+  try {
+    const disconnected = vi.fn();
+    const overload = vi.fn();
+    listener = await listen({ port: 0, onOutboundClose: overload }, (arrival) => {
+      peer = arrival;
+      return { handle: async () => ({}), close: disconnected };
+    });
+    socket = new WebSocket(`ws://127.0.0.1:${listener.port}`);
+    const received: Array<{ tag: string; bytes: number; valid: boolean }> = [];
+    const errors: Error[] = [];
+    socket.on('error', (error) => { errors.push(error); });
+    socket.on('message', (raw) => {
+      const rawText = String(raw);
+      const frame = JSON.parse(rawText) as Bag;
+      let tag = frame.method as string;
+      let valid = frame.method === 'ready';
+      if (frame.method === 'action') {
+        tag = `tool-${frame.params.action.toolCallId.slice('synthetic-tool-'.length)}`;
+        valid = frame.params.action.result.content[0].text === toolText;
+      } else if (frame.id === 1) {
+        tag = 'large';
+        valid = frame.result?.snapshot?.state?.turns?.[0]?.message?.text === largeText
+          || (frame.result?.type === 'replay' && frame.result.actions.length > 0);
+      } else if (typeof frame.id === 'number') {
+        tag = `reply-${frame.id}`;
+        valid = frame.result?.snapshot?.state?.turns?.[0]?.message?.text === smallText
+          || (frame.result?.type === 'replay' && frame.result.actions.some((one: Bag) => one.action?.message?.text === smallText));
+      }
+      // Large payloads are validated but only these small summaries survive.
+      received.push({ tag, bytes: Buffer.byteLength(rawText), valid });
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket!.once('open', resolve);
+      socket!.once('error', reject);
+    });
+    peer.notify('ready', {});
+    await vi.waitFor(() => expect(received.map((one) => one.tag)).toEqual(['ready']), { timeout: 5000 });
+    return {
+      peer, received, errors, disconnected, overload,
+      transport: (serverSocket! as unknown as { _socket: Socket })._socket,
+      restore: () => observed.mockRestore(),
+    };
+  } catch (error) { observed.mockRestore(); throw error; }
 }
 
 async function ready() {
@@ -84,6 +167,130 @@ async function ready() {
   await ask('initialize', { clientId: 'healthy', protocolVersions: ['0.9.0'] });
   return { ask, notes, sizes, disconnected, text };
 }
+
+it.each(['snapshot', 'replay'])('orders tool-output bursts and multiple smaller recovery replies behind an oversized %s', async (kind) => {
+  const { setup, text } = await seeded();
+  let reading: Awaited<ReturnType<typeof readingBurst>> | undefined;
+  try {
+    const result = kind === 'snapshot'
+      ? await setup.handle({ method: 'subscribe', params: { channel } })
+      : await setup.handle({ method: 'reconnect', params: { clientId: 'setup', subscriptions: [channel], lastSeenServerSeq: 0 } });
+    const { smallText, snapshot, replay } = await smaller(setup);
+    const toolText = '界'.repeat(10 * 1024); // 30 KiB of UTF-8 tool output each.
+    const followups = [
+      toolOutput(0, toolText), { jsonrpc: '2.0', id: 2, result: snapshot },
+      toolOutput(1, toolText), { jsonrpc: '2.0', id: 3, result: replay },
+      toolOutput(2, toolText), { jsonrpc: '2.0', id: 4, result: snapshot },
+    ];
+    const bytes = followups.reduce((total, frame) => total + Buffer.byteLength(JSON.stringify(frame)), 0);
+    expect(bytes).toBeGreaterThan(128 * 1024);
+    expect(bytes).toBeLessThanOrEqual(DEFERRED_BYTE_LIMIT);
+    expect(followups.length).toBeLessThanOrEqual(DEFERRED_FRAME_LIMIT);
+    reading = await readingBurst(text, smallText, toolText);
+    reading.transport.cork();
+    try {
+      reading.peer.send({ jsonrpc: '2.0', id: 1, result });
+      for (const frame of followups) reading.peer.send(frame);
+    } finally { reading.transport.uncork(); }
+    await vi.waitFor(() => {
+      expect(reading!.errors).toEqual([]);
+      expect(reading!.disconnected).not.toHaveBeenCalled();
+      expect(reading!.overload).not.toHaveBeenCalled();
+      expect(socket!.readyState).toBe(WebSocket.OPEN);
+      expect(reading!.received.map((one) => one.tag)).toEqual([
+        'ready', 'large', 'tool-0', 'reply-2', 'tool-1', 'reply-3', 'tool-2', 'reply-4',
+      ]);
+    }, { timeout: 5000 });
+    expect(reading.received.every((one) => one.valid)).toBe(true);
+    expect(reading.received[1]!.bytes).toBeGreaterThan(OUTBOUND_LIMIT);
+    expect(reading.received.slice(2).reduce((total, one) => total + one.bytes, 0)).toBe(bytes);
+  } finally { reading?.restore(); setup.close(); }
+}, 15_000);
+
+it.each(['aggregate', 'second-oversized'])('intentionally closes a reading client for %s overflow behind an oversized recovery reply', async (ending) => {
+  const { setup, text } = await seeded();
+  let reading: Awaited<ReturnType<typeof readingBurst>> | undefined;
+  try {
+    const result = await setup.handle({ method: 'subscribe', params: { channel } });
+    const toolText = '界'.repeat(10 * 1024);
+    reading = await readingBurst(text, '', toolText);
+    const dropped = new Promise<void>((resolve) => { socket!.once('close', resolve); });
+    reading.transport.cork();
+    try {
+      reading.peer.send({ jsonrpc: '2.0', id: 1, result });
+      if (ending === 'second-oversized') reading.peer.send({ jsonrpc: '2.0', id: 2, result });
+      else {
+        // Each notification fits; nine together exceed the aggregate budget.
+        for (let index = 0; index < 9; index++) {
+          reading.peer.send(toolOutput(index, toolText));
+        }
+      }
+    } finally { reading.transport.uncork(); }
+    await dropped;
+    await vi.waitFor(() => expect(reading!.disconnected).toHaveBeenCalledTimes(1));
+    expect(reading.overload).toHaveBeenCalledTimes(1);
+    expect(reading.overload.mock.calls[0]![0]).toMatchObject({
+      reason: 'deferred_byte_limit', deferredFrames: ending === 'aggregate' ? 8 : 0,
+    });
+    expect(reading.received.map((one) => one.tag)).toEqual(['ready']);
+  } finally { reading?.restore(); setup.close(); }
+}, 15_000);
+
+it.each(['snapshot', 'replay'])('delivers an oversized %s reply followed by a same-turn notification', async (kind) => {
+  const { setup, text } = await seeded();
+  let peer!: Peer;
+  let serverSocket: WebSocket | undefined;
+  const amount = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!.get!;
+  const observed = vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
+    serverSocket = this;
+    return amount.call(this) as number;
+  });
+  try {
+    const result = kind === 'snapshot'
+      ? await setup.handle({ method: 'subscribe', params: { channel } })
+      : await setup.handle({ method: 'reconnect', params: { clientId: 'setup', subscriptions: [channel], lastSeenServerSeq: 0 } });
+    const disconnected = vi.fn();
+    listener = await listen({ port: 0 }, (arrival) => {
+      peer = arrival;
+      return { handle: async () => ({}), close: disconnected };
+    });
+    socket = new WebSocket(`ws://127.0.0.1:${listener.port}`);
+    const received: Array<{ method?: string; id?: number; bytes?: number; valid?: boolean }> = [];
+    const errors: Error[] = [];
+    socket.on('error', (error) => { errors.push(error); });
+    socket.on('message', (raw) => {
+      const rawText = String(raw);
+      const frame = JSON.parse(rawText) as Bag;
+      received.push(frame.id === 1 ? {
+        id: 1, bytes: Buffer.byteLength(rawText),
+        valid: kind === 'snapshot'
+          ? frame.result.snapshot.state.turns[0].message.text === text
+          : frame.result.type === 'replay' && frame.result.actions.length > 0,
+      } : { method: frame.method });
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket!.once('open', resolve);
+      socket!.once('error', reject);
+    });
+    peer.notify('ready', {});
+    await vi.waitFor(() => expect(received).toEqual([{ method: 'ready' }]), { timeout: 5000 });
+    const transport = (serverSocket! as unknown as { _socket: Socket })._socket;
+    transport.cork();
+    try {
+      peer.send({ jsonrpc: '2.0', id: 1, result });
+      peer.notify('after-recovery', {});
+    } finally { transport.uncork(); }
+    await vi.waitFor(() => {
+      expect(errors).toEqual([]);
+      expect(disconnected).not.toHaveBeenCalled();
+      expect(socket!.readyState).toBe(WebSocket.OPEN);
+      expect(received).toHaveLength(3);
+    }, { timeout: 5000 });
+    expect(received[1]).toMatchObject({ id: 1, valid: true });
+    expect(received[1]!.bytes).toBeGreaterThan(OUTBOUND_LIMIT);
+    expect(received[2]).toEqual({ method: 'after-recovery' });
+  } finally { observed.mockRestore(); setup.close(); }
+}, 15_000);
 
 it('delivers healthy snapshots over 8 MiB repeatedly and continues delivering actions', async () => {
   const { ask, sizes, notes, disconnected, text } = await ready();
