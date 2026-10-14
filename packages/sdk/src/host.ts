@@ -59,6 +59,7 @@ import type { Peer } from './types/rpc.js';
 import type { Owner } from './types/usage.js';
 import { toolsServers } from './toolserver.js';
 import { Deliveries } from './delivery.js';
+import { Replay } from './replay.js';
 
 /** `file://` and a path. A string, so this file needs no filesystem to say it. */
 const uriOf = (path: string): string => `file://${path}`;
@@ -1236,17 +1237,8 @@ export function createHost(options: HostOptions): Host {
     return made;
   };
   let serverSeq = 0;
-  /**
-   * How many actions to keep for a client that comes back.
-   *
-   * A number, because the alternative is a buffer that grows for the length
-   * of the daemon's life. Past it, a returning client is handed fresh
-   * snapshots instead - which is correct, only more expensive, and is what
-   * the protocol has the second reconnect result for.
-   */
-  const REPLAY = 1000;
-  /** The last `REPLAY` action envelopes, oldest first. */
-  const replayable: { channel: string; action: Record<string, unknown>; serverSeq: number; origin: Origin | undefined }[] = [];
+  /** Recent action values, bounded by both count and estimated retained bytes. */
+  const replayable = new Replay<{ channel: string; action: Record<string, unknown>; serverSeq: number; origin: Origin | undefined }>();
   /**
    * The host's own log, as OTLP.
    *
@@ -2243,8 +2235,7 @@ export function createHost(options: HostOptions): Host {
     telemetered(channel, action);
     asking(channel, action);
     links.observe(channel, action);
-    replayable.push({ ...envelope, action: structuredClone(action) });
-    if (replayable.length > REPLAY) replayable.shift();
+    replayable.push(envelope);
     broadcast(channel, 'action', envelope, (connection) => seenBy(connection, envelope));
   };
   /**
@@ -7444,18 +7435,16 @@ export function createHost(options: HostOptions): Host {
             if (!connection.watching.has(channel)) leaves(channel, clientId);
           }
 
-          const oldest = replayable[0]?.serverSeq;
-          // Nothing buffered means nothing has happened since, which is a
-          // replay of nothing rather than a reason to re-snapshot. A client
-          // ahead of this host is the other way round and cannot be replayed to
-          // at all - whatever it counted, it was not this stream - so it is
-          // sent state rather than a difference.
-          const replayable_ = since <= serverSeq && (oldest === undefined || since >= oldest - 1);
+          const oldest = replayable.entries[0]?.serverSeq;
+          // An empty buffer may follow an oversized action, so use the
+          // eviction watermark rather than treating empty as complete history.
+          // A client ahead of this host also needs a fresh snapshot.
+          const replayable_ = since <= serverSeq && replayable.covers(since);
           if (replayable_) {
             log(`${clientId} came back at ${since}, replaying`);
             return {
               type: 'replay',
-              actions: replayable.flatMap((held) => {
+              actions: replayable.entries.flatMap((held) => {
                 const alias = resumed.get(held.channel);
                 if (held.serverSeq <= since || alias === undefined) return [];
                 const envelope = seenBy(connection, held);
@@ -7513,7 +7502,15 @@ export function createHost(options: HostOptions): Host {
           // taken of the channel and returned under the name the client used -
           // a client that asked about one URI and was answered about another
           // has been answered about something it is not watching.
-          const snapshot = await snapshotOf(meantBy(channel), connection.config ?? {}, connection);
+          let snapshot = await snapshotOf(meantBy(channel), connection.config ?? {}, connection);
+          // A large action can evict the catch-up suffix while snapshotOf is
+          // awaited. Retry once with current state; never return a snapshot
+          // whose missing actions can no longer be delivered.
+          const covered = (): boolean => replayable.covers(typeof snapshot.fromSeq === 'number' ? snapshot.fromSeq : 0);
+          if (!covered()) {
+            snapshot = await snapshotOf(meantBy(channel), connection.config ?? {}, connection);
+            if (!covered()) throw new RpcError(INTERNAL_ERROR, 'State changed too quickly; retry subscribe');
+          }
           /*
            * Resolved again, after the snapshot rather than before it.
            *
@@ -7535,7 +7532,7 @@ export function createHost(options: HostOptions): Host {
           // the whole of what was missed, and what it leaves is already in
           // the snapshot or still to come by the ordinary route.
           const at = typeof snapshot.fromSeq === 'number' ? snapshot.fromSeq : 0;
-          for (const held of replayable) {
+          for (const held of replayable.entries) {
             if (held.channel === meant && held.serverSeq > at) {
               const envelope = seenBy(connection, held);
               connection.peer.notify('action', meant === channel
