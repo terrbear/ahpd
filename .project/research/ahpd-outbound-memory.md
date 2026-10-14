@@ -22,7 +22,7 @@ A consumer that stopped reading therefore allowed continued enqueueing and seria
 The installed lockfile-pinned `ws` implementation reports socket writable bytes plus sender buffered bytes through `bufferedAmount`.
 
 The replacement's backlog and healthy recovery regressions pass, including actual paused and draining loopback consumers.
-The three historical-comparison tests encountered a test-helper failure in the sole authorized run, so their corrected helper remains unverified.
+The initial focused run hit a test-helper failure in three historical comparisons; after the helper was corrected, the exact three-case rerun passed.
 Attribution to the reported OOM remains unproven, with low confidence from source and the supplied allocation context alone.
 A V8 string allocation during JSON serialization identifies the allocation that failed, not the objects retaining memory or the caller responsible.
 No private logs, session payloads or credentials were needed for this investigation.
@@ -72,14 +72,14 @@ That previous result is retained as rejected-candidate history, not as validatio
 New host/protocol tests build a completed echo turn whose message and response together make the snapshot and combined replay exceed 8 MiB.
 Real Node WebSocket tests pass repeated large subscriptions and replay replies, continued action delivery, ordered unique replay sequences, reducer reconstruction of the completed turn, recovery to a newer sequence and a subsequent empty replay, without repeated disconnects.
 The two preserved rejected-cap tests use those same host-generated values on fresh zero-backlog peers, expecting two disconnects and zero deliveries for `abdd450`, compared with two deliveries and no disconnects for the exact base and final code.
-Those two historical assertions were not reached in the authorized run because the helper's dynamic import failed.
+Both zero-backlog historical recovery assertions passed in the targeted rerun after the helper correction.
 
 ## Finite workload comparison
 
 The deterministic transport model retains only a queued-byte counter, never a growing queue of strings.
 It attempts 256 messages whose payload is 16,384 copies of `界`, making each notification 49,202 UTF-8 bytes.
 The following table gives source-derived expectations, with the final counts independently verified by the passing Node listener model test.
-The exact three-version comparison remains unverified after the helper failure.
+The exact three-version comparison passed in the targeted rerun; its measured counters are reported below.
 
 | Version | Serialized | Sent | Peak modeled bytes | Close count |
 | --- | ---: | ---: | ---: | ---: |
@@ -95,22 +95,30 @@ Pending-request tests verify each rejection once, timer removal, idempotent clos
 
 ## Authorized replacement verification
 
-The latest user instruction permits one focused Node/Vitest command and prohibits aggregate/full-suite tests and parallel builds.
-The sole run used a 256 MiB V8 heap cap per process, one worker, no file parallelism and a 180-second outer timeout.
+The task authorized one focused Node/Vitest regression run and a specifically allocated three-case historical rerun, with no aggregate/full-suite tests or parallel builds.
+The initial run used a 256 MiB V8 heap cap per process, one worker, no file parallelism and a 180-second outer timeout.
 Exact command:
 
 ```sh
 NODE_OPTIONS=--max-old-space-size=256 node --max-old-space-size=256 node_modules/vitest/vitest.mjs run packages/sdk/test/outbound.test.ts packages/sdk/test/outbound-recovery.test.ts packages/sdk/test/outbound-comparison.test.ts packages/sdk/test/outbound-runtime.test.ts packages/sdk/test/rpc.test.ts packages/sdk/test/listen.test.ts packages/sdk/test/stdio.test.ts packages/sdk/test/subscribe.test.ts packages/sdk/test/host-close.test.ts --maxWorkers=1 --no-file-parallelism
 ```
 
-Start: `2026-10-14T01:59:39.923762Z`.
-End: `2026-10-14T01:59:44.295608Z`.
-Terminal result: exit 1, 69 passed and 3 failed across nine files, duration 4.08 seconds, no OOM.
+Initial run start: `2026-10-14T01:59:39.923762Z`.
+Initial run end: `2026-10-14T01:59:44.295608Z`.
+Initial terminal result: exit 1, 69 passed and 3 failed across nine files, duration 4.08 seconds, no OOM.
 Passed: outbound 10, real healthy recovery 2, runtime adapter compatibility 3, RPC 15, listener 15, stdio 8, subscription/replay 4 and host close 12.
 Failed: three historical-comparison tests, each with `TypeError: A dynamic import callback was not specified` in the helper before comparison assertions.
 The helper now evaluates exact historical RPC source as synchronous CommonJS instead of using a generated dynamic import.
 Historical comparisons skip when a shallow checkout lacks either exact git object; the final healthy socket and backlog tests always run.
-That test-only correction has not been rerun because the authorized test slot is exhausted and released.
+The exact targeted rerun was:
+
+```sh
+timeout 180s env NODE_OPTIONS=--max-old-space-size=256 node --max-old-space-size=256 node_modules/vitest/vitest.mjs run packages/sdk/test/outbound-comparison.test.ts packages/sdk/test/outbound-recovery.test.ts --testNamePattern="compares the same finite stalled workload|preserves the rejected cap regression" --maxWorkers=1 --no-file-parallelism
+```
+
+Targeted rerun start: `2026-10-14T02:09:14.748188610Z`.
+Targeted rerun end: `2026-10-14T02:09:16.761635626Z`.
+Terminal result: exit 0, 3 passed and 2 filtered/skipped across two files, duration 1.64 seconds, no OOM. This passed the finite three-version comparison and both healthy zero-backlog recovery comparisons. The local test slot was then released to Sentry.
 The production correction did not change after the focused run.
 `pnpm typecheck` passed before and after the synchronous helper correction.
 `pnpm boundary` passed for all eight packages, and `git diff --check` passed.
