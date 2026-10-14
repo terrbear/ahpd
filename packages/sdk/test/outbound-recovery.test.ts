@@ -6,7 +6,7 @@ import { echo } from '../../../examples/echo/agent.js';
 import { createHost } from '../src/host.js';
 import { listen } from '../src/listen.js';
 import { OUTBOUND_LIMIT } from '../src/rpc.js';
-import { DEFERRED_BYTE_LIMIT, DEFERRED_FRAME_LIMIT } from '../src/outbound-node.js';
+import { DEFERRED_BYTE_LIMIT, OUTSTANDING_FRAME_LIMIT } from '../src/outbound-node.js';
 import type { Peer } from '../src/types/rpc.js';
 import type { Host } from '../src/types/host.js';
 import type { Listener } from '../src/types/listen.js';
@@ -176,16 +176,18 @@ it.each(['snapshot', 'replay'])('orders tool-output bursts and multiple smaller 
       ? await setup.handle({ method: 'subscribe', params: { channel } })
       : await setup.handle({ method: 'reconnect', params: { clientId: 'setup', subscriptions: [channel], lastSeenServerSeq: 0 } });
     const { smallText, snapshot, replay } = await smaller(setup);
-    const toolText = '界'.repeat(10 * 1024); // 30 KiB of UTF-8 tool output each.
+    const toolText = '界'.repeat(1024); // 3 KiB of UTF-8 per action, keeping the real socket burst bounded.
     const followups = [
-      toolOutput(0, toolText), { jsonrpc: '2.0', id: 2, result: snapshot },
-      toolOutput(1, toolText), { jsonrpc: '2.0', id: 3, result: replay },
-      toolOutput(2, toolText), { jsonrpc: '2.0', id: 4, result: snapshot },
+      ...Array.from({ length: 36 }, (_, index) => toolOutput(index, toolText)),
+      { jsonrpc: '2.0', id: 2, result: snapshot },
+      { jsonrpc: '2.0', id: 3, result: replay },
+      { jsonrpc: '2.0', id: 4, result: snapshot },
     ];
     const bytes = followups.reduce((total, frame) => total + Buffer.byteLength(JSON.stringify(frame)), 0);
+    expect(followups.length).toBeGreaterThan(32);
     expect(bytes).toBeGreaterThan(128 * 1024);
     expect(bytes).toBeLessThanOrEqual(DEFERRED_BYTE_LIMIT);
-    expect(followups.length).toBeLessThanOrEqual(DEFERRED_FRAME_LIMIT);
+    expect(followups.length + 1).toBeLessThanOrEqual(OUTSTANDING_FRAME_LIMIT);
     reading = await readingBurst(text, smallText, toolText);
     reading.transport.cork();
     try {
@@ -198,7 +200,7 @@ it.each(['snapshot', 'replay'])('orders tool-output bursts and multiple smaller 
       expect(reading!.overload).not.toHaveBeenCalled();
       expect(socket!.readyState).toBe(WebSocket.OPEN);
       expect(reading!.received.map((one) => one.tag)).toEqual([
-        'ready', 'large', 'tool-0', 'reply-2', 'tool-1', 'reply-3', 'tool-2', 'reply-4',
+        'ready', 'large', ...Array.from({ length: 36 }, (_, index) => `tool-${index}`), 'reply-2', 'reply-3', 'reply-4',
       ]);
     }, { timeout: 5000 });
     expect(reading.received.every((one) => one.valid)).toBe(true);
