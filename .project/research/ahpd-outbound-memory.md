@@ -129,3 +129,46 @@ No incident logs or customer payloads are included; test inputs are generated sy
 Dependencies were installed from the unchanged lockfile with scripts disabled; no package or lockfile changes were made. The initial sandboxed fetch failed, and an approved retry succeeded.
 The work is local to `fix/ahpd-v8-oom-highwater`, starting exactly at `abdd4504bce4aed563205920641a4f3fa3c2ec29`.
 No old worktree or thread storage was inspected, and no push, PR, merge, service action or deployment was performed.
+
+## 2026-10-14 follow-up: replay retention
+
+The user reported another periodic crash and asked for investigation and a pushed fix.
+The service journal records an abort at `2026-10-14T20:34:32Z` and an automatic restart five seconds later.
+The daemon log records `Ineffective mark-compacts near heap limit` with approximately 4,088 MiB still retained after collection.
+The active release was `a794e1daa8e68f391c02558333372596ff9bc3b9`, which already contains the outbound drain fixes.
+Backlog and deferred-byte closures immediately preceded the abort, so those protections were running but did not prevent process heap exhaustion.
+
+[`mapping.ts`](../../packages/agent-acp/src/mapping.ts) accumulates terminal deltas into the tool's full content and emits that full content in each `chat/toolCallContentChanged` action.
+The host previously cloned and retained 1,000 such actions without a byte budget.
+Repeated cumulative output therefore retained many independent copies of the same growing text, regardless of whether any client subscribed or drained its socket.
+Local ACP records confirm terminal-delta traffic in the affected sessions; no private payloads are copied into this repository or its tests.
+This demonstrates an independent memory amplification path, but without a heap snapshot it does not establish that replay was the sole retainer in the reported crash.
+
+[`replay.ts`](../../packages/sdk/src/replay.ts) now keeps a contiguous suffix bounded by 1,000 actions and 32 MiB of estimated cloned storage.
+Accounting charges two bytes per string code unit plus allowances for properties, arrays and objects, without serializing or cloning the candidate first.
+Old entries are released before cloning an admitted action.
+An oversized, unsupported or excessively deep value clears the replay suffix and advances the eviction watermark, while live broadcast remains unchanged.
+An empty buffer after such an action must not mean that an older client missed nothing.
+Reconnect uses the watermark to select the existing snapshot recovery path, and subscribe retakes a snapshot if its catch-up actions were evicted while it awaited state.
+A second gap rejects subscribe so it cannot silently establish an incomplete baseline.
+The budget applies to replay retention, not individual frames, snapshots, live session state, transcript caches or total process memory.
+
+### Verification
+
+All seven new replay tests pass under a 256 MiB heap cap.
+They cover cumulative ACP terminal output, live delivery, eviction boundaries, contiguous replay, large-action snapshot recovery with an empty buffer, snapshot races, clone avoidance, immutable values, and small-action count limits.
+The three new host/ACP integration tests were also run against the exact `a794e1d` host source; all three failed as expected, while the fixed source passes.
+The old host returns retained replay for the two oversized workloads, and the subscription race retains its old snapshot rather than retaking it.
+
+A separate finite synthetic comparison ran 96 cumulative tool-content actions, adding 16,384 copies of `界` per action, under Node 22 with `--expose-gc --max-old-space-size=256`.
+The count-only implementation retained 96 actions and grew the collected heap by 148.54 MiB.
+The bounded implementation retained the latest 11 actions, accounted for 31.29 MiB and grew the collected heap by 30.52 MiB.
+These are reproduction measurements, not measurements of the production process.
+
+The focused 11-file run covered 439 tests: 435 passed initially, and four required generating `tools/ahp.strict.schema.json` first.
+After `node tools/schema.mjs`, the targeted seven-test rerun passed, including all four previously failing cases.
+The passing coverage includes host, protocol conformance, reconnect, presence, permissions, close cleanup, subscription races, outbound grace and all ten healthy large-frame recovery tests.
+Socket-based tests needed the unsandboxed runner because loopback binds were denied in the initial sandbox run.
+`pnpm typecheck`, `pnpm boundary`, `pnpm build` and `git diff --check` pass.
+Dependencies came from the unchanged lockfile using the existing offline package store, with install scripts disabled.
+No service restart or production deployment was performed for this investigation.
