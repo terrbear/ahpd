@@ -2,7 +2,6 @@ import { boundedJson, JsonBudgetExceeded, utf8Bytes } from './bounded-json.js';
 import type { OutboundClose, OutboundCloseReason, Wire } from './types/rpc.js';
 
 export const DEFERRED_BYTE_LIMIT = 256 * 1024;
-export const DEFERRED_FRAME_LIMIT = 32;
 export const OUTSTANDING_FRAME_LIMIT = 256;
 export const DRAIN_GRACE_MS = 5000;
 export const DRAIN_CHECK_MS = 10;
@@ -95,7 +94,6 @@ export function createNodeOutbound(wire: Wire, closePeer: () => void, highWater:
       if (stopped || expired()) return;
       if (outstanding + queue.length >= OUTSTANDING_FRAME_LIMIT) { overload('frame_count_limit'); return; }
       if (started !== undefined) {
-        if (queue.length >= DEFERRED_FRAME_LIMIT) { overload('deferred_count_limit'); return; }
         const budget = DEFERRED_BYTE_LIMIT - deferredBytes;
         if (budget === 0) { overload('deferred_byte_limit'); return; }
         let frame: { text: string; bytes: number };

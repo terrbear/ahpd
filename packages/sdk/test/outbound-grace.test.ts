@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { boundedJson, JsonBudgetExceeded } from '../src/bounded-json.js';
 import {
-  DEFERRED_BYTE_LIMIT, DEFERRED_FRAME_LIMIT, DRAIN_CHECK_MS, DRAIN_GRACE_MS, OUTSTANDING_FRAME_LIMIT,
+  DEFERRED_BYTE_LIMIT, DRAIN_CHECK_MS, DRAIN_GRACE_MS, OUTSTANDING_FRAME_LIMIT,
 } from '../src/outbound-node.js';
 import { createPeer, OUTBOUND_LIMIT, RpcClosed, RpcTimeout } from '../src/rpc.js';
 import type { OutboundClose, Peer } from '../src/types/rpc.js';
@@ -198,15 +198,52 @@ it('rejects a second oversized frame before encoding its large literal or visiti
   expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({ reason: 'deferred_byte_limit', deferredBytes: 0, deferredFrames: 0 });
 });
 
-it('accepts 32 deferred frames and refuses entry 33 before toJSON', () => {
+it('preserves a bounded FIFO behind a partially draining 18.8 MB write', () => {
+  const c = connection();
+  const text = 'x'.repeat(18_780_429);
+  c.peer.send({ jsonrpc: '2.0', id: 1, result: { text } });
+  expect(c.writes).toHaveLength(1);
+  expect(c.writes[0]!.bytes).toBeGreaterThan(18_000_000);
+  expect(c.writes[0]!.bytes).toBeLessThan(25_000_000);
+  c.setBacklog(Math.floor(c.writes[0]!.bytes / 2));
+  vi.advanceTimersByTime(27);
+  const smallText = 's'.repeat(512);
+  const expected = Array.from({ length: 40 }, (_, index) => index % 2 === 0
+    ? { jsonrpc: '2.0', method: `event-${index}`, params: { index, text: smallText } }
+    : { jsonrpc: '2.0', id: 100 + index, result: { index, text: smallText } });
+  const deferredBytes = expected.reduce((total, frame) => total + Buffer.byteLength(JSON.stringify(frame)), 0);
+  expect(expected.length).toBeGreaterThan(32);
+  expect(deferredBytes).toBeLessThan(DEFERRED_BYTE_LIMIT);
+  for (let index = 0; index < expected.length; index++) {
+    if (index % 2 === 0) c.peer.notify(`event-${index}`, { index, text: smallText });
+    else c.peer.send(expected[index]!);
+  }
+  expect(c.diagnostics).not.toHaveBeenCalled();
+  expect(c.close).not.toHaveBeenCalled();
+  expect(c.writes).toHaveLength(1);
+  c.setBacklog(0);
+  c.complete(0);
+  expect(c.writes.slice(1).map((write) => JSON.parse(write.text!))).toEqual(expected);
+  for (let index = 1; index < c.writes.length; index++) c.complete(index);
+  expect(c.close).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('bounds deferred frames by the combined outstanding-write limit', () => {
   const c = connection();
   c.peer.send(large);
-  for (let i = 0; i < DEFERRED_FRAME_LIMIT; i++) c.peer.send({});
+  for (let i = 0; i < OUTSTANDING_FRAME_LIMIT - 1; i++) c.peer.send({});
   expect(c.close).not.toHaveBeenCalled();
+  expect(c.writes).toHaveLength(1);
   const toJSON = vi.fn(() => 'must not serialize');
   c.peer.send({ toJSON });
   expect(toJSON).not.toHaveBeenCalled();
-  expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({ reason: 'deferred_count_limit', deferredFrames: 32, deferredBytes: 64 });
+  expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({
+    reason: 'frame_count_limit',
+    outstandingWrites: 1,
+    deferredFrames: OUTSTANDING_FRAME_LIMIT - 1,
+    deferredBytes: 2 * (OUTSTANDING_FRAME_LIMIT - 1),
+  });
 });
 
 it('caps normal outstanding writes at 256 even when local backlog reports zero', () => {
