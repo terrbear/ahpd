@@ -124,14 +124,8 @@ The production correction did not change after the focused run.
 `pnpm boundary` passed for all eight packages, and `git diff --check` passed.
 No aggregate/full-suite test, build, native Bun/Deno test or live workload was run in the authorized slot.
 Bun and Deno compatibility tests exercise their existing listener branches using API doubles under Node; stdout is tested with an actual finite stalled `Writable`.
-The test log and exact timing/exit metadata are `/tmp/ahpd-v8-oom-highwater-test.log` and `/tmp/ahpd-v8-oom-highwater-test-evidence.json`.
+No incident logs or customer payloads are included; test inputs are generated synthetic data, and the exact command, timing and exit results are recorded above.
 
-Dependencies were installed from the unchanged lockfile with scripts disabled:
-
-```sh
-pnpm install --frozen-lockfile --ignore-scripts --store-dir /tmp/ahpd-highwater-pnpm-store --fetch-retries 0
-```
-
-The sandboxed fetch failed; the identical command completed through standard approval with scripts disabled.
+Dependencies were installed from the unchanged lockfile with scripts disabled; no package or lockfile changes were made. The initial sandboxed fetch failed, and an approved retry succeeded.
 The work is local to `fix/ahpd-v8-oom-highwater`, starting exactly at `abdd4504bce4aed563205920641a4f3fa3c2ec29`.
 No old worktree or thread storage was inspected, and no push, PR, merge, service action or deployment was performed.
