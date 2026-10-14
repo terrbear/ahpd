@@ -82,7 +82,7 @@ it('keeps a healthy reading Node client connected after a frame over 8 MiB and a
     const frame = JSON.parse(rawText) as { id?: number; method?: string; result?: { text?: string } };
     received.push(frame.id === 1
       ? { id: frame.id, bytes: Buffer.byteLength(rawText), matches: frame.result?.text === text }
-      : { method: frame.method });
+      : (frame.method === undefined ? {} : { method: frame.method }));
   });
   await new Promise<void>((resolve, reject) => {
     client!.once('open', resolve);
@@ -107,8 +107,10 @@ it('keeps a healthy reading Node client connected after a frame over 8 MiB and a
     expect(client!.readyState).toBe(WebSocket.OPEN);
     expect(received).toHaveLength(3);
   }, { timeout: 5000 });
-  expect(received[1]).toMatchObject({ id: 1, matches: true });
-  expect(received[1].bytes).toBeGreaterThan(OUTBOUND_LIMIT);
+  const largeFrame = received[1];
+  if (largeFrame === undefined) throw new Error('Expected the oversized frame');
+  expect(largeFrame).toMatchObject({ id: 1, matches: true });
+  expect(largeFrame.bytes).toBeGreaterThan(OUTBOUND_LIMIT);
   expect(received[2]).toEqual({ method: 'after-large' });
 }, 15_000);
 
