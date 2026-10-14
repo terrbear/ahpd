@@ -202,3 +202,5 @@ The ACP suite plus host, paging and healthy large-frame recovery tests passed af
 The session suite now expects the live snapshot's 50-turn page rather than all 60 retained turns.
 Host metadata is added after selecting the page so omitted-cursor fetches and snapshots use the same backend byte boundary.
 Typecheck, package boundaries, build and diff checks pass.
+The first full CI run passed 2,500 tests and found one source-stripping compatibility violation in a constructor parameter property.
+Replacing that syntax with ordinary field assignments preserves behavior and passes the source-stripping regression.

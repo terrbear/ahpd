@@ -37,7 +37,12 @@ class Output {
   private tail = '';
   private spilled = false;
   private bytes = 0;
-  constructor(private readonly path: string, private readonly folder: string) {}
+  private readonly path: string;
+  private readonly folder: string;
+  constructor(path: string, folder: string) {
+    this.path = path;
+    this.folder = folder;
+  }
 
   replace(text: string): void {
     this.inline = '';
