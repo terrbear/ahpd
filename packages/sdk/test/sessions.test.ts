@@ -550,7 +550,7 @@ it('says who sent a turn on the oldest page too, not only on the tail window', a
   const said = PAGE + 10;
   for (let at = 0; at < said; at++) await ask(client, chat, `turn-${at}`);
   await new Promise((tick) => { setTimeout(tick, 200); });
-  expect(await turnsOn(client, chat)).toHaveLength(said);
+  expect(await turnsOn(client, chat)).toHaveLength(PAGE);
 
   await client.handle({ method: 'fetchTurns', params: { channel: chat } });
   await new Promise((tick) => { setTimeout(tick, 20); });
@@ -562,6 +562,37 @@ it('says who sent a turn on the oldest page too, not only on the tail window', a
   // The ten oldest, which is the whole of what this case is about.
   expect(page?.turns?.map((turn) => String(turn.id))).toEqual(Array.from({ length: 10 }, (_, at) => `turn-${at}`));
   expect(page?.turns?.map(senderOn)).toEqual(Array(10).fill('user:ana'));
+});
+
+it('pages a live backend by bytes and retrieves every older turn once', async () => {
+  const agent = echo({ path: root, pace: 0 });
+  const create = agent.create;
+  const history = Array.from({ length: 12 }, (_, i) => ({
+    id: `turn-${i}`, message: { text: '界'.repeat(100000), origin: { kind: 'user' } }, responseParts: [],
+  }));
+  agent.create = (start) => {
+    const session = create(start);
+    if (session instanceof Promise) throw new Error('Expected synchronous echo');
+    return { ...session, allTurns: () => history, chatState: () => ({ ...session.chatState(), turns: history }) };
+  };
+  const { host, client, peer: on } = await running(memorySessions(), undefined, agent);
+  try {
+    const chat = await chatOf(client);
+    const reply = await client.handle({ method: 'subscribe', params: { channel: chat } }) as { snapshot: { state: { turns: Bag[]; turnsNextCursor?: string } } };
+    expect(reply.snapshot.state.turns).toHaveLength(3);
+    const ids = reply.snapshot.state.turns.map((turn) => turn.id);
+    let cursor = reply.snapshot.state.turnsNextCursor;
+    while (cursor !== undefined) {
+      await client.handle({ method: 'fetchTurns', params: { channel: chat, cursor } });
+      const note = on.notes.filter((one) => (one.params as { action?: Bag })?.action?.type === 'chat/turnsLoaded').at(-1)!;
+      const page = (note.params as { action: { turns: Bag[]; turnsNextCursor?: string } }).action;
+      expect(Buffer.byteLength(JSON.stringify(page.turns))).toBeLessThanOrEqual(1024 * 1024);
+      ids.push(...page.turns.map((turn) => turn.id));
+      cursor = page.turnsNextCursor;
+    }
+    expect(ids).toHaveLength(history.length);
+    expect(new Set(ids)).toEqual(new Set(history.map((turn) => turn.id)));
+  } finally { await host.close(); }
 });
 
 it('keeps the titles chats were given, and forgets them with the session', async () => {

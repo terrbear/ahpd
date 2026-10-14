@@ -172,3 +172,35 @@ Socket-based tests needed the unsandboxed runner because loopback binds were den
 `pnpm typecheck`, `pnpm boundary`, `pnpm build` and `git diff --check` pass.
 Dependencies came from the unchanged lockfile using the existing offline package store, with install scripts disabled.
 No service restart or production deployment was performed for this investigation.
+
+## October 14 large tool-output follow-up
+
+The running daemon survived the later disconnect with the same PID and no restart.
+Its transport logged a 14,554,464-byte frame and the 256-frame queue limit, followed by a client reconnect.
+The exact frame was not captured; inspection of the affected session found a similarly sized snapshot dominated by tool output and repeated multiline command labels.
+
+ACP tool text now spills above 32 KiB of UTF-8 into private files under the ACP registry's `outputs` directory.
+The session retains only a 12 KiB head and tail, an explicit notice and a standard resource reference with the full byte count.
+Small output and complete tool arguments remain intact; display labels are bounded first lines.
+Live turns and new persisted records share the materialized response parts rather than retaining a second raw update stream.
+Legacy records pass through the same mapper, and their first materialized save retains a `.v1.bak` copy.
+The files remain until explicitly cleaned up; their absolute URIs must remain valid while their history is retained.
+This limits AHP session retention, not the adapter's own model context or other providers' output.
+
+The host now pages live completed turns as well as restored history, with a 50-turn maximum and a 1 MiB serialized-turn target.
+A single oversized turn is admitted intact to preserve cursor progress; active turns and the RPC envelope are additional.
+Large arguments and non-tool response text can therefore still exceed that target.
+
+An offline conversion of a copy of the affected persisted session, using the old deployed mapper and the new mapper, measured 38 turns.
+Its mapped history shrank from 14,690,346 to 4,697,163 bytes, and its newest page was 970,785 bytes across nine turns.
+The persisted record shrank from 20,892,693 to 4,698,103 bytes, with 18 separate output files totaling 7,140,268 bytes.
+These are measurements of the copied record, not a measurement of a deployed reconnect frame.
+The running daemon and its registry were not modified by the comparison.
+
+Focused validation covers streamed Unicode output, complete artifact bytes and private modes, per-session isolation, replacement output, label bounds with intact arguments, legacy backup and restart recovery, storage failure, shell previews, live byte paging and cursor traversal.
+The ACP suite plus host, paging and healthy large-frame recovery tests passed after updating the replay fixture to expose its synthetic history through `allTurns` as well as `chatState`.
+The session suite now expects the live snapshot's 50-turn page rather than all 60 retained turns.
+Host metadata is added after selecting the page so omitted-cursor fetches and snapshots use the same backend byte boundary.
+Typecheck, package boundaries, build and diff checks pass.
+The first full CI run passed 2,500 tests and found one source-stripping compatibility violation in a constructor parameter property.
+Replacing that syntax with ordinary field assignments preserves behavior and passes the source-stripping regression.

@@ -133,7 +133,7 @@ export function acpAgent(options: AcpOptions): Agent {
 
     transcript: async (id) => {
       const watched = catalog?.get(id) ?? watchedSession(provider, id);
-      return watched === undefined ? undefined : turnsOf(watched);
+      return watched === undefined ? undefined : turnsOf(watched, options.stateDirectory);
     },
 
     stateFile,

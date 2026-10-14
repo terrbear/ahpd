@@ -41,6 +41,7 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import type { Bag, MessageFrom } from '@ahpd/sdk';
+import type { ToolOutputs } from './output.js';
 
 /** What an embedder, or a plugin's options, may set. */
 export interface AcpOptions {
@@ -192,6 +193,8 @@ export interface AcpCall {
  * response parts in the order the server wrote them, held for a snapshot.
  */
 export interface AcpTurn {
+  /** Bounded tool previews and separately stored full output. */
+  outputs?: ToolOutputs;
   /** The turn the client began. */
   turnId: string;
   /** Every response part this turn holds, shared with the session's snapshot. */
@@ -220,10 +223,8 @@ export interface AcpTurn {
 /**
  * One turn this process watched, as the catalogue reads it back.
  *
- * The updates are kept raw rather than as the parts they built, because the
- * transcript is a second rendering of the same notifications: replaying them
- * through the one mapping is what stops a rebuilt conversation from disagreeing
- * with the live one.
+ * New turns hold bounded mapped parts. Raw updates are only read to migrate
+ * older records, then released after the full output is safely stored.
  */
 export interface WatchedTurn {
   /** The turn the client began. */
@@ -236,8 +237,10 @@ export interface WatchedTurn {
   state: 'complete' | 'cancelled' | 'error';
   /** How long it took, in milliseconds, once it has ended. */
   duration?: number;
-  /** Every update the server sent while this turn ran. */
+  /** Legacy raw updates; empty in materialized records. */
   updates: SessionUpdate[];
+  /** Materialized bounded parts; new turns do not retain the raw update stream. */
+  responseParts?: Bag[];
   inputs?: Record<string, { response: string; answers: Bag }>;
 }
 
@@ -250,6 +253,8 @@ export interface WatchedTurn {
  * is.
  */
 export interface WatchedSession {
+  /** Version 2 stores materialized response parts instead of raw tool updates. */
+  formatVersion?: 2;
   /** The provider id this bridge registered, which keys the catalogue. */
   provider: string;
   /** The server's own session id. */

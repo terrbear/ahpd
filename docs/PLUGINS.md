@@ -682,6 +682,36 @@ under `$HOME/.copilot`, so a host whose `$HOME` is read-only has to give it
 
 ### What the server may ask the host for
 
+ACP tool text stays inline up to 32 KiB of UTF-8. Above that, the bridge keeps
+a 12 KiB head and tail with an explicit truncation notice, byte count and file
+URI. The complete text is written under `stateDirectory/outputs`, scoped by
+provider, session, turn and tool call. Directories are private (`0700`) and
+files are `0600`. The result also includes a standard resource reference, so
+a client can fetch the full output on demand through `resourceRead`; an agent
+on the daemon machine can read the named file with its existing file or shell
+tools, selecting a line range. The existing ACP `fs/read_text_file` port also
+accepts `line` and `limit` when the agent uses that port.
+
+Short outputs and complete tool arguments are preserved. Repeated display
+labels use only a bounded first line. These limits apply to streamed ACP tool
+text and this bridge's `!command` results. They do not change what the provider
+feeds back into its own model context, or other backends' tool mapping.
+
+New persisted turns store mapped parts instead of duplicate raw notifications.
+Legacy records are converted when read; their first subsequent save keeps a
+`.json.v1.bak` copy beside the record. Restored turns keep the same preview and
+resource URI. Keep `outputs` with the registry when moving or backing it up;
+URIs are absolute, so moving it requires preserving the path or rewriting the
+references. Files remain available for the history's lifetime and have no
+automatic expiry. An embedder without `stateDirectory` stores artifacts under
+the process-specific temporary directory instead.
+
+Older daemon versions do not understand the materialized format. A downgrade
+requires restoring the old registry and its index from a backup; the `.v1.bak`
+files only preserve the records as they were before migration, not later turns.
+A storage failure ends the current turn visibly rather than publishing a link
+to output that was not saved.
+
 An ACP server is a client's peer, and it reaches back for files, a shell and a
 person's decision. Each of those is answered through the port the daemon
 already holds, and the capability is advertised on the handshake only when the

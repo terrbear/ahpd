@@ -1,5 +1,6 @@
 import type { Bag } from './types/common.js';
 import type { Page } from './types/paging.js';
+import { boundedJson, JsonBudgetExceeded } from './bounded-json.js';
 
 /**
  * A long list of turns, served a page at a time.
@@ -20,6 +21,27 @@ import type { Page } from './types/paging.js';
  * looking at.
  */
 export const PAGE = 50;
+export const PAGE_BYTES = 1024 * 1024;
+
+/** Whole turns, newest first when selecting, oldest first on the wire. */
+function pageBefore(turns: Bag[], end: number, size: number): Page {
+  let start = end;
+  let remaining = PAGE_BYTES - 2; // array brackets
+  while (start > Math.max(0, end - size)) {
+    try {
+      const item = boundedJson(turns[start - 1]!, remaining - (start === end ? 0 : 1));
+      remaining -= item.bytes + (start === end ? 0 : 1);
+      start--;
+    } catch (error) {
+      if (!(error instanceof JsonBudgetExceeded)) throw error;
+      // The protocol pages turns, not parts of a turn. Always make progress
+      // on one oversized turn instead of an empty page with a stuck cursor.
+      if (start === end) start--;
+      break;
+    }
+  }
+  return { turns: turns.slice(start, end), ...(start > 0 ? { turnsNextCursor: String(start) } : {}) };
+}
 
 /**
  * The newest page, and where the rest begins.
@@ -29,11 +51,7 @@ export const PAGE = 50;
  * answer twice in a row.
  */
 export function tail(turns: Bag[], size = PAGE): Page {
-  const start = Math.max(0, turns.length - size);
-  return {
-    turns: turns.slice(start),
-    ...(start > 0 ? { turnsNextCursor: String(start) } : {}),
-  };
+  return pageBefore(turns, turns.length, size);
 }
 
 /**
@@ -48,9 +66,5 @@ export function older(turns: Bag[], cursor: string, size = PAGE): Page | undefin
   if (!/^\d+$/.test(cursor)) return undefined;
   const at = Number(cursor);
   if (at <= 0 || at > turns.length) return undefined;
-  const start = Math.max(0, at - size);
-  return {
-    turns: turns.slice(start, at),
-    ...(start > 0 ? { turnsNextCursor: String(start) } : {}),
-  };
+  return pageBefore(turns, at, size);
 }

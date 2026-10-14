@@ -225,6 +225,14 @@ const scriptFor = (text) => {
   const thought = (said) => ({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: said } });
   const message = (said) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: said } });
 
+  if (text === 'large-output') {
+    return [
+      { sessionUpdate: 'tool_call', toolCallId: 'large', title: 'synthetic log', kind: 'execute', rawInput: { command: 'synthetic log' } },
+      ...Array.from({ length: 8 }, () => ({ sessionUpdate: 'tool_call_update', toolCallId: 'large', _meta: { terminal_output_delta: { data: 'log line\n'.repeat(8192) } } })),
+      { sessionUpdate: 'tool_call_update', toolCallId: 'large', status: 'completed' },
+    ];
+  }
+
   if (text.includes('ponder')) {
     updates.push(thought('first thought'), ...listing, thought('second '), thought('thought'));
     updates.push(message('the '), message('answer'));

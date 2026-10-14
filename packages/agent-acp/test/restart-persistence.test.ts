@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it, vi } from 'vitest';
 import { acpAgent } from '../src/agent.js';
 import { persistentCatalog } from '../src/persistence.js';
-import type { Session, Start } from '@ahpd/sdk';
+import type { Bag, Session, Start } from '@ahpd/sdk';
 
 const fixture = fileURLToPath(new URL('./fixtures/acp-server.mjs', import.meta.url));
 const paths: string[] = [];
@@ -13,6 +13,68 @@ const live: Session[] = [];
 afterEach(async () => {
   for (const session of live.splice(0)) await session.close();
   for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+it('streams bounded tool previews, stores full output, and restores exactly the displayed result', async () => {
+  const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-output-'));
+  paths.push(path);
+  const options = { command: process.execPath, args: [fixture], provider: 'output', stateDirectory: path };
+  const actions: Bag[] = [];
+  const agent = acpAgent(options);
+  const session = agent.create({
+    uri: 'output:/host', chatUri: 'ahp-chat:/host', workingDirectory: path,
+    settings: {}, schema: () => ({}), emit: (_, action) => { actions.push(action); },
+  }) as Session;
+  live.push(session);
+  session.begin('large-turn', 'large-output');
+  await vi.waitFor(() => expect(actions.some((one) => one.type === 'chat/turnComplete')).toBe(true));
+  expect(actions.every((one) => Buffer.byteLength(JSON.stringify(one)) < 32768)).toBe(true);
+  const turns = session.allTurns();
+  const parts = turns[0]!.responseParts as Bag[];
+  const content = (parts[0]!.toolCall as Bag).content as Bag[];
+  expect(content[1]!.type).toBe('resource');
+  expect(readFileSync(fileURLToPath(String(content[1]!.uri)), 'utf8')).toBe('log line\n'.repeat(8192 * 8));
+  const saved = persistentCatalog(path, 'output').get('host')!;
+  expect(saved.turns[0]!.updates).toEqual([]);
+  expect(Buffer.byteLength(JSON.stringify(saved))).toBeLessThan(32768);
+  await session.close();
+  const restored = await acpAgent(options).transcript?.('host');
+  expect(restored?.[0]?.responseParts).toEqual(parts);
+});
+
+it('fails the turn visibly if a tool output cannot be stored', async () => {
+  const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-output-failure-'));
+  paths.push(path);
+  writeFileSync(join(path, 'outputs'), 'not a directory');
+  const actions: Bag[] = [];
+  const session = acpAgent({ command: process.execPath, args: [fixture], provider: 'output-failure', stateDirectory: path }).create({
+    uri: 'output-failure:/host', chatUri: 'ahp-chat:/host', workingDirectory: path,
+    settings: {}, schema: () => ({}), emit: (_, action) => { actions.push(action); },
+  }) as Session;
+  live.push(session);
+  session.begin('failed-turn', 'large-output');
+  await vi.waitFor(() => expect(actions.some((one) => one.type === 'chat/error')).toBe(true));
+  expect(JSON.stringify(actions)).toContain('Unable to retain tool output');
+  expect(JSON.stringify(actions)).not.toContain('Output truncated:');
+  expect((session.chatState() as Bag).activeTurn).toBeUndefined();
+});
+
+it('bounds shell result text and the duplicate terminal preview', async () => {
+  const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-shell-output-'));
+  paths.push(path);
+  const actions: Bag[] = [];
+  const session = acpAgent({ command: process.execPath, args: [fixture], stateDirectory: path }).create({
+    uri: 'acp:/shell', chatUri: 'ahp-chat:/shell', workingDirectory: path,
+    settings: {}, schema: () => ({}), emit: (_, action) => { actions.push(action); },
+  }) as Session;
+  live.push(session);
+  const output = 'shell log\n'.repeat(100000);
+  session.ran!('shell-turn', 'synthetic log', async () => ({ success: true, output, said: 'done', terminal: 'ahp-terminal:/shell', code: 0 }));
+  await vi.waitFor(() => expect(actions.some((one) => one.type === 'chat/turnComplete')).toBe(true));
+  const result = actions.find((one) => one.type === 'chat/toolCallComplete')!.result as Bag;
+  expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(64 * 1024);
+  const resource = (result.content as Bag[]).find((block) => block.type === 'resource')!;
+  expect(readFileSync(fileURLToPath(String(resource.uri)), 'utf8')).toBe(output);
 });
 
 it('restores host identity, all turns and the provider resume ID in a fresh bridge', async () => {
