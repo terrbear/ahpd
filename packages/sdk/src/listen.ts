@@ -308,7 +308,10 @@ export async function listen(options: ListenOptions, onConnect: OnConnect): Prom
     const seen = tapping(options.tap, ++accepted);
     const peer = createPeer({
       send: (text) => { seen.out(text); socket.send(text); },
-      close: () => socket.close(),
+      bufferedBytes: () => socket.bufferedAmount,
+      // A graceful close can wait behind the stalled outgoing queue. Drop it
+      // immediately so an overloaded connection releases what it retained.
+      close: () => socket.terminate(),
       isOpen: () => socket.readyState === 1,
     });
     const arrival = decided.get(request);
@@ -586,6 +589,8 @@ interface NodeServer {
 interface NodeSocket {
   send(text: string): void;
   close(): void;
+  terminate(): void;
+  readonly bufferedAmount: number;
   readyState: number;
   on(event: 'message', handler: (raw: string | Buffer) => void): void;
   on(event: 'close', handler: () => void): void;

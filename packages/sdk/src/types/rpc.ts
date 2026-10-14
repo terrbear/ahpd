@@ -17,6 +17,12 @@ export interface Request {
 export interface Wire {
   /** Write one frame. */
   send(text: string): void;
+  /**
+   * Bytes waiting for the consumer. When supplied, the peer disconnects if
+   * the next frame would exceed its outbound budget; `close` must release
+   * that queue rather than wait for the consumer to drain it.
+   */
+  bufferedBytes?(): number;
   /** Close the connection. */
   close(): void;
   /** Whether a `send` would still reach the client. */

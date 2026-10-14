@@ -39,6 +39,8 @@ console.log(`on ws://${listener.host}:${listener.port} (${listener.runtime})`);
 
 `accept(peer)` takes anything that can `send`, `notify` and `close`, and returns a handler. `listen()` is the WebSocket listener for Node, Bun and Deno; the host itself is not tied to WebSockets, and the tests pass their own peer.
 
+On Node, each WebSocket has an 8 MiB outgoing payload budget, including bytes already queued. A slow consumer or a frame larger than the available budget disconnects immediately so the client can reconnect and recover through replay or a snapshot. WebSocket frame headers can add up to ten bytes beyond the budget. This bounds the transport queue; an individual message is still serialized before its size is checked. Bun, Deno, stdio and custom wires without `bufferedBytes` do not enforce this budget.
+
 ## Options
 
 `path` and `agents` are required. Leave out any other option and the host answers the commands that need it with an error, not an empty result.
