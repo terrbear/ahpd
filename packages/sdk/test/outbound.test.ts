@@ -15,7 +15,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-it('bounds a stalled Node socket and stops serializing after disconnect', async () => {
+it('stops serializing a stalled Node socket after one frame crosses the high-water mark', async () => {
   // Model a consumer that never drains, without allocating a growing queue.
   // Only the byte count is retained, and traffic stops after 256 frames.
   let queued = 0;
@@ -41,9 +41,10 @@ it('bounds a stalled Node socket and stops serializing after disconnect', async 
   });
   const payload = { toJSON: () => { serialized += 1; return '界'.repeat(16 * 1024); } };
   for (let i = 0; i < 256; i++) peer.notify('synthetic', payload);
-  expect(peak).toBe(8_364_340);
-  expect(peak).toBeLessThanOrEqual(OUTBOUND_LIMIT);
-  expect(sent).toBe(170);
+  expect(peak).toBe(8_413_542);
+  expect(peak).toBeGreaterThan(OUTBOUND_LIMIT);
+  expect(peak).toBeLessThan(OUTBOUND_LIMIT + 49_202);
+  expect(sent).toBe(171);
   expect(serialized).toBe(171);
   await vi.waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
   const stopped = serialized;
@@ -54,13 +55,15 @@ it('bounds a stalled Node socket and stops serializing after disconnect', async 
   queued = 0;
 });
 
-it('disconnects a real paused Node consumer within a finite traffic budget', async () => {
+it.each(['high-water', 'peer-close'])('releases a real paused Node queue on %s within a finite traffic budget', async (ending) => {
   let peer!: Peer;
+  let serverSocket: WebSocket | undefined;
   let serialized = 0;
   let peak = 0;
   const amount = Object.getOwnPropertyDescriptor(WebSocket.prototype, 'bufferedAmount')!.get!;
   vi.spyOn(WebSocket.prototype, 'bufferedAmount', 'get').mockImplementation(function (this: WebSocket) {
     const bytes = amount.call(this) as number;
+    serverSocket = this;
     peak = Math.max(peak, bytes);
     return bytes;
   });
@@ -82,53 +85,79 @@ it('disconnects a real paused Node consumer within a finite traffic budget', asy
   for (let i = 0; i < 1024 && closed.mock.calls.length === 0; i++) {
     peer.notify('synthetic', payload);
     if (i % 8 === 7) await new Promise<void>((resolve) => { setImmediate(resolve); });
+    if (ending === 'peer-close' && peak > 0) { peer.close(); break; }
   }
   await vi.waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
   expect(serialized).toBeLessThan(1024);
-  // ws includes frame headers in its backlog. An unmasked server frame's
-  // header is at most ten bytes, beyond the admitted payload budget.
-  expect(peak).toBeLessThanOrEqual(OUTBOUND_LIMIT + 10);
+  expect(peak).toBeGreaterThan(0);
+  // One admitted notification, including its ws header, may cross the mark.
+  expect(peak).toBeLessThan(OUTBOUND_LIMIT + 49_202 + 10);
+  expect(serverSocket!.readyState).toBe(WebSocket.CLOSED);
+  expect(amount.call(serverSocket)).toBe(0);
+  const stopped = serialized;
+  peer.close();
+  peer.notify('synthetic', payload);
+  expect(serialized).toBe(stopped);
+  expect(closed).toHaveBeenCalledTimes(1);
   client.resume();
 });
 
-it('counts UTF-8 bytes and admits a frame exactly at the remaining budget', () => {
+it('admits a frame when the existing backlog is one byte below the mark', () => {
   const message = { text: '界' };
   const text = JSON.stringify(message);
-  let queued = OUTBOUND_LIMIT - Buffer.byteLength(text);
-  const send = vi.fn();
+  let queued = OUTBOUND_LIMIT - 1;
+  const send = vi.fn((raw: string) => { queued += Buffer.byteLength(raw); });
   const close = vi.fn();
   const peer = createPeer({ bufferedBytes: () => queued, send, close, isOpen: () => true });
   peer.send(message);
   expect(send).toHaveBeenCalledWith(text);
-  queued += 1;
+  expect(queued).toBeGreaterThan(OUTBOUND_LIMIT);
   peer.send(message);
   expect(send).toHaveBeenCalledTimes(1);
   expect(close).toHaveBeenCalledTimes(1);
 });
 
-it('checks a full queue before serialization and rejects pending questions once', async () => {
-  let queued = 0;
-  const close = vi.fn();
-  const peer = createPeer({ bufferedBytes: () => queued, send: () => {}, close, isOpen: () => true });
-  const pending = peer.request('synthetic', {}).catch((error: unknown) => error);
-  const toJSON = vi.fn(() => 'synthetic');
-  queued = OUTBOUND_LIMIT;
-  peer.notify('synthetic', { toJSON });
-  peer.close();
-  peer.send({ toJSON });
-  expect(toJSON).not.toHaveBeenCalled();
-  expect(await pending).toBeInstanceOf(RpcClosed);
-  await expect(peer.request('synthetic', {})).rejects.toBeInstanceOf(RpcClosed);
-  expect(close).toHaveBeenCalledTimes(1);
+it.each([OUTBOUND_LIMIT, OUTBOUND_LIMIT + 1])('checks backlog %i before serialization and rejects pending questions once', async (backlog) => {
+  vi.useFakeTimers();
+  try {
+    let queued = 0;
+    const close = vi.fn();
+    const peer = createPeer({ bufferedBytes: () => queued, send: () => {}, close, isOpen: () => true });
+    const rejected = vi.fn((error: unknown) => error);
+    const pending = peer.request('synthetic', {}, 100).catch(rejected);
+    const toJSON = vi.fn(() => 'synthetic');
+    queued = backlog;
+    peer.notify('synthetic', { toJSON });
+    const refused = peer.request('refused', { toJSON }, 100).catch(rejected);
+    peer.close();
+    peer.send({ toJSON });
+    expect(toJSON).not.toHaveBeenCalled();
+    expect(await pending).toBeInstanceOf(RpcClosed);
+    expect(await refused).toBeInstanceOf(RpcClosed);
+    peer.answered({ id: 1, result: 'too late' });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(rejected).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(close).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
 });
 
-it('rejects one oversized frame without writing or tapping it', () => {
-  const send = vi.fn();
-  const close = vi.fn();
-  const peer = createPeer({ bufferedBytes: () => 0, send, close, isOpen: () => true });
-  peer.send({ text: '界'.repeat(Math.floor(OUTBOUND_LIMIT / 3)) });
-  expect(send).not.toHaveBeenCalled();
+it.each([0, 1, OUTBOUND_LIMIT - 1])('admits a frame over 8 MiB with backlog %i, then closes before serializing another', (backlog) => {
+  let queued = backlog;
+  const send = vi.fn((raw: string) => { queued += Buffer.byteLength(raw); });
+  const close = vi.fn(() => { queued = 0; });
+  const peer = createPeer({ bufferedBytes: () => queued, send, close, isOpen: () => true });
+  const large = { text: '界'.repeat(Math.floor(OUTBOUND_LIMIT / 3) + 1) };
+  peer.send(large);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(queued).toBeGreaterThan(OUTBOUND_LIMIT);
+  expect(close).not.toHaveBeenCalled();
+  const toJSON = vi.fn(() => 'must not serialize');
+  peer.send({ toJSON });
+  expect(toJSON).not.toHaveBeenCalled();
+  expect(send).toHaveBeenCalledTimes(1);
   expect(close).toHaveBeenCalledTimes(1);
+  expect(queued).toBe(0);
 });
 
 it('keeps a draining consumer connected and sends frames in order', () => {

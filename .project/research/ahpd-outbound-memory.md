@@ -1,11 +1,15 @@
 ---
-title: Bounded Node WebSocket output and memory diagnosis
+title: Node WebSocket backlog high-water correction and memory diagnosis
 date: 2026-10-13
 refs:
   - git://31bf80ab062e88439784475d5eff590b88b52f43 - investigated base
+  - git://abdd4504bce4aed563205920641a4f3fa3c2ec29 - rejected hard frame cap and replacement starting point
   - "[code://packages/sdk/src/rpc.ts#L108-L125](../../packages/sdk/src/rpc.ts#L108-L125) - serialization and outbound admission"
   - "[code://packages/sdk/src/listen.ts#L307-L325](../../packages/sdk/src/listen.ts#L307-L325) - Node queue measurement and connection cleanup"
   - "[code://packages/sdk/test/outbound.test.ts](../../packages/sdk/test/outbound.test.ts) - finite synthetic reproductions and regressions"
+  - "[code://packages/sdk/test/outbound-recovery.test.ts](../../packages/sdk/test/outbound-recovery.test.ts) - healthy large snapshot/replay delivery and rejected-cap evidence"
+  - "[code://packages/sdk/test/outbound-comparison.test.ts](../../packages/sdk/test/outbound-comparison.test.ts) - finite comparison of exact git versions"
+  - "[code://packages/sdk/test/outbound-runtime.test.ts](../../packages/sdk/test/outbound-runtime.test.ts) - Bun, Deno and stdout adapter compatibility"
   - "[code://packages/sdk/src/host.ts#L2246-L2248](../../packages/sdk/src/host.ts#L2246-L2248) - replay retention and broadcast"
   - "[code://packages/agent-acp/src/persistence.ts#L59-L72](../../packages/agent-acp/src/persistence.ts#L59-L72) - full record serialization and caching"
 ---
@@ -17,7 +21,8 @@ The Node listener sent the string through `ws.send` without inspecting `buffered
 A consumer that stopped reading therefore allowed continued enqueueing and serialization without an application byte bound.
 The installed lockfile-pinned `ws` implementation reports socket writable bytes plus sender buffered bytes through `bufferedAmount`.
 
-Confidence is high in this defect and its correction, established by a failing deterministic reproduction and passing regressions including an actual paused loopback consumer.
+The replacement's backlog and healthy recovery regressions pass, including actual paused and draining loopback consumers.
+The three historical-comparison tests encountered a test-helper failure in the sole authorized run, so their corrected helper remains unverified.
 Attribution to the reported OOM remains unproven, with low confidence from source and the supplied allocation context alone.
 A V8 string allocation during JSON serialization identifies the allocation that failed, not the objects retaining memory or the caller responsible.
 No private logs, session payloads or credentials were needed for this investigation.
@@ -41,61 +46,84 @@ All test data is generated synthetic text.
 
 `Wire.bufferedBytes` optionally supplies the transport's pending byte count.
 Node WebSockets supply `socket.bufferedAmount`.
-The peer checks a full queue before serializing, then admits the serialized UTF-8 payload only if it fits within 8,388,608 bytes including the existing backlog.
+The peer refuses and closes before serializing a new message only when the already-buffered outbound bytes are at or above 8,388,608 bytes.
+When the backlog is below that mark, any single frame size is admitted, including a healthy snapshot or replay reply larger than 8 MiB.
 Closure becomes permanent and idempotent, rejects unanswered requests and prevents further serialization.
 Node terminates the socket immediately to release its queue, with the existing close event releasing the host connection and subscriptions.
 Disconnecting allows normal protocol recovery instead of silently skipping actions on a connected client's reducer.
 
-The 8 MiB budget is a conservative implementation default, not a measurement of production payload requirements.
-It bounds one connection's outgoing queue and rejects individual frames beyond the available budget.
-An unmasked WebSocket frame header can add up to ten bytes beyond the admitted payload budget.
-Clients producing legitimate large snapshots or combined replay replies may disconnect repeatedly until those payloads can be paged or reduced.
+The 8 MiB high-water mark is an implementation default, not a measurement of production payload requirements.
+This permits a one-frame overshoot, including that frame's headers, and is not a hard byte bound on the queue or a hard per-frame limit.
+No protocol, snapshot, replay, paging, runtime selection or ACP behavior is redesigned.
 
 This change does not establish a bound on total daemon memory.
-A single large object still allocates its JSON string before the size check, so this path can still exhaust memory while serializing one message.
-History, replay payload sizes, concurrent connections, Bun, Deno, stdio and custom wires without byte reporting remain independent growth paths.
+A single large object still allocates its JSON string when admitted, so one `JSON.stringify` allocation can still exhaust memory.
+Total process memory, stdout/stdio and nested output, history, replay retention, ACP persistence, fan-out, Bun, Deno and custom wires without byte reporting remain independent growth paths.
+Incident attribution is outside this correction and remains unproven.
 
-## Synthetic reproduction and verification
+## Rejected cap and preserved regression evidence
 
-The deterministic Node transport model retains only a queued-byte counter, never a growing queue of strings.
-It attempts 256 messages whose synthetic Unicode payload is 16,384 copies of `界`.
-Each serialized notification is 49,202 UTF-8 bytes.
-The base sent all 256, producing a modeled backlog of 12,595,712 bytes and an expected regression failure.
-The correction sends 170, peaks at 8,364,340 payload bytes, serializes the 171st frame once before rejecting it, and stops further serialization.
-The actual paused loopback test attempts at most 1,024 frames, under a 48.1 MiB traffic ceiling, and yields to the event loop every eight frames.
-It verifies disconnect, one connection cleanup, and observed backlog no greater than the budget plus a frame header.
-The initial 512-frame real-socket budget stayed below the cap and was insufficient to require disconnect; the final finite budget reaches it.
-The draining-consumer test sends all 256 Unicode messages in order without disconnecting.
-The remaining new cases verify the exact byte boundary, pre-serialization refusal, pending-request rejection and an oversized Unicode frame.
+The rejected `abdd450` candidate serialized a frame and disconnected if its UTF-8 payload plus the existing backlog would exceed 8 MiB.
+Its source therefore rejects a healthy snapshot/replay larger than 8 MiB even with zero backlog, and repeated recovery attempts cannot advance.
+The replacement removes only that serialized-frame admission check and the now-unused `node:buffer` import from `rpc.ts`.
+The inherited research record reported that the rejected candidate's six focused files and 60 tests passed with a 256 MiB heap cap, plus typecheck, boundary and diff checks, but those tests asserted oversized-frame rejection rather than healthy large recovery.
+That previous result is retained as rejected-candidate history, not as validation of the replacement.
 
-Baseline command, before the production change:
+New host/protocol tests build a completed echo turn whose message and response together make the snapshot and combined replay exceed 8 MiB.
+Real Node WebSocket tests pass repeated large subscriptions and replay replies, continued action delivery, ordered unique replay sequences, reducer reconstruction of the completed turn, recovery to a newer sequence and a subsequent empty replay, without repeated disconnects.
+The two preserved rejected-cap tests use those same host-generated values on fresh zero-backlog peers, expecting two disconnects and zero deliveries for `abdd450`, compared with two deliveries and no disconnects for the exact base and final code.
+Those two historical assertions were not reached in the authorized run because the helper's dynamic import failed.
+
+## Finite workload comparison
+
+The deterministic transport model retains only a queued-byte counter, never a growing queue of strings.
+It attempts 256 messages whose payload is 16,384 copies of `界`, making each notification 49,202 UTF-8 bytes.
+The following table gives source-derived expectations, with the final counts independently verified by the passing Node listener model test.
+The exact three-version comparison remains unverified after the helper failure.
+
+| Version | Serialized | Sent | Peak modeled bytes | Close count |
+| --- | ---: | ---: | ---: | ---: |
+| `31bf80ab062e88439784475d5eff590b88b52f43` | 256 | 256 | 12,595,712 | 0 |
+| Rejected `abdd4504bce4aed563205920641a4f3fa3c2ec29` | 171 | 170 | 8,364,340 | 1 |
+| Replacement | 171 | 171 | 8,413,542 | 1 |
+
+The final code admits the 171st frame below the mark, then refuses the 172nd before serialization.
+The actual paused loopback tests attempt at most 1,024 frames, under a 48.1 MiB traffic ceiling, and yield every eight frames.
+They verify backlog-triggered and explicit peer closure, queue release to zero and one connection cleanup, with no further serialization after closing.
+Boundary tests cover backlog exactly at the mark, above it and one byte below, and large Unicode frames admitted from zero, nonzero and almost-full backlogs.
+Pending-request tests verify each rejection once, timer removal, idempotent close and ignored late answers.
+
+## Authorized replacement verification
+
+The latest user instruction permits one focused Node/Vitest command and prohibits aggregate/full-suite tests and parallel builds.
+The sole run used a 256 MiB V8 heap cap per process, one worker, no file parallelism and a 180-second outer timeout.
+Exact command:
 
 ```sh
-node --max-old-space-size=256 node_modules/vitest/vitest.mjs run packages/sdk/test/outbound.test.ts --maxWorkers=1 --no-file-parallelism
+NODE_OPTIONS=--max-old-space-size=256 node --max-old-space-size=256 node_modules/vitest/vitest.mjs run packages/sdk/test/outbound.test.ts packages/sdk/test/outbound-recovery.test.ts packages/sdk/test/outbound-comparison.test.ts packages/sdk/test/outbound-runtime.test.ts packages/sdk/test/rpc.test.ts packages/sdk/test/listen.test.ts packages/sdk/test/stdio.test.ts packages/sdk/test/subscribe.test.ts packages/sdk/test/host-close.test.ts --maxWorkers=1 --no-file-parallelism
 ```
 
-Result: one expected failure, asserting 12,595,712 bytes exceeds 8,388,608 bytes.
-The first sandboxed attempt stopped at a loopback bind restriction before reaching assertions.
-Socket tests subsequently ran through the standard per-command approval mechanism.
-No heap limit was increased and no exhaustion test was run.
-
-Final focused command:
-
-```sh
-node --max-old-space-size=256 node_modules/vitest/vitest.mjs run packages/sdk/test/outbound.test.ts packages/sdk/test/rpc.test.ts packages/sdk/test/listen.test.ts packages/sdk/test/stdio.test.ts packages/sdk/test/subscribe.test.ts packages/sdk/test/host-close.test.ts --maxWorkers=1 --no-file-parallelism
-```
-
-Result: six files and 60 tests passed: outbound 6, RPC 15, listener 15, stdio 8, subscription/replay 4, host close 12.
-`pnpm typecheck` passed.
-`pnpm boundary` passed for all eight packages, with no undeclared imports.
-`git diff --check` passed.
-The full repository test suite and a live workload were not run.
+Start: `2026-10-14T01:59:39.923762Z`.
+End: `2026-10-14T01:59:44.295608Z`.
+Terminal result: exit 1, 69 passed and 3 failed across nine files, duration 4.08 seconds, no OOM.
+Passed: outbound 10, real healthy recovery 2, runtime adapter compatibility 3, RPC 15, listener 15, stdio 8, subscription/replay 4 and host close 12.
+Failed: three historical-comparison tests, each with `TypeError: A dynamic import callback was not specified` in the helper before comparison assertions.
+The helper now evaluates exact historical RPC source as synchronous CommonJS instead of using a generated dynamic import.
+Historical comparisons skip when a shallow checkout lacks either exact git object; the final healthy socket and backlog tests always run.
+That test-only correction has not been rerun because the authorized test slot is exhausted and released.
+The production correction did not change after the focused run.
+`pnpm typecheck` passed before and after the synchronous helper correction.
+`pnpm boundary` passed for all eight packages, and `git diff --check` passed.
+No aggregate/full-suite test, build, native Bun/Deno test or live workload was run in the authorized slot.
+Bun and Deno compatibility tests exercise their existing listener branches using API doubles under Node; stdout is tested with an actual finite stalled `Writable`.
+The test log and exact timing/exit metadata are `/tmp/ahpd-v8-oom-highwater-test.log` and `/tmp/ahpd-v8-oom-highwater-test-evidence.json`.
 
 Dependencies were installed from the unchanged lockfile with scripts disabled:
 
 ```sh
-pnpm install --frozen-lockfile --ignore-scripts --store-dir /tmp/ahpd-oom-pnpm-store --fetch-retries 0
+pnpm install --frozen-lockfile --ignore-scripts --store-dir /tmp/ahpd-highwater-pnpm-store --fetch-retries 0
 ```
 
-The install completed through standard approval after offline attempts lacked a usable cache and a sandboxed network attempt failed resolution.
-The work is local to the isolated branch; publishing, service changes and deployment are outside this task.
+The sandboxed fetch failed; the identical command completed through standard approval with scripts disabled.
+The work is local to `fix/ahpd-v8-oom-highwater`, starting exactly at `abdd4504bce4aed563205920641a4f3fa3c2ec29`.
+No old worktree or thread storage was inspected, and no push, PR, merge, service action or deployment was performed.

@@ -9,14 +9,13 @@
  * handler returns.
  */
 
-import { Buffer } from 'node:buffer';
 import type { Handler, Peer, Request, Wire } from './types/rpc.js';
 export const PARSE_ERROR = -32700;
 export const INVALID_REQUEST = -32600;
 export const METHOD_NOT_FOUND = -32601;
 export const INTERNAL_ERROR = -32603;
 
-/** Maximum queued payload bytes on a wire that reports its backlog. */
+/** Backlog high-water mark; an admitted frame may overshoot it. */
 export const OUTBOUND_LIMIT = 8 * 1024 * 1024;
 
 /**
@@ -115,13 +114,9 @@ export function createPeer(wire: Wire): Peer {
       }
       const text = JSON.stringify(message);
       if (closed || !wire.isOpen()) return;
-      if (wire.bufferedBytes !== undefined
-        && wire.bufferedBytes() + Buffer.byteLength(text, 'utf8') > OUTBOUND_LIMIT) {
-        // Dropping an action but leaving the client connected would leave its
-        // reducer behind. Disconnect so it can reconnect and recover state.
-        peer.close();
-        return;
-      }
+      // Admit any frame size below the backlog mark: healthy snapshots and
+      // replay replies can exceed it. This permits a one-frame overshoot and
+      // does not bound the allocation made by JSON.stringify above.
       wire.send(text);
     },
     notify: (method, params) => {

@@ -39,7 +39,7 @@ console.log(`on ws://${listener.host}:${listener.port} (${listener.runtime})`);
 
 `accept(peer)` takes anything that can `send`, `notify` and `close`, and returns a handler. `listen()` is the WebSocket listener for Node, Bun and Deno; the host itself is not tied to WebSockets, and the tests pass their own peer.
 
-On Node, each WebSocket has an 8 MiB outgoing payload budget, including bytes already queued. A slow consumer or a frame larger than the available budget disconnects immediately so the client can reconnect and recover through replay or a snapshot. WebSocket frame headers can add up to ten bytes beyond the budget. This bounds the transport queue; an individual message is still serialized before its size is checked. Bun, Deno, stdio and custom wires without `bufferedBytes` do not enforce this budget.
+On Node, each WebSocket has an 8 MiB outbound backlog high-water mark. When already-buffered bytes are at or above it, the peer disconnects before serializing a new message so the client can reconnect and recover through replay or a snapshot. Below the mark, a single frame of any size is allowed, including a healthy snapshot or replay larger than 8 MiB. This permits a one-frame overshoot and does not bound one `JSON.stringify` allocation or total process memory. Bun, Deno, stdout/stdio, nested output, history and ACP persistence remain outside this correction; custom wires participate only when they supply `bufferedBytes`. This correction does not establish the cause of an OOM incident.
 
 ## Options
 
