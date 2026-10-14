@@ -13,7 +13,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { canonicalFromCli, createRegistry, optionTable, optionsOf, tokenize } from '@cofold/commands';
 import type { Command, Registry } from '@cofold/commands';
-import type { HostOptions, Tap, Usage } from '@ahpd/sdk';
+import type { HostOptions, OutboundClose, Tap, Usage } from '@ahpd/sdk';
 import {
   AGENT_CLASH,
   createHost,
@@ -50,6 +50,28 @@ import { conflict, optionsFrom, secret, flagFields, stop } from './options.js';
 import { accountProvider } from '../account.js';
 import { FORCED_SIGNAL, RESTART_SIGNAL, answerRestartSignal, checkedRestart, lifecycle } from './restart.js';
 import type { Options } from './options.js';
+
+const outboundReasons = new Set<OutboundClose['reason']>([
+  'backlog_limit', 'frame_count_limit', 'deferred_byte_limit',
+  'deferred_count_limit', 'drain_timeout', 'write_error',
+]);
+const outboundNumber = (value: number): number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+
+/** Project the SDK diagnostic onto a fixed log schema, never the wire tap. */
+function outboundCloseLine(event: OutboundClose): string {
+  return JSON.stringify({
+    event: 'outbound_close',
+    runtime: 'node',
+    reason: outboundReasons.has(event.reason) ? event.reason : 'write_error',
+    bufferedBytes: outboundNumber(event.bufferedBytes),
+    deferredBytes: outboundNumber(event.deferredBytes),
+    deferredFrames: outboundNumber(event.deferredFrames),
+    outstandingWrites: outboundNumber(event.outstandingWrites),
+    oversizedFrameBytes: event.oversizedFrameBytes === null ? null : outboundNumber(event.oversizedFrameBytes),
+    drainElapsedMs: outboundNumber(event.drainElapsedMs),
+  });
+}
 
 /**
  * The names the API answers to.
@@ -552,6 +574,8 @@ export async function runForeground(options: Options): Promise<void> {
       {
         port: options.port,
         host: options.host,
+        // SDK cleanup precedes this callback, and contains sink exceptions.
+        onOutboundClose: (event) => stamp(outboundCloseLine(event)),
         ...(token !== undefined ? { token } : {}),
         ...(users === undefined
           ? {}

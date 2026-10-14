@@ -2,7 +2,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Readable, Writable } from 'node:stream';
-import type { Peer, Request } from './rpc.js';
+import type { OutboundClose, Peer, Request } from './rpc.js';
 import type { Principal } from './users.js';
 
 /** One accepted client, for as long as its connection lasts. */
@@ -97,6 +97,8 @@ export interface ListenOptions {
   root?: boolean;
   /** Sees every frame, both ways. Nothing is recorded without one. */
   tap?: Tap;
+  /** Node-only overload diagnostics, containing no payload or identifiers. */
+  onOutboundClose?: (diagnostic: OutboundClose) => void;
   /**
    * Plain HTTP requests, answered on the same port as the WebSocket.
    *

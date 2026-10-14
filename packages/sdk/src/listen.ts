@@ -309,6 +309,8 @@ export async function listen(options: ListenOptions, onConnect: OnConnect): Prom
     const peer = createPeer({
       send: (text) => { seen.out(text); socket.send(text); },
       bufferedBytes: () => socket.bufferedAmount,
+      sendCompleted: (text, done) => { seen.out(text); socket.send(text, done); },
+      ...(options.onOutboundClose === undefined ? {} : { onOutboundClose: options.onOutboundClose }),
       // A graceful close can wait behind the stalled outgoing queue. Drop it
       // immediately so an overloaded connection releases what it retained.
       close: () => socket.terminate(),
@@ -587,7 +589,7 @@ interface NodeServer {
 }
 
 interface NodeSocket {
-  send(text: string): void;
+  send(text: string, done?: (error?: Error) => void): void;
   close(): void;
   terminate(): void;
   readonly bufferedAmount: number;

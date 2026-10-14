@@ -10,6 +10,7 @@
  */
 
 import type { Handler, Peer, Request, Wire } from './types/rpc.js';
+import { createNodeOutbound } from './outbound-node.js';
 export const PARSE_ERROR = -32700;
 export const INVALID_REQUEST = -32600;
 export const METHOD_NOT_FOUND = -32601;
@@ -102,23 +103,28 @@ export function createPeer(wire: Wire): Peer {
     method: string;
     settle(error: Error | undefined, result?: unknown): void;
   }>();
+  const outbound = wire.sendCompleted !== undefined && wire.bufferedBytes !== undefined
+    ? createNodeOutbound(wire, () => peer.close(), OUTBOUND_LIMIT)
+    : undefined;
+  const send = (message: Record<string, unknown>, question?: number): void => {
+    if (closed || !wire.isOpen()) return;
+    if (outbound !== undefined) { outbound.send(message, question); return; }
+    // Check before serializing: a stalled client must stop costing new
+    // strings even if its socket still claims to be open while closing.
+    if (wire.bufferedBytes !== undefined && wire.bufferedBytes() >= OUTBOUND_LIMIT) {
+      peer.close();
+      return;
+    }
+    const text = JSON.stringify(message);
+    if (closed || !wire.isOpen()) return;
+    // Admit any frame size below the backlog mark: healthy snapshots and
+    // replay replies can exceed it. This permits a one-frame overshoot and
+    // does not bound the allocation made by JSON.stringify above.
+    wire.send(text);
+  };
 
   const peer: Peer = {
-    send: (message) => {
-      if (closed || !wire.isOpen()) return;
-      // Check before serializing: a stalled client must stop costing new
-      // strings even if its socket still claims to be open while closing.
-      if (wire.bufferedBytes !== undefined && wire.bufferedBytes() >= OUTBOUND_LIMIT) {
-        peer.close();
-        return;
-      }
-      const text = JSON.stringify(message);
-      if (closed || !wire.isOpen()) return;
-      // Admit any frame size below the backlog mark: healthy snapshots and
-      // replay replies can exceed it. This permits a one-frame overshoot and
-      // does not bound the allocation made by JSON.stringify above.
-      wire.send(text);
-    },
+    send,
     notify: (method, params) => {
       peer.send({ jsonrpc: '2.0', method, params });
     },
@@ -132,6 +138,7 @@ export function createPeer(wire: Wire): Peer {
       const id = ++asked;
       const timer = setTimeout(() => {
         waiting.delete(id);
+        outbound?.cancel(id);
         reject(new RpcTimeout(method, timeoutMs));
       }, timeoutMs);
       // Unreferenced, so a question nobody is going to answer does not hold
@@ -145,7 +152,7 @@ export function createPeer(wire: Wire): Peer {
           else resolve(result);
         },
       });
-      peer.send({ jsonrpc: '2.0', id, method, params });
+      send({ jsonrpc: '2.0', id, method, params }, id);
     }),
     answered: (message) => {
       const id = typeof message.id === 'number' ? message.id : undefined;
@@ -155,6 +162,7 @@ export function createPeer(wire: Wire): Peer {
       // is nobody to hand it to and a response deserves no reply.
       if (!held) return;
       waiting.delete(id);
+      outbound?.cancel(id);
       const failure = (typeof message.error === 'object' && message.error !== null
         ? message.error
         : undefined) as { code?: unknown; message?: unknown; data?: unknown } | undefined;
@@ -171,6 +179,7 @@ export function createPeer(wire: Wire): Peer {
     close: () => {
       if (closed) return;
       closed = true;
+      outbound?.close();
       // Everything in flight, before the socket goes: a promise left pending
       // on a dead connection never settles at all.
       for (const [id, held] of [...waiting]) {

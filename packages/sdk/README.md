@@ -39,7 +39,25 @@ console.log(`on ws://${listener.host}:${listener.port} (${listener.runtime})`);
 
 `accept(peer)` takes anything that can `send`, `notify` and `close`, and returns a handler. `listen()` is the WebSocket listener for Node, Bun and Deno; the host itself is not tied to WebSockets, and the tests pass their own peer.
 
-On Node, each WebSocket has an 8 MiB outbound backlog high-water mark. When already-buffered bytes are at or above it, the peer disconnects before serializing a new message so the client can reconnect and recover through replay or a snapshot. Below the mark, a single frame of any size is allowed, including a healthy snapshot or replay larger than 8 MiB. This permits a one-frame overshoot and does not bound one `JSON.stringify` allocation or total process memory. Bun, Deno, stdout/stdio, nested output, history and ACP persistence remain outside this correction; custom wires participate only when they supply `bufferedBytes`. This correction does not establish the cause of an OOM incident.
+On Node, each WebSocket has an **8 MiB outbound backlog high-water mark**. Ordinary traffic disconnects before serializing the next message when already-buffered bytes reach that mark. Below the mark, one frame of any size is admitted, including a snapshot or replay larger than 8 MiB.
+
+An admitted oversized frame gets a fixed **5-second drain grace**, checked every **10 ms**. While it drains, follow-ups are serialized into an ordered FIFO limited to **256 KiB of aggregate UTF-8 JSON bytes** and **32 entries**. The combined count of outstanding socket writes and deferred entries is limited to **256**. Deferred traffic reaches the socket only after local write completion and zero socket backlog; local completion is not acknowledgement by the client. The original deadline covers draining the deferred traffic too and is never extended by progress or new messages.
+
+| Outbound sequence on a healthy Node connection | Behavior |
+| --- | --- |
+| One oversized snapshot/replay, then tool-output notifications and smaller snapshot/replay replies whose complete JSON frames together fit the remaining 256 KiB and 32 FIFO slots | Delivered in order, provided the combined outstanding count stays within 256 and the grace drains within 5 seconds |
+| Multiple oversized snapshot/replay replies, each sent after the previous grace has completely drained | Each is admitted separately |
+| A second oversized snapshot/replay during active grace | Intentionally closes: it cannot fit the remaining deferred byte budget |
+| Individually small follow-ups whose aggregate bytes exceed 256 KiB, or a 33rd deferred entry, or admission beyond 256 combined outstanding entries | Intentionally closes even for a reading client; frames are not silently dropped or reordered |
+| An oversized write or its deferred traffic still draining at the fixed deadline | Intentionally closes, including when partial progress continues |
+
+Exactly-full deferred byte/count budgets are allowed; another admission that would exceed a cap closes the peer. Close discards the FIFO, cancels timers and rejects pending requests. A reconnect starts with empty transport state. Clients must recover from their last received server sequence through replay or a snapshot, and should pace concurrent recovery replies and tool-output bursts rather than retrying the same over-budget burst. Delivery of arbitrary concurrent recovery traffic is traded for bounded retained outbound data.
+
+The 256 KiB cap bounds **retained encoded deferred output**, not total JS heap or traversal work. Native `JSON.stringify` can allocate an enumerable-key list before invoking its budget-checking replacer. Caller getters/`toJSON`, encoder scratch space, and the one admitted oversized frame may allocate outside the deferred-output budget. Native JSON serialization semantics are preserved; this is not a hard heap ceiling.
+
+`ListenOptions.onOutboundClose` optionally receives one structured Node overload diagnostic with only `event`, `runtime`, a fixed `reason`, and numeric byte/count/timing fields (`oversizedFrameBytes` may be null). SDK cleanup happens before this callback and callback exceptions are contained. The daemon projects this onto a fixed log allowlist independently of the wire tap.
+
+Bun, Deno and stdout/stdio retain their existing adapter behavior. Custom wires supplying only `bufferedBytes` retain immediate high-water rejection; bounded Node grace requires the explicit `sendCompleted` capability too. Nested output, history and ACP persistence remain outside this correction.
 
 ## Options
 
