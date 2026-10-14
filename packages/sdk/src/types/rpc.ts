@@ -17,6 +17,13 @@ export interface Request {
 export interface Wire {
   /** Write one frame. */
   send(text: string): void;
+  /**
+   * Bytes waiting for the consumer. When supplied, the peer disconnects
+   * before serializing a new message if the backlog is already at or above
+   * the high-water mark. One admitted frame may overshoot the mark, regardless
+   * of size; `close` must release the queue without waiting for it to drain.
+   */
+  bufferedBytes?(): number;
   /** Close the connection. */
   close(): void;
   /** Whether a `send` would still reach the client. */

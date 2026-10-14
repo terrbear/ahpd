@@ -15,6 +15,9 @@ export const INVALID_REQUEST = -32600;
 export const METHOD_NOT_FOUND = -32601;
 export const INTERNAL_ERROR = -32603;
 
+/** Backlog high-water mark; an admitted frame may overshoot it. */
+export const OUTBOUND_LIMIT = 8 * 1024 * 1024;
+
 /**
  * An error carrying a JSON-RPC code, and whatever the client needs to act.
  *
@@ -94,6 +97,7 @@ export function createPeer(wire: Wire): Peer {
    * avoid the ids a client is spending on its own requests.
    */
   let asked = 0;
+  let closed = false;
   const waiting = new Map<number, {
     method: string;
     settle(error: Error | undefined, result?: unknown): void;
@@ -101,7 +105,19 @@ export function createPeer(wire: Wire): Peer {
 
   const peer: Peer = {
     send: (message) => {
-      if (wire.isOpen()) wire.send(JSON.stringify(message));
+      if (closed || !wire.isOpen()) return;
+      // Check before serializing: a stalled client must stop costing new
+      // strings even if its socket still claims to be open while closing.
+      if (wire.bufferedBytes !== undefined && wire.bufferedBytes() >= OUTBOUND_LIMIT) {
+        peer.close();
+        return;
+      }
+      const text = JSON.stringify(message);
+      if (closed || !wire.isOpen()) return;
+      // Admit any frame size below the backlog mark: healthy snapshots and
+      // replay replies can exceed it. This permits a one-frame overshoot and
+      // does not bound the allocation made by JSON.stringify above.
+      wire.send(text);
     },
     notify: (method, params) => {
       peer.send({ jsonrpc: '2.0', method, params });
@@ -109,7 +125,7 @@ export function createPeer(wire: Wire): Peer {
     request: (method, params, timeoutMs = ANSWER_TIMEOUT) => new Promise((resolve, reject) => {
       // Refused rather than sent into a closed socket, where it would sit
       // until the timeout to say what is already known.
-      if (!wire.isOpen()) {
+      if (closed || !wire.isOpen()) {
         reject(new RpcClosed(method));
         return;
       }
@@ -153,6 +169,8 @@ export function createPeer(wire: Wire): Peer {
       ));
     },
     close: () => {
+      if (closed) return;
+      closed = true;
       // Everything in flight, before the socket goes: a promise left pending
       // on a dead connection never settles at all.
       for (const [id, held] of [...waiting]) {
