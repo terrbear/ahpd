@@ -52,10 +52,11 @@ it('sends instructions separately from the unchanged user prompt and resumes the
   await vi.waitFor(() => expect(actions.some(action => action.type === 'chat/turnComplete')).toBe(true));
   const sent = requests();
   expect(sent.find(request => request.method === 'initialize')?.params.clientCapabilities).toMatchObject({
-    _meta: { jetbrains: { air: { version: 1, capabilities: ['customInstructions'] } } },
+    _meta: { 'ahpd.clientSystemInstructions': { version: 1 } },
   });
+  expect((sent.find(request => request.method === 'initialize')?.params.clientCapabilities as Bag)._meta).not.toHaveProperty('jetbrains');
   expect(sent.find(request => request.method === 'session/new')?.params._meta).toEqual({
-    jetbrains: { air: { customInstructions: start.instructions!.join('\n\n') } },
+    'ahpd.clientSystemInstructions': start.instructions!.join('\n\n'),
   });
   expect(sent.find(request => request.method === 'session/prompt')?.params.prompt).toEqual([{ type: 'text', text: 'What project are we in?' }]);
   const id = session.agentId();
@@ -76,10 +77,10 @@ it('does not send a user prompt when the adapter cannot accept its instructions'
   sessions.push(session);
   session.begin('first', 'What project are we in?');
   await vi.waitFor(() => expect(actions.some(action => action.type === 'chat/error')).toBe(true));
-  expect(JSON.stringify(actions)).toContain('does not advertise customInstructions');
+  expect(JSON.stringify(actions)).toContain('does not advertise client system instructions');
   expect(requests().some(request => request.method === 'session/new' || request.method === 'session/prompt')).toBe(false);
 });
 
-it.each([undefined, {}, { jetbrains: {} }, { jetbrains: { air: { version: 1, capabilities: 'customInstructions' } } }])('rejects absent or malformed adapter capability %j', meta => {
-  expect(() => customInstructionsMeta('Required guidance', { protocolVersion: 1, authMethods: [], _meta: meta })).toThrow('does not advertise customInstructions');
+it.each([undefined, {}, { 'ahpd.clientSystemInstructions': true }, { 'ahpd.clientSystemInstructions': { version: 2 } }])('rejects absent or malformed adapter capability %j', meta => {
+  expect(() => customInstructionsMeta('Required guidance', { protocolVersion: 1, authMethods: [], ...(meta === undefined ? {} : { _meta: meta }) })).toThrow('does not advertise client system instructions');
 });
