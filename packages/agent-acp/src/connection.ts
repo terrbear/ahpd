@@ -121,6 +121,7 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
    * written twice.
    */
   const clientCapabilities: ClientCapabilities = {
+    ...(options.customInstructions ? { _meta: { jetbrains: { air: { version: 1, capabilities: ['customInstructions'] } } } } : {}),
     ...(readTextFile !== undefined || writeTextFile !== undefined
       ? {
           fs: {

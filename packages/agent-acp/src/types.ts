@@ -131,6 +131,7 @@ export interface AcpHandlers {
 
 /** How a connection spawns a server and where its updates go. */
 export interface AcpConnectionOptions {
+  customInstructions?: boolean;
   command: string;
   args?: string[];
   env?: Record<string, string>;

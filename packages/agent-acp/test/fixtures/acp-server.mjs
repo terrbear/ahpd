@@ -482,6 +482,7 @@ const onLine = (line) => {
     case 'initialize':
       respond(message.id, {
         protocolVersion: 1,
+        ...(process.env.ACP_CUSTOM_INSTRUCTIONS === '1' ? { _meta: { jetbrains: { air: { version: 1, capabilities: ['customInstructions'] } } } } : {}),
         agentCapabilities: {
           loadSession: true,
           ...(process.env.ACP_ATTACHMENTS === '1' ? { promptCapabilities: { image: true, embeddedContext: true } } : {}),
