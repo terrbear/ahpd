@@ -55,6 +55,10 @@ import { createInterface } from 'node:readline';
 
 /** The file every request is recorded in, when a test named one. */
 const LOG = process.env.ACP_LOG;
+const exitDelayMs = Number(process.env.ACP_EXIT_DELAY_MS ?? 0);
+if (exitDelayMs > 0) {
+  process.on('SIGTERM', () => { setTimeout(() => process.exit(0), exitDelayMs); });
+}
 
 /** The session id this server names; one process serves one conversation. */
 let session = 'acp-session-1';

@@ -37,17 +37,18 @@ const until = async (check: () => boolean, times = 2500): Promise<void> => {
 };
 
 const made: string[] = [];
-const running: { client: ReturnType<ReturnType<typeof createHost>['accept']>; uri: string; host: ReturnType<typeof createHost> }[] = [];
+const running: ReturnType<typeof createHost>[] = [];
+
+const closeRunning = async (): Promise<void> => {
+  for (const host of running.splice(0)) await host.close();
+};
 
 afterEach(async () => {
-  for (const one of running.splice(0)) {
-    await one.client.handle({ method: 'disposeSession', params: { channel: one.uri } });
-    await one.host.close?.();
-  }
+  await closeRunning();
   for (const path of made.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-async function talking(http: boolean, options: { hostTools?: boolean } = {}) {
+async function talking(http: boolean, options: { hostTools?: boolean } = {}, exitDelayMs = 0) {
   const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-mcp-'));
   made.push(path);
   const log = join(path, 'requests.jsonl');
@@ -57,13 +58,13 @@ async function talking(http: boolean, options: { hostTools?: boolean } = {}) {
       files: { type: 'stdio', command: 'files-mcp', args: ['--ro'], env: { A: 'b' } },
       docs: { type: 'http', url: 'https://docs.example/mcp', headers: { 'X-Key': 'k' } },
     },
-    agents: [acpAgent({
+    agents: [{ ...acpAgent({
       command: process.execPath,
       args: [FIXTURE],
-      env: { ACP_LOG: log, ...(http ? { ACP_MCP_HTTP: '1' } : {}) },
+      env: { ACP_LOG: log, ACP_EXIT_DELAY_MS: String(exitDelayMs), ...(http ? { ACP_MCP_HTTP: '1' } : {}) },
       provider: 'acp',
       ...options,
-    })],
+    }), list: async () => [] }],
   });
   const held = peer();
   const client = host.accept(held.peer);
@@ -76,7 +77,7 @@ async function talking(http: boolean, options: { hostTools?: boolean } = {}) {
   await client.handle({ method: 'createSession', params: { channel: uri, provider: 'acp', workingDirectories: [`file://${path}`] } });
   await client.handle({ method: 'subscribe', params: { channel: uri } });
   await client.handle({ method: 'subscribe', params: { channel: chatUri } });
-  running.push({ client, uri, host });
+  running.push(host);
   return { client, notes: held.notes, uri, chatUri, log };
 }
 
@@ -119,6 +120,20 @@ it('leaves out the host tools server when hostTools is off', async () => {
   const t = await talking(true, { hostTools: false });
   await turn(t, 'hello');
   expect(sentToServer(t.log).mcpServers.map((one) => one.name)).toEqual(['files', 'docs']);
+});
+
+it('waits for the MCP subprocess to exit before removing its request log', async () => {
+  const t = await talking(true, { hostTools: false }, 100);
+  await turn(t, 'hello');
+  const requests = readFileSync(t.log, 'utf8').trim().split('\n')
+    .map((line) => JSON.parse(line) as { pid: number; method: string });
+  expect(requests.some((request) => request.method === 'session/list')).toBe(false);
+  const pids = [...new Set(requests.map((request) => request.pid))];
+  expect(pids).toHaveLength(1);
+  await closeRunning();
+  for (const pid of pids) {
+    expect(() => process.kill(pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }));
+  }
 });
 
 it.each(['complete', 'cancel'])('retains a client call in snapshots until %s', async (ending) => {
