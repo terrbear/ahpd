@@ -139,3 +139,9 @@ corresponding content. Unsupported content fails visibly instead of being
 silently discarded. Attachments are preserved in queued turns and recorded
 transcripts. Images have a 5 MB limit and all files together have a 25 MB limit
 per message.
+
+### Codex system instructions
+
+The `codex` provider accepts the host's `ahpd.clientSystemInstructions` extension and forwards the saved instructions through the pinned Codex ACP adapter's `ahpd.clientSystemInstructions` metadata on `session/new`. The adapter passes them to Codex `thread/start` as `developerInstructions`. The bridge checks the adapter's advertised version 1 `ahpd.clientSystemInstructions` capability before opening or resuming an instructed session. Unsupported adapters fail the turn before sending its user prompt. Other ACP providers do not advertise instruction support. The extension does not enable AIR rendering or alter command/file/MCP output.
+
+Instructions are separate from user messages and do not replace the provider's base instructions. The existing Codex thread retains its developer instructions on `session/load`; a new chat receives its own copy through `session/new`. Changing a client's prompt requires a fresh session. Acceptance by the AHP host records its transport contract, not proof that the model followed the instructions.

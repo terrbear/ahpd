@@ -121,6 +121,7 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
    * written twice.
    */
   const clientCapabilities: ClientCapabilities = {
+    ...(options.customInstructions ? { _meta: { 'ahpd.clientSystemInstructions': { version: 1 } } } : {}),
     ...(readTextFile !== undefined || writeTextFile !== undefined
       ? {
           fs: {

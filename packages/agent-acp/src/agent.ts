@@ -74,6 +74,7 @@ export function acpAgent(options: AcpOptions): Agent {
 
   return {
     provider,
+    ...(provider === 'codex' ? { acceptsSystemInstructions: true } : {}),
     displayName,
     ...(options.description !== undefined ? { description: options.description } : {}),
     schema,
