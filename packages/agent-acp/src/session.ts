@@ -23,6 +23,7 @@
  * not have yet.
  */
 
+import { customInstructionsMeta } from './instructions.js';
 import { asyncInputs } from './async-input.js';
 import { idOf, embeddedAttachments } from '@ahpd/sdk';
 import { attachmentBlocks } from './attachments.js';
@@ -80,6 +81,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   const hostId = idOf(start.uri);
   let record = catalog?.get(start.resume ?? hostId);
   const provider = options.provider ?? 'acp';
+  const instructions = provider === 'codex' ? start.instructions?.join('\n\n') : undefined;
   const pendingInputs = new Map<string, Bag>();
   const emit: Start['emit'] = (where, action) => {
     if (where === 'session' && action.type === 'session/inputNeededSet') {
@@ -670,6 +672,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     const pending = (async () => {
       const moved = await placed();
       const connection = connectAcp({
+        customInstructions: instructions !== undefined,
         command: moved?.command ?? options.command,
         ...(moved !== undefined
           ? { args: moved.args }
@@ -706,6 +709,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
         inputs.cancel();
       });
       const handshake = await connection.initialize();
+      const instructionMeta = customInstructionsMeta(instructions, handshake);
       const extra = start.additional !== undefined && start.additional.length > 0
         ? { additionalDirectories: start.additional }
         : {};
@@ -729,6 +733,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       }
       else {
         const created = await connection.newSession({
+          ...instructionMeta,
           cwd: where,
           mcpServers,
           ...extra,

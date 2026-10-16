@@ -55,6 +55,10 @@ import { createInterface } from 'node:readline';
 
 /** The file every request is recorded in, when a test named one. */
 const LOG = process.env.ACP_LOG;
+const exitDelayMs = Number(process.env.ACP_EXIT_DELAY_MS ?? 0);
+if (exitDelayMs > 0) {
+  process.on('SIGTERM', () => { setTimeout(() => process.exit(0), exitDelayMs); });
+}
 
 /** The session id this server names; one process serves one conversation. */
 let session = 'acp-session-1';
@@ -482,6 +486,7 @@ const onLine = (line) => {
     case 'initialize':
       respond(message.id, {
         protocolVersion: 1,
+        ...(process.env.ACP_CUSTOM_INSTRUCTIONS === '1' ? { _meta: { 'ahpd.clientSystemInstructions': { version: 1 } } } : {}),
         agentCapabilities: {
           loadSession: true,
           ...(process.env.ACP_ATTACHMENTS === '1' ? { promptCapabilities: { image: true, embeddedContext: true } } : {}),

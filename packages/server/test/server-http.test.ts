@@ -721,6 +721,7 @@ describe('what a served command reads', () => {
   }, 30000);
 
   it('masks every plugin option value', async () => {
+    config = join(home, 'config-k1-eu.json');
     const one = await daemon(
       { http: true, plugins: [{ name: BACKEND, options: { apiKey: 'k1', region: 'eu' } }] },
       ['--connection-token', 'root-secret'],
@@ -728,9 +729,10 @@ describe('what a served command reads', () => {
     const answered = await get(`http://127.0.0.1:${String(one.port)}/api/config`, 'root-secret');
     expect(answered.status).toBe(200);
     const body = await answered.text();
-    expect(body).not.toContain('k1');
-    expect(body).not.toContain('eu');
-    const parsed = JSON.parse(body) as { config: { plugins: { options: Record<string, unknown> }[] } };
+    expect(body).not.toContain(JSON.stringify('k1'));
+    expect(body).not.toContain(JSON.stringify('eu'));
+    const parsed = JSON.parse(body) as { path: string; config: { plugins: { options: Record<string, unknown> }[] } };
+    expect(parsed.path).toBe(config);
     expect(parsed.config.plugins[0]?.options).toEqual({ apiKey: '<set>', region: '<set>' });
   }, 30000);
 

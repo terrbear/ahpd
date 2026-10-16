@@ -131,6 +131,7 @@ export interface AcpHandlers {
 
 /** How a connection spawns a server and where its updates go. */
 export interface AcpConnectionOptions {
+  customInstructions?: boolean;
   command: string;
   args?: string[];
   env?: Record<string, string>;
@@ -148,6 +149,7 @@ export interface AcpConnection {
    * told what a client can do at the start of a connection and never again.
    */
   initialize(): Promise<InitializeResponse>;
+  readHistory(id: string): Promise<Record<string, unknown>>;
   /** Open one session on the server, which names it. */
   newSession(request: NewSessionRequest): Promise<NewSessionResponse>;
   /** Reopen a session the server already has, which replays its history. */

@@ -1,3 +1,4 @@
+import { readExternalHistory } from './external-history.js';
 import { probe } from './probe.js';
 import { serversFor } from './mcp.js';
 import { createSession, EFFORT_LABELS, EFFORTS } from './session.js';
@@ -505,6 +506,8 @@ export function claude(options: ClaudeOptions): Agent {
       url: `${(process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com').replace(/\/$/, '')}/v1/models`,
       expectedStatus: 401,
     }],
+
+    externalHistory: (id, signal) => readExternalHistory(id, dirs, signal),
 
     // Whichever directory holds it. The transcript reader wants the one the
     // session ran in, and only its own catalogue knows which that was.

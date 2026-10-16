@@ -12,6 +12,7 @@
  * catalogue is `catalog.ts`.
  */
 
+import { readExternalHistory } from './external-history.js';
 import { persistentCatalog } from './persistence.js';
 import type { Agent, Bag, Listed, Offered } from '@ahpd/sdk';
 import { isAbsolute } from 'node:path';
@@ -73,6 +74,7 @@ export function acpAgent(options: AcpOptions): Agent {
 
   return {
     provider,
+    ...(provider === 'codex' ? { acceptsSystemInstructions: true } : {}),
     displayName,
     ...(options.description !== undefined ? { description: options.description } : {}),
     schema,
@@ -136,6 +138,7 @@ export function acpAgent(options: AcpOptions): Agent {
       return watched === undefined ? undefined : turnsOf(watched, options.stateDirectory);
     },
 
+    externalHistory: (id, signal) => readExternalHistory(options, provider, id, signal),
     stateFile,
     create: (start) => acpSession(options, start, catalog),
   };

@@ -18,7 +18,7 @@ async function talking() {
   const path = mkdtempSync(join(tmpdir(), 'ahpd-delivery-'));
   const log = join(path, 'acp.jsonl');
   const starts = new Map<string, Start>();
-  const base = acpAgent({ command: process.execPath, args: [fixture], provider: 'codex', env: { ACP_LOG: log } });
+  const base = acpAgent({ command: process.execPath, args: [fixture], provider: 'codex', env: { ACP_LOG: log, ACP_CUSTOM_INSTRUCTIONS: '1' } });
   const host = createHost({ path, agents: [{ ...base, create: (start) => {
     starts.set(start.uri, start);
     return base.create(start);
@@ -53,6 +53,9 @@ it('returns the exact busy Codex queue identity and exposes it without settling 
   const t = await talking();
   await t.begin('ask');
   await expect.poll(async () => (((await t.state(t.chat)).activeTurn as Bag)?.responseParts as Bag[])?.find((part) => (part.toolCall as Bag)?.toolCallId === 'call-perm')?.toolCall).toMatchObject({ status: 'pending-confirmation' });
+  const instructions = t.starts.get('codex:/target')?.instructions?.join('\n\n');
+  expect(instructions).toEqual(expect.any(String));
+  expect((t.requests().find((one) => one.method === 'session/new')?.params as Bag)?._meta).toEqual({ 'ahpd.clientSystemInstructions': instructions });
   const before = await t.state(t.chat);
   const receipt = await t.call('send_message', { session: 'codex:/target', message: 'old validation' });
   expect(receipt.deliveryId).toEqual(expect.any(String));
