@@ -497,6 +497,7 @@ export interface Agent {
    * content blocks no `type`.
    */
   transcript?(id: string): Promise<WireTurn<Turn>[] | undefined>;
+  externalHistory?(id: string): Promise<{ format: 'codex-thread' | 'claude-messages'; history: Bag } | undefined>;
 
   /**
    * The worker chats one past session holds, read without starting anything.

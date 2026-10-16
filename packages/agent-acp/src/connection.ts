@@ -192,6 +192,7 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
         return reply;
       });
     },
+    readHistory: (id: string): Promise<Record<string, unknown>> => heard(() => connection.agent.request('_session/read_history', { sessionId: id })),
     newSession: (request: NewSessionRequest): Promise<NewSessionResponse> => heard(() => connection.agent.request('session/new', request)),
     loadSession: (request: LoadSessionRequest): Promise<LoadSessionResponse> => heard(() => connection.agent.request('session/load', request)),
     listSessions: (request: ListSessionsRequest): Promise<ListSessionsResponse> =>
