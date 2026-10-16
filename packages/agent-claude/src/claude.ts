@@ -507,7 +507,7 @@ export function claude(options: ClaudeOptions): Agent {
       expectedStatus: 401,
     }],
 
-    externalHistory: (id) => readExternalHistory(id, dirs),
+    externalHistory: (id, signal) => readExternalHistory(id, dirs, signal),
 
     // Whichever directory holds it. The transcript reader wants the one the
     // session ran in, and only its own catalogue knows which that was.

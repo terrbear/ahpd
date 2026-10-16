@@ -137,7 +137,7 @@ export function acpAgent(options: AcpOptions): Agent {
       return watched === undefined ? undefined : turnsOf(watched, options.stateDirectory);
     },
 
-    externalHistory: (id) => readExternalHistory(options, provider, id),
+    externalHistory: (id, signal) => readExternalHistory(options, provider, id, signal),
     stateFile,
     create: (start) => acpSession(options, start, catalog),
   };

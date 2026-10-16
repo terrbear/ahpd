@@ -2,6 +2,31 @@ import { hostname, userInfo } from 'node:os';
 import type { Agent, ResourceProvider } from '@ahpd/sdk';
 
 export function cliHistoryProvider(agents: Agent[], identity = { host: hostname(), user: String(userInfo().uid) }): ResourceProvider {
+  const pending = new WeakSet<Agent>();
+  const read = async (agent: Agent, id: string) => {
+    if (!agent.externalHistory || pending.has(agent)) return undefined;
+    pending.add(agent);
+    const controller = new AbortController();
+    const work = Promise.resolve()
+      .then(() => agent.externalHistory!(id, controller.signal))
+      .catch(() => undefined)
+      .finally(() => pending.delete(agent));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<undefined>(resolve => {
+          timer = setTimeout(() => {
+            resolve(undefined);
+            controller.abort();
+          }, 10000);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   return {
     read: async (uri, _wanted, reader) => {
       const observedAt = new Date().toISOString();
@@ -15,7 +40,7 @@ export function cliHistoryProvider(agents: Agent[], identity = { host: hostname(
         if (url.searchParams.get('host') !== identity.host || url.searchParams.get('user') !== identity.user) throw new Error();
         const agent = agents.find(one => one.provider === url.hostname && ['claude', 'codex'].includes(one.provider));
         if (!agent) throw new Error();
-        const external = await agent.externalHistory?.(id);
+        const external = await read(agent, id);
         if (!external) throw new Error();
         const { format, history } = external;
         const candidate = { version: 1, status: 'available', writable: false, host: identity.host, user: identity.user, provider: agent.provider, nativeId: id, format, history, observedAt };

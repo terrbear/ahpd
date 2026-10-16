@@ -14,7 +14,7 @@ it('reads exact prior Claude turns without creating a runtime', async () => {
  const provider = cliHistoryProvider([agent], identity);
  const out = JSON.parse((await provider.read(uri())).data);
  expect(out).toMatchObject({ status: 'available', writable: false, nativeId: id, history: { id, turns } });
- expect(transcript).toHaveBeenCalledWith(id);
+ expect(transcript).toHaveBeenCalledWith(id, expect.any(AbortSignal));
  expect(create).not.toHaveBeenCalled();
 });
 
