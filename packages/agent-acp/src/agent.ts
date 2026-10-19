@@ -14,7 +14,7 @@
 
 import { readExternalHistory } from './external-history.js';
 import { persistentCatalog } from './persistence.js';
-import type { Agent, Bag, Listed, Offered } from '@ahpd/sdk';
+import type { Agent, Bag, HistoricalTurnStatus, Listed, Offered } from '@ahpd/sdk';
 import { isAbsolute } from 'node:path';
 import { catalogueOf, stateFile, watchedSession } from './catalog.js';
 import { acpSession } from './session.js';
@@ -137,6 +137,9 @@ export function acpAgent(options: AcpOptions): Agent {
       const watched = catalog?.get(id) ?? watchedSession(provider, id);
       return watched === undefined ? undefined : turnsOf(watched, options.stateDirectory);
     },
+
+    historicalTurnStatus: (id, turnId): HistoricalTurnStatus =>
+      catalog?.historicalTurnStatus(id, turnId) ?? { status: 'unknown', reason: 'not-found' },
 
     externalHistory: (id, signal) => readExternalHistory(options, provider, id, signal),
     stateFile,

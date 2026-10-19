@@ -1444,3 +1444,52 @@ it('routes nothing to a person removed while connected, and binds no id to a con
   expect(await call(two, 'authenticate', { channel: ROOT, resource: RECORD.resource, token: 'q' })).toHaveProperty('result');
   expect(await call(admin.client, 'resourceRead', { channel: ROOT, uri: 'virtual://anonymous/f' })).not.toMatchObject({ result: { data: expect.anything() } });
 });
+
+it('gates historical turn metadata with session:read and never broadcasts it', async () => {
+  const sessionResource = 'base:/one';
+  const chatUri = `ahp-chat://default/${Buffer.from(sessionResource).toString('base64url')}`;
+  const historicalTurnStatus = vi.fn(() => ({
+    status: 'known' as const, state: 'complete' as const, startedAt: '2026-10-18T00:01:02.000Z',
+  }));
+  const agent = {
+    ...echo({ path: root, pace: 0 }),
+    provider: 'base',
+    list: async () => [{
+      id: 'one', title: 'One', createdAt: '2026-10-18T00:00:00.000Z',
+      modifiedAt: '2026-10-18T00:00:00.000Z', workingDirectories: [`file://${root}`],
+    }],
+    historicalTurnStatus,
+  };
+  const made = host({ agents: [agent], users: directory({ guest: [], reader: ['session:read'] }) });
+  const guestWire = watching();
+  const guest = made.accept(guestWire);
+  const initialized = await hello(guest, 'guest') as { _meta?: Record<string, unknown> };
+  expect(initialized._meta?.['vscode.getAgentHostTurnMetadata.v1']).toBe(true);
+  await signIn(guest, 'guest');
+  const params = { version: 1, sessionResource, chatUri, turnId: 'turn-1' };
+  expect(await call(guest, 'vscode/getAgentHostTurnMetadata', params)).toMatchObject({
+    code: -32009, message: expect.stringContaining('session:read'),
+  });
+  expect(historicalTurnStatus).not.toHaveBeenCalled();
+
+  const readerWire = watching();
+  const reader = made.accept(readerWire);
+  await hello(reader, 'reader');
+  await signIn(reader, 'reader');
+  await reader.handle({ method: 'listSessions', params: { channel: ROOT } });
+  const before = readerWire.seen.length;
+  expect(await call(reader, 'vscode/getAgentHostTurnMetadata', params)).toEqual({ result: {
+    version: 1, status: 'known', state: 'complete', startedAt: '2026-10-18T00:01:02.000Z',
+  } });
+  expect(historicalTurnStatus).toHaveBeenCalledOnce();
+  expect(historicalTurnStatus).toHaveBeenCalledWith('one', 'turn-1');
+  expect(readerWire.seen).toHaveLength(before);
+  expect(await call(reader, 'vscode/getAgentHostTurnMetadata', { ...params, chatUri: 'ahp-chat:/legacy-chat' })).toEqual({
+    result: { version: 1, status: 'unknown', reason: 'not-found' },
+  });
+  expect(await call(reader, 'vscode/getAgentHostTurnMetadata', {
+    ...params, chatUri: `ahp-chat://default/${Buffer.from('base:/other').toString('base64url')}`,
+  })).toEqual({ result: { version: 1, status: 'unknown', reason: 'not-found' } });
+  expect(historicalTurnStatus).toHaveBeenCalledOnce();
+  expect(readerWire.seen).toHaveLength(before);
+});

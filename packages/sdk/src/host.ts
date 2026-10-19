@@ -51,7 +51,7 @@ import type { HostEvent } from './types/events.js';
 import { raise } from './plugins.js';
 import type { Grant, Principal } from './types/users.js';
 import type { Summary } from './types/catalog.js';
-import type { Agent, BoundTool, Listed } from './types/agent.js';
+import type { Agent, BoundTool, HistoricalTurnStatus, Listed } from './types/agent.js';
 import type { Bag } from './types/common.js';
 import type { Session, SubagentChat, SubagentRequest } from './types/session.js';
 import type { RunEnding, StartSession } from './types/automations.js';
@@ -196,6 +196,7 @@ const NEEDS: Record<string, Grant> = {
   // session's own pair - and a role that may not write a session may not make
   // it a tree.
   'vscode/getAgentHostSessionStateFile': 'session:read',
+  'vscode/getAgentHostTurnMetadata': 'session:read',
 
   // session:write
   'vscode/createAgentHostDetachedWorktree': 'session:write',
@@ -7325,6 +7326,9 @@ export function createHost(options: HostOptions): Host {
               'vscode.removeSessionArtifact': true,
               'vscode.detachedWorktrees': true,
               'vscode.getAgentHostSessionStateFile.chat': true,
+              ...(Array.from(agents.values()).some((agent) => agent.historicalTurnStatus !== undefined)
+                ? { 'vscode.getAgentHostTurnMetadata.v1': true }
+                : {}),
               // The dev container surface. A client reads this before it
               // offers the flow, so it is true only where a container can
               // actually be made: a host with the launcher loaded and no
@@ -8883,6 +8887,36 @@ export function createHost(options: HostOptions): Host {
           if (params.chat !== undefined && typeof params.chat !== 'string') throw new RpcError(-32602, 'chat must be a URI string');
           const found = stateFileOf(params.session, params.chat);
           return found === undefined ? {} : { resource: `file://${found}` };
+        },
+        'vscode/getAgentHostTurnMetadata': async (params) => {
+          if (params.version !== 1) throw new RpcError(-32602, 'version must be 1');
+          const sessionResource = params.sessionResource;
+          const chatUri = params.chatUri;
+          const turnId = params.turnId;
+          if (typeof sessionResource !== 'string' || sessionResource.trim() === '' || sessionResource.includes('\0') || Buffer.byteLength(sessionResource) > 4096
+            || typeof chatUri !== 'string' || chatUri.trim() === '' || chatUri.includes('\0') || Buffer.byteLength(chatUri) > 4096
+            || typeof turnId !== 'string' || turnId.trim() === '' || turnId.includes('\0') || Buffer.byteLength(turnId) > 1024) {
+            throw new RpcError(-32602, 'sessionResource, chatUri, and turnId must be bounded non-empty strings');
+          }
+          const live = sessions.get(sessionResource);
+          const owner = live?.agent ?? owners.get(sessionResource);
+          if (owner === undefined || schemeOf(sessionResource) !== owner.provider || idOf(sessionResource) === ''
+            || chatUri !== chatUriFor(sessionResource)
+            || (live !== undefined && !live.chats.has(chatUri)) || owner.historicalTurnStatus === undefined) {
+            return { version: 1, status: 'unknown', reason: 'not-found' };
+          }
+          let result: HistoricalTurnStatus;
+          try { result = await owner.historicalTurnStatus(idOf(sessionResource), turnId); }
+          catch { return { version: 1, status: 'unknown', reason: 'malformed' }; }
+          if (typeof result !== 'object' || result === null) return { version: 1, status: 'unknown', reason: 'malformed' };
+          if (result.status === 'known' && (result.state === 'complete' || result.state === 'cancelled' || result.state === 'error')
+            && typeof result.startedAt === 'string' && Buffer.byteLength(result.startedAt) <= 64 && Number.isFinite(Date.parse(result.startedAt))) {
+            return { version: 1, status: 'known', state: result.state, startedAt: result.startedAt };
+          }
+          if (result.status === 'unknown' && ['not-found', 'oversized', 'malformed', 'legacy', 'ambiguous', 'incomplete'].includes(result.reason)) {
+            return { version: 1, status: 'unknown', reason: result.reason };
+          }
+          return { version: 1, status: 'unknown', reason: 'malformed' };
         },
         /**
          * The logs, packed up for a bug report.

@@ -321,6 +321,10 @@ export interface RestoredSubagent {
   turns: Bag[];
 }
 
+export type HistoricalTurnStatus =
+  | { status: 'known'; state: 'complete' | 'cancelled' | 'error'; startedAt: string }
+  | { status: 'unknown'; reason: 'not-found' | 'oversized' | 'malformed' | 'legacy' | 'ambiguous' | 'incomplete' };
+
 /**
  * A backend the host can run sessions on.
  *
@@ -497,6 +501,7 @@ export interface Agent {
    * content blocks no `type`.
    */
   transcript?(id: string): Promise<WireTurn<Turn>[] | undefined>;
+  historicalTurnStatus?(id: string, turnId: string): HistoricalTurnStatus | Promise<HistoricalTurnStatus>;
   externalHistory?(id: string, signal?: AbortSignal): Promise<{ format: 'codex-thread' | 'claude-messages'; history: Bag } | undefined>;
 
   /**
