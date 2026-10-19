@@ -14,7 +14,7 @@ export interface AcpCatalog {
   historicalTurnStatus(id: string, turnId: string): HistoricalTurnStatus;
 }
 
-export const TURN_STATUS_RECORD_MAX_BYTES = 128 * 1024;
+export const TURN_STATUS_RECORD_MAX_BYTES = 4 * 1024 * 1024;
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
 const read = (path: string): unknown => {
@@ -36,14 +36,14 @@ const boundedJson = (path: string): { value: unknown } | { reason: 'not-found' |
     const stats = fstatSync(descriptor);
     if (!stats.isFile()) return { reason: 'malformed' };
     if (stats.size > TURN_STATUS_RECORD_MAX_BYTES) return { reason: 'oversized' };
-    const bytes = Buffer.alloc(TURN_STATUS_RECORD_MAX_BYTES + 1);
+    const bytes = Buffer.alloc(stats.size + 1);
     let length = 0;
     while (length < bytes.length) {
       const count = readSync(descriptor, bytes, length, bytes.length - length, length);
       if (count === 0) break;
       length += count;
     }
-    if (length > TURN_STATUS_RECORD_MAX_BYTES) return { reason: 'oversized' };
+    if (length !== stats.size) return { reason: 'malformed' };
     const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length));
     return { value: JSON.parse(text) as unknown };
   }
