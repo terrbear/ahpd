@@ -934,6 +934,7 @@ export function createHost(options: HostOptions): Host {
   }
   /** Live sessions, by their own uri. */
   const sessions = new Map<string, Held>();
+  const resumingChats = new Map<string, number>();
   const deliveries = new Deliveries();
   /**
    * The live sessions started by resuming one the backend recorded, whose
@@ -9874,11 +9875,34 @@ export function createHost(options: HostOptions): Host {
          * a subprocess. Resumed rather than replayed - the agent gets the
          * context it built before, not a transcript it has been shown.
          */
+        if (!held && !worker && type === 'chat/turnCancelled') {
+          const turnId = String(action.turnId ?? '');
+          if (turnId === '' || origin.clientSeq <= 0 || resumingChats.has(sessionFor(channel))) {
+            no('Session resume is unresolved; retry stop after it settles');
+            return;
+          }
+          return bounded(past(idOf(sessionFor(channel))), 'reading the catalogue').then((found) => {
+            if (!connections.has(connection)) return;
+            if (found === undefined) {
+              no(`${channel} is not a session this host knows`);
+              return;
+            }
+            if (resumingChats.has(sessionFor(channel)) || byChat.has(channel) || sessions.has(sessionFor(channel))) {
+              no('Session changed while stopping; retry stop');
+              return;
+            }
+            const alias = connection.aliases.get(channel);
+            connection.peer.notify('action', {
+              channel: alias ?? channel, action: { type, turnId, duration: 0 }, serverSeq, origin,
+            });
+          }).catch((error: unknown) => { no(error instanceof Error ? error.message : String(error)); });
+        }
         if (!held && type === 'chat/turnStarted') {
           // The session the chat belongs to, which is not the chat's own name:
           // a chat URI carries its session rather than being derived from it.
           const uri = sessionFor(channel);
           const id = idOf(uri);
+          resumingChats.set(uri, (resumingChats.get(uri) ?? 0) + 1);
           void (async () => {
             const seed = await past(id);
             if (!seed) {
@@ -9940,7 +9964,11 @@ export function createHost(options: HostOptions): Host {
             });
             const refused = beginOrRun(session, owner.provider, String(action.turnId ?? ''), String(message.text ?? ''), modelIn(message.model), messageFrom(message), ownerFor(connection));
             if (refused !== undefined) refuse(connection.peer, channel, action, origin, refused);
-          })();
+          })().finally(() => {
+            const remaining = (resumingChats.get(uri) ?? 1) - 1;
+            if (remaining === 0) resumingChats.delete(uri);
+            else resumingChats.set(uri, remaining);
+          });
           return;
         }
         const session = held;

@@ -1805,6 +1805,61 @@ describe('a session that already happened', () => {
     expect(opened.workingDirectories).toEqual(['file:///github/s2cmd']);
   });
 
+  it.each(['0.8.0', '0.9.0'])('confirms cancellation of an unloaded historical session without resuming it on %s', async (version) => {
+    sdk.sessions.push(older);
+    sdk.transcript.push({ type: 'user', uuid: 'u1', message: { role: 'user', content: 'earlier' } });
+    const wire = peer();
+    const client = serving('/home/softov').accept(wire);
+    await client.handle(hello([version]));
+    await client.handle({ method: 'subscribe', params: { channel: 'ahp-chat:/older' } });
+    client.handle({ method: 'dispatchAction', params: {
+      channel: 'ahp-chat:/older', clientSeq: 12,
+      action: { type: 'chat/turnCancelled', turnId: 'unconfirmed', duration: 0 },
+    } });
+    await settle(6);
+    const replies = wire.notes.filter((note) => note.method === 'action').map((note) => note.params);
+    expect(replies).toContainEqual(expect.objectContaining({
+      action: expect.objectContaining({ type: 'chat/turnCancelled', turnId: 'unconfirmed' }),
+      origin: expect.objectContaining({ clientSeq: 12 }),
+    }));
+    expect(replies).not.toContainEqual(expect.objectContaining({ rejectionReason: expect.any(String) }));
+    expect(sessionQueries()).toHaveLength(0);
+    expect(sdk.said).toEqual([]);
+  });
+
+  it.each(['ahp-chat:/older', 'ahp-session:/older'])('refuses unloaded cancellation when a resume is pending through %s', async (channel) => {
+    sdk.sessions.push(older);
+    sdk.transcript.push({ type: 'user', uuid: 'u1', message: { role: 'user', content: 'earlier' } });
+    const wire = peer();
+    const client = serving('/home/softov').accept(wire);
+    await client.handle(hello(['0.8.0']));
+    client.handle({ method: 'dispatchAction', params: {
+      channel: 'ahp-chat:/older', clientSeq: 11,
+      action: { type: 'chat/turnStarted', turnId: 'pending', message: { text: 'continue' } },
+    } });
+    client.handle({ method: 'dispatchAction', params: {
+      channel, clientSeq: 12,
+      action: { type: 'chat/turnCancelled', turnId: 'pending', duration: 0 },
+    } });
+    await settle(6);
+    expect(wire.notes.filter((note) => note.method === 'action').map((note) => note.params))
+      .toContainEqual(expect.objectContaining({ rejectionReason: 'Session resume is unresolved; retry stop after it settles' }));
+  });
+
+  it('refuses unloaded cancellation for a session absent from the catalogue', async () => {
+    const wire = peer();
+    const client = serving('/home/softov').accept(wire);
+    await client.handle(hello(['0.8.0']));
+    client.handle({ method: 'dispatchAction', params: {
+      channel: 'ahp-chat:/ghost', clientSeq: 12,
+      action: { type: 'chat/turnCancelled', turnId: 'missing', duration: 0 },
+    } });
+    await settle(6);
+    expect(wire.notes.filter((note) => note.method === 'action').map((note) => note.params))
+      .toContainEqual(expect.objectContaining({ rejectionReason: expect.stringContaining('not a session this host knows') }));
+    expect(sessionQueries()).toHaveLength(0);
+  });
+
   it('resumes rather than replays when somebody says something', async () => {
     sdk.sessions.push(older);
     sdk.transcript.push({ type: 'user', uuid: 'u1', message: { role: 'user', content: 'earlier' } });
