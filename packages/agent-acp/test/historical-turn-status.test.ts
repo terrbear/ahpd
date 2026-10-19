@@ -59,6 +59,17 @@ it('reads one exact status from a v2 record without exposing content or modifyin
   for (const [name, bytes] of before) expect(readFileSync(join(folder, name))).toEqual(bytes);
 });
 
+it('reads status from a legitimate record larger than the former cap without returning its content', () => {
+  const { catalog, folder } = catalogFor(recordWith([turn({ message: { text: 'x'.repeat(128 * 1024) } })]));
+  const before = new Map(readdirSync(folder).map((name) => [name, readFileSync(join(folder, name))]));
+  const result = catalog.historicalTurnStatus(id, turnId);
+  expect(readFileSync(join(folder, `${hash(id)}.json`)).byteLength).toBeGreaterThan(128 * 1024);
+  expect(result).toEqual({ status: 'known', state: 'complete', startedAt: '2026-10-18T00:01:02.000Z' });
+  expect(JSON.stringify(result)).not.toContain('x'.repeat(128));
+  expect(readdirSync(folder)).toEqual([...before.keys()]);
+  for (const [name, bytes] of before) expect(readFileSync(join(folder, name))).toEqual(bytes);
+});
+
 it('returns unknown for legacy, malformed, oversized, ambiguous, and incomplete records', () => {
   const legacy = catalogFor(recordWith([turn()], 1), undefined);
   expect(legacy.catalog.historicalTurnStatus(id, turnId)).toEqual({ status: 'unknown', reason: 'legacy' });
@@ -66,7 +77,7 @@ it('returns unknown for legacy, malformed, oversized, ambiguous, and incomplete 
   const malformed = catalogFor(recordWith([turn()]), 2, '{not json');
   expect(malformed.catalog.historicalTurnStatus(id, turnId)).toEqual({ status: 'unknown', reason: 'malformed' });
 
-  const oversized = catalogFor(undefined, 2, 'x'.repeat(TURN_STATUS_RECORD_MAX_BYTES + 1));
+  const oversized = catalogFor(recordWith([turn({ message: { text: 'x'.repeat(TURN_STATUS_RECORD_MAX_BYTES) } })]));
   const tooLarge = oversized.catalog.historicalTurnStatus(id, turnId);
   expect(tooLarge).toEqual({ status: 'unknown', reason: 'oversized' });
   expect(tooLarge).not.toHaveProperty('size');
