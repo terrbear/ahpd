@@ -98,14 +98,18 @@ export function persistentCatalog(directory: string, provider: string): AcpCatal
     throw new Error('Invalid ACP session registry');
   }
   const entries = new Map<string, Entry>();
-  const duplicateIds = new Set<string>();
+  const identities = new Map<string, Entry[]>();
   for (const entry of index?.entries ?? []) {
     if (entry.provider !== provider || typeof entry.id !== 'string' || typeof entry.cwd !== 'string'
       || !Array.isArray(entry.hostIds) || !entry.hostIds.every((id) => typeof id === 'string')) {
       throw new Error('Invalid ACP session identity');
     }
-    if (entries.has(entry.id)) duplicateIds.add(entry.id);
     entries.set(entry.id, entry);
+    for (const identity of new Set([entry.id, ...entry.hostIds])) {
+      const matches = identities.get(identity) ?? [];
+      matches.push(entry);
+      identities.set(identity, matches);
+    }
   }
   const loaded = new Map<string, WatchedSession>();
   const legacy = new Set([...entries.values()].filter((entry) => entry.formatVersion !== 2).map((entry) => entry.id));
@@ -128,14 +132,15 @@ export function persistentCatalog(directory: string, provider: string): AcpCatal
       workingDirectories: [entry.cwd, ...entry.additional].map((directory) => `file://${directory}`),
     }))),
     historicalTurnStatus: (id, turnId) => {
-      if (duplicateIds.has(id)) return unknown('ambiguous');
-      const entry = entries.get(id);
-      if (entry === undefined) return unknown('not-found');
-      if (entry.provider !== provider || entry.id !== id) return unknown('malformed');
+      const matches = identities.get(id) ?? [];
+      if (matches.length === 0) return unknown('not-found');
+      if (matches.length !== 1) return unknown('ambiguous');
+      const entry = matches[0]!;
+      if (entry.provider !== provider || typeof entry.id !== 'string' || entry.id === '') return unknown('malformed');
       if (entry.formatVersion !== 2) return unknown('legacy');
-      const loadedRecord = boundedJson(join(folder, `${hash(id)}.json`));
+      const loadedRecord = boundedJson(join(folder, `${hash(entry.id)}.json`));
       if ('reason' in loadedRecord) return unknown(loadedRecord.reason);
-      return historicalStatus(loadedRecord.value, provider, id, turnId);
+      return historicalStatus(loadedRecord.value, provider, entry.id, turnId);
     },
     save: (record, hostId) => {
       mkdirSync(folder, { recursive: true, mode: 0o700 });
