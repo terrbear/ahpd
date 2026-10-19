@@ -31,7 +31,7 @@ export type {
 } from './listen.js';
 export type { Offered } from './probe.js';
 export type {
-  Agent, Listed, Start, BoundTool, Endpoint, ToolEffects, RestoredSubagent,
+  Agent, Listed, Start, BoundTool, Endpoint, ToolEffects, RestoredSubagent, HistoricalTurnStatus,
   McpServerConfig, ToolsEndpoint, ClientToolCall, ClientToolResult,
 } from './agent.js';
 export type { DirectoryNeed, FileNeed, EnvNeed, CopyNeed, MachineNeed, NeedKind, ResolvedNeed } from './machine.js';
