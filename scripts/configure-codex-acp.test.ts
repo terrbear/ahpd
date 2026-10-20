@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { loadConfig } from '../packages/server/src/config.js';
@@ -89,8 +89,11 @@ it('generates a fresh Codex configuration and a systemd-parsed service with lite
   expect(verified.status, `${diagnostics}\n${unit}`).toBe(0);
   expect(diagnostics).not.toContain('Failed to parse output specifier, ignoring:');
   expect(diagnostics).not.toContain(`${basename(service)}: Failed to load configuration`);
-  expect(diagnostics).toContain(`WorkingDirectory: ${join(home, 'work').replace(/\\/g, '\\\\')}`);
-  expect(diagnostics).toContain(`StandardOutputFileToAppend: ${join(home, 'ahpd.log').replace(/\\/g, '\\\\')}`);
+  const workingDirectory = join(home, 'work');
+  const logFile = join(home, 'ahpd.log');
+  expect(diagnostics).toContain(`WorkingDirectory: ${workingDirectory}`);
+  expect(diagnostics).toContain(`StandardOutputFileToAppend: ${logFile}`);
+  expect(existsSync(workingDirectory)).toBe(true);
   expect(diagnostics).toContain(`Environment: PATH=${dirname(process.execPath)}:${providerDirectory}:`);
   const parsedCommand = diagnostics.split('\n').find((line) => line.includes('Command Line:'));
   expect(parsedCommand).toBeDefined();
@@ -98,6 +101,27 @@ it('generates a fresh Codex configuration and a systemd-parsed service with lite
   expect(parsedCommand).toContain('\\$\\$SOURCE');
   expect(parsedCommand).toContain('\\$\\${literal}');
   expect(parsedCommand).not.toContain('\\$\\$\\$\\$SOURCE');
+});
+
+it('keeps a dollar-containing Node executable path literal in the parsed ExecStart command', () => {
+  const nodeDirectory = join(root, 'bin $cash');
+  mkdirSync(nodeDirectory);
+  const node = join(nodeDirectory, 'node');
+  symlinkSync(process.execPath, node);
+  const result = run({ node, claude: '' });
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  const verified = spawnSync('systemd-analyze', ['verify', service], {
+    encoding: 'utf8',
+    env: { ...process.env, SYSTEMD_LOG_LEVEL: 'debug' },
+  });
+  const diagnostics = `${verified.stdout}\n${verified.stderr}`;
+  expect(verified.error, diagnostics).toBeUndefined();
+  expect(verified.status, diagnostics).toBe(0);
+  const parsedCommand = diagnostics.split('\n').find((line) => line.includes('Command Line:'));
+  expect(parsedCommand).toBeDefined();
+  expect(parsedCommand).toContain(node.replace(/\$/g, () => '\\$'));
+  expect(parsedCommand).not.toContain('bin $$cash');
+  expect(diagnostics).not.toContain('is not executable:');
 });
 
 it('migrates only the managed npm adapter and preserves customized configuration on rerun', () => {

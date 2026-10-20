@@ -89,11 +89,16 @@ function hasPlugin(plugins, path, displayName) {
 
 function systemdPath(value) {
   if (/[\0\r\n]/.test(value)) throw new Error('Service paths must not contain control characters');
-  return value.replace(/\\/g, '\\\\').replace(/%/g, '%%');
+  return value.replace(/%/g, '%%');
 }
 
 function systemdEnvironment(value) {
   if (/[\0\r\n]/.test(value)) throw new Error('Service values must not contain control characters');
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+}
+
+function systemdExecExecutable(value) {
+  if (/[\0\r\n]/.test(value)) throw new Error('Service executable must not contain control characters');
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
 }
 
@@ -109,7 +114,8 @@ function xmlEscape(value) {
 
 function renderSystemd(pathValue) {
   const logFile = systemdPath(join(home, 'ahpd.log'));
-  return `[Unit]\nDescription=ahpd agent host for Anton\n\n[Service]\nWorkingDirectory=${systemdPath(work)}\nEnvironment=${systemdEnvironment(`PATH=${pathValue}`)}\nExecStart=${[node, server, '--config-file', configFile].map(systemdExecArgument).join(' ')}\nRestart=on-failure\nRestartSec=5\nStandardOutput=append:${logFile}\nStandardError=append:${logFile}\n\n[Install]\nWantedBy=default.target\n`;
+  const command = [systemdExecExecutable(node), ...[server, '--config-file', configFile].map(systemdExecArgument)].join(' ');
+  return `[Unit]\nDescription=ahpd agent host for Anton\n\n[Service]\nWorkingDirectory=${systemdPath(work)}\nEnvironment=${systemdEnvironment(`PATH=${pathValue}`)}\nExecStart=${command}\nRestart=on-failure\nRestartSec=5\nStandardOutput=append:${logFile}\nStandardError=append:${logFile}\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 function renderLaunchd(pathValue) {
