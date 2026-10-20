@@ -9,14 +9,14 @@ This installs the [terrbear/ahpd](https://github.com/terrbear/ahpd) fork of the 
 
 Tell the user in one or two sentences what is about to happen, then do these steps in order. Stop and report the error if a step fails; do not improvise workarounds.
 
-1. **Check prerequisites.** macOS or Linux with systemd, Git, pnpm through Corepack, Node.js 22 or newer on PATH, and Claude Code installed and signed in (`claude` works in a terminal). Codex is installed by the script but uses its own sign-in: `~/.a3/ahpd/node_modules/.bin/codex login`, or an existing login in `~/.codex`. The script checks Git, pnpm, Node.js and the OS itself.
+1. **Check prerequisites.** macOS or Linux with systemd, Git, pnpm through Corepack, Node.js 22 or newer on PATH, and Claude Code installed and signed in (`claude` works in a terminal). The Codex ACP adapter is built from the full commit pinned in `~/.a3/ahpd-src/scripts/codex-acp.json`; Codex uses its own sign-in via the active install's `node_modules/.bin/codex login` (normally `~/.a3/ahpd/codex-acp/<pinned-commit>/node_modules/.bin/codex`, or `<pinned-commit>-managed` when preserving an older markerless directory), or an existing login in `~/.codex`. The script checks Git, pnpm, Node.js and the OS itself.
 
-2. **Install and start ahpd.** Run this script exactly as written with bash. It is safe to run again: it keeps the existing port and token, updates the packages, and restarts the service.
-   - Clones or fast-forwards `terrbear/ahpd` in `~/.a3/ahpd-src`, installs its locked pnpm dependencies and builds `packages/server`, `packages/agent-claude`, and `packages/agent-acp`. Installs only `@agentclientprotocol/codex-acp` from npm into `~/.a3/ahpd` (nothing global, no sudo). A dirty or unexpected source checkout stops setup without replacing the running service.
-   - Writes `~/.a3/ahpd/config.json`, using port 9187 or the next free port, bound to 127.0.0.1.
-   - Uses `~/.a3/ahpd/work` as the default working folder.
+2. **Install and start ahpd.** Run this script exactly as written with bash. It is safe to run again: it reuses the existing port and token, reuses only an integrity-checked adapter build for the pinned commit, and rolls back config/service files if the new service does not become healthy.
+   - Clones or fast-forwards `terrbear/ahpd` in `~/.a3/ahpd-src`, installs its locked pnpm dependencies and builds `packages/server`, `packages/agent-claude`, and `packages/agent-acp`. Builds the pinned `terrbear/codex-acp` commit into `~/.a3/ahpd/codex-acp/<commit>` using its frozen npm lockfile; an integrity-matched install is reused, a mismatched marked install is staged before replacement, and unmarked directories are never overwritten. If the canonical commit directory is markerless, it is left untouched while setup builds a verified `<commit>-managed` sibling. No floating npm package or global install is used.
+   - Preserves existing ahpd config and the configured `paths` allowlist. It migrates the known obsolete npm shim, a marker-backed pinned install, or the legacy markerless layout only when its package identity and executable match; a custom Codex adapter remains untouched. The old npm package tree is left unused rather than removing unrelated packages.
+   - Uses port 9187 or the next free port only for a new config, binds to 127.0.0.1, and uses `~/.a3/ahpd/work` as the fresh-install default.
    - ahpd creates the connection token at `~/.a3/ahpd/token` (owner-only) on first start.
-   - Installs a login service from the fork server at `~/.a3/ahpd-src/packages/server/dist/main.js`: `~/.config/systemd/user/anton-ahpd.service` on Linux, `~/Library/LaunchAgents/io.trustgrid.anton.ahpd.plist` on macOS. Logs go to `~/.a3/ahpd/ahpd.log`.
+   - Installs a login service from the fork server at `~/.a3/ahpd-src/packages/server/dist/main.js`: `~/.config/systemd/user/anton-ahpd.service` on Linux, `~/Library/LaunchAgents/io.trustgrid.anton.ahpd.plist` on macOS. Its stable PATH contains the detected Node/provider locations and standard system locations; transient shell paths are excluded. Logs go to `~/.a3/ahpd/ahpd.log`.
    - On success it prints `ADDRESS=...` and `AHPD_HOME=...`. The token file is `<AHPD_HOME>/token`; the script prints the folder rather than the file so Anton's secret redaction does not hide the path.
 
 ```bash
@@ -58,11 +58,19 @@ fi
 mkdir -p "$A/work"
 chmod 700 "$A"
 if [ ! -e "$HOME/.config/ahpd" ] && [ ! -e "$A/.created-config-dir" ]; then touch "$A/.created-config-dir"; fi
-echo "Installing the Codex ACP backend into $A"
-npm uninstall --prefix "$A" --no-fund --no-audit --loglevel=error @ahpd/server @ahpd/agent-claude @ahpd/agent-acp
-npm install --prefix "$A" --no-fund --no-audit --loglevel=error @agentclientprotocol/codex-acp@latest
+CLAUDE="$(command -v claude || true)"
+CODEX_REVISION="$("$NODE" -e 'const fs=require("node:fs");console.log(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).revision)' "$SRC/scripts/codex-acp.json")"
+[[ "$CODEX_REVISION" =~ ^[a-f0-9]{40}$ ]] || { echo "ERROR: invalid pinned Codex ACP revision in $SRC/scripts/codex-acp.json"; exit 1; }
+CODEX_INSTALL="$A/codex-acp/$CODEX_REVISION"
+if [ -d "$CODEX_INSTALL" ] && [ ! -e "$CODEX_INSTALL/.codex-acp-install.json" ]; then
+  echo "Leaving the existing markerless Codex ACP directory untouched; installing a verified managed sibling instead."
+  CODEX_INSTALL="$A/codex-acp/$CODEX_REVISION-managed"
+fi
+echo "Installing the pinned Codex ACP backend at $CODEX_INSTALL"
+"$NODE" "$SRC/scripts/install-codex-acp.mjs" "$CODEX_INSTALL"
+if [ -x "$CODEX_INSTALL/node_modules/.bin/codex" ]; then CODEX="$CODEX_INSTALL/node_modules/.bin/codex"; else CODEX="$(command -v codex || true)"; fi
 if [ -f "$A/config.json" ]; then
-  PORT="$("$NODE" -p "require('$A/config.json').port")"
+  PORT="$("$NODE" -e 'const fs=require("node:fs");console.log(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).port ?? 9187)' "$A/config.json")"
 else
   PORT="$("$NODE" -e '
 const net = require("net");
@@ -71,73 +79,67 @@ const free = (p) => new Promise((r) => { const s = net.createServer(); s.once("e
 (async () => { for (let p = 9187; p < 9287; p++) { if (!(await busy(p)) && (await free(p))) { console.log(p); return; } } process.exit(1); })();
 ')"
 fi
-cat > "$A/config.json" <<EOF
-{
-  "port": $PORT,
-  "paths": ["$A/work"],
-  "connectionTokenFile": "$A/token",
-  "plugins": [
-    "$SRC/packages/agent-claude",
-    { "name": "$SRC/packages/agent-acp", "options": { "provider": "codex", "displayName": "Codex", "command": "$A/node_modules/.bin/codex-acp" } }
-  ],
-  "updateCheck": false
-}
-EOF
-chmod 600 "$A/config.json"
 AHPD="$SRC/packages/server/dist/main.js"
 if [ "$OS" = linux ]; then
-  UNIT="$HOME/.config/systemd/user/anton-ahpd.service"
-  mkdir -p "$(dirname "$UNIT")"
-  cat > "$UNIT" <<EOF
-[Unit]
-Description=ahpd agent host for Anton
-
-[Service]
-WorkingDirectory=$A/work
-Environment="PATH=$PATH"
-ExecStart=$NODE $AHPD --config-file $A/config.json
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:$A/ahpd.log
-StandardError=append:$A/ahpd.log
-
-[Install]
-WantedBy=default.target
-EOF
+  SERVICE_FILE="$HOME/.config/systemd/user/anton-ahpd.service"
+else
+  SERVICE_FILE="$HOME/Library/LaunchAgents/$LABEL.plist"
+fi
+BACKUP_DIR="$(mktemp -d "$A/.ahpd-setup-backup.XXXXXX")"
+chmod 700 "$BACKUP_DIR"
+CONFIG_EXISTED=0
+SERVICE_EXISTED=0
+CONFIG_WRITTEN=0
+restore_setup() {
+  STATUS=$?
+  RESTORE_FAILED=0
+  trap - EXIT
+  if [ "$STATUS" -ne 0 ] && [ "$CONFIG_WRITTEN" -eq 1 ]; then
+    echo "ERROR: setup failed after config/service update; restoring the previous files" >&2
+    if [ "$CONFIG_EXISTED" -eq 1 ]; then
+      if ! mv -f "$BACKUP_DIR/config.json" "$A/config.json"; then echo "ERROR: could not restore config; backup retained at $BACKUP_DIR/config.json" >&2; RESTORE_FAILED=1; fi
+    elif ! rm -f "$A/config.json"; then echo "ERROR: could not remove failed config $A/config.json" >&2; RESTORE_FAILED=1; fi
+    if [ "$SERVICE_EXISTED" -eq 1 ]; then
+      if ! mv -f "$BACKUP_DIR/service" "$SERVICE_FILE"; then echo "ERROR: could not restore service file; backup retained at $BACKUP_DIR/service" >&2; RESTORE_FAILED=1; fi
+    elif ! rm -f "$SERVICE_FILE"; then echo "ERROR: could not remove failed service file $SERVICE_FILE" >&2; RESTORE_FAILED=1; fi
+    if [ "$OS" = linux ]; then
+      systemctl --user daemon-reload || true
+      systemctl --user restart anton-ahpd.service || true
+    else
+      launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+      if [ "$SERVICE_EXISTED" -eq 1 ]; then launchctl bootstrap "gui/$(id -u)" "$SERVICE_FILE" || true; fi
+    fi
+  fi
+  if [ "$RESTORE_FAILED" -eq 0 ]; then rm -rf "$BACKUP_DIR"; else echo "ERROR: recovery files retained in $BACKUP_DIR" >&2; fi
+  return "$STATUS"
+}
+trap restore_setup EXIT
+if [ -e "$A/config.json" ]; then
+  [ -f "$A/config.json" ] || { echo "ERROR: $A/config.json is not a regular file"; exit 1; }
+  cp -p "$A/config.json" "$BACKUP_DIR/config.json"
+  CONFIG_EXISTED=1
+fi
+if [ -e "$SERVICE_FILE" ]; then
+  [ -f "$SERVICE_FILE" ] || { echo "ERROR: $SERVICE_FILE is not a regular file"; exit 1; }
+  cp -p "$SERVICE_FILE" "$BACKUP_DIR/service"
+  SERVICE_EXISTED=1
+fi
+"$NODE" "$SRC/scripts/configure-codex-acp.mjs" "$A" "$SRC" "$CODEX_INSTALL/dist/index.js" "$NODE" "$OS" "$SERVICE_FILE" "$PORT" "$CLAUDE" "$CODEX"
+CONFIG_WRITTEN=1
+if [ "$OS" = linux ]; then
+  if command -v systemd-analyze >/dev/null 2>&1; then systemd-analyze verify "$SERVICE_FILE"; fi
   systemctl --user daemon-reload
   systemctl --user enable anton-ahpd.service >/dev/null
   systemctl --user restart anton-ahpd.service
 else
-  PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-  mkdir -p "$(dirname "$PLIST")"
-  cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$NODE</string>
-    <string>$AHPD</string>
-    <string>--config-file</string>
-    <string>$A/config.json</string>
-  </array>
-  <key>WorkingDirectory</key><string>$A/work</string>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>$PATH</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>StandardOutPath</key><string>$A/ahpd.log</string>
-  <key>StandardErrorPath</key><string>$A/ahpd.log</string>
-</dict>
-</plist>
-EOF
+  plutil -lint "$SERVICE_FILE" >/dev/null
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  launchctl bootstrap "gui/$(id -u)" "$SERVICE_FILE"
 fi
 for _ in $(seq 1 60); do
-  if [ -s "$A/token" ] && "$NODE" -e 'const c=require("net").connect(+process.argv[1],"127.0.0.1");c.once("connect",()=>process.exit(0));c.once("error",()=>process.exit(1))' "$PORT"; then
+  SERVICE_UP=0
+  if [ "$OS" = linux ]; then systemctl --user is-active --quiet anton-ahpd.service && SERVICE_UP=1; else launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 && SERVICE_UP=1; fi
+  if [ "$SERVICE_UP" -eq 1 ] && [ -s "$A/token" ] && "$NODE" -e 'const c=require("net").connect(+process.argv[1],"127.0.0.1");c.once("connect",()=>process.exit(0));c.once("error",()=>process.exit(1))' "$PORT"; then
     echo "ADDRESS=ws://127.0.0.1:$PORT"
     echo "AHPD_HOME=$A"
     exit 0
