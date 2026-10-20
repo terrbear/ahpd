@@ -87,14 +87,19 @@ function hasPlugin(plugins, path, displayName) {
   });
 }
 
-function systemdQuote(value) {
-  if (/[\0\r\n]/.test(value)) throw new Error('Service paths must not contain control characters');
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '$$$$').replace(/%/g, '%%')}"`;
-}
-
 function systemdPath(value) {
   if (/[\0\r\n]/.test(value)) throw new Error('Service paths must not contain control characters');
-  return value.replace(/\\/g, '\\\\').replace(/ /g, '\\s').replace(/%/g, '%%');
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '%%');
+}
+
+function systemdEnvironment(value) {
+  if (/[\0\r\n]/.test(value)) throw new Error('Service values must not contain control characters');
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+}
+
+function systemdExecArgument(value) {
+  if (/[\0\r\n]/.test(value)) throw new Error('Service arguments must not contain control characters');
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, () => '$$').replace(/%/g, '%%')}"`;
 }
 
 function xmlEscape(value) {
@@ -103,8 +108,8 @@ function xmlEscape(value) {
 }
 
 function renderSystemd(pathValue) {
-  const quote = systemdQuote;
-  return `[Unit]\nDescription=ahpd agent host for Anton\n\n[Service]\nWorkingDirectory=${systemdPath(work)}\nEnvironment=${quote(`PATH=${pathValue}`)}\nExecStart=${[node, server, '--config-file', configFile].map(quote).join(' ')}\nRestart=on-failure\nRestartSec=5\nStandardOutput=${quote(`append:${join(home, 'ahpd.log')}`)}\nStandardError=${quote(`append:${join(home, 'ahpd.log')}`)}\n\n[Install]\nWantedBy=default.target\n`;
+  const logFile = systemdPath(join(home, 'ahpd.log'));
+  return `[Unit]\nDescription=ahpd agent host for Anton\n\n[Service]\nWorkingDirectory=${systemdPath(work)}\nEnvironment=${systemdEnvironment(`PATH=${pathValue}`)}\nExecStart=${[node, server, '--config-file', configFile].map(systemdExecArgument).join(' ')}\nRestart=on-failure\nRestartSec=5\nStandardOutput=append:${logFile}\nStandardError=append:${logFile}\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 function renderLaunchd(pathValue) {

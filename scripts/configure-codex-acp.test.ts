@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { loadConfig } from '../packages/server/src/config.js';
 
@@ -51,8 +51,11 @@ function readConfig() {
   return JSON.parse(readFileSync(config, 'utf8'));
 }
 
-it('generates a fresh Codex configuration and an escaped Linux service file', () => {
-  const result = run({ path: '/tmp/session-shell-only' });
+it('generates a fresh Codex configuration and a systemd-parsed service with literal paths and arguments', () => {
+  const providerDirectory = join(home, 'provider "$PROVIDER" 50% \\ path');
+  mkdirSync(providerDirectory);
+  const providerCommand = join(providerDirectory, 'claude');
+  const result = run({ path: '/tmp/session-shell-only', claude: providerCommand });
   expect(result.status).toBe(0);
   expect(readConfig()).toEqual({
     port: 9187,
@@ -67,15 +70,34 @@ it('generates a fresh Codex configuration and an escaped Linux service file', ()
   });
   expect(loadConfig(config).values.paths).toEqual([join(home, 'work')]);
   const unit = readFileSync(service, 'utf8');
-  expect(unit).toContain(`WorkingDirectory=${join(home, 'work').replace(/\\/g, '\\\\').replace(/ /g, '\\s').replace(/%/g, '%%')}`);
-  expect(unit).toContain(`ExecStart="${process.execPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '$$$$').replace(/%/g, '%%')}"`);
-  expect(unit).toContain(`"${join(source, 'packages/server/dist/main.js').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '$$$$').replace(/%/g, '%%')}"`);
-  expect(unit).toContain(`PATH=${dirname(process.execPath)}`);
+  expect(unit).not.toContain('\\s');
+  expect(unit).toContain('StandardOutput=append:');
+  expect(unit).toContain('StandardError=append:');
+  expect(unit).toContain('$$SOURCE');
+  expect(unit).toContain('$${literal}');
+  expect(unit).not.toContain('$$$$');
   expect(unit).not.toContain('/tmp/session-shell-only');
   expect(statSync(config).mode & 0o777).toBe(0o600);
-  const verified = spawnSync('systemd-analyze', ['verify', service], { encoding: 'utf8' });
-  expect(verified.error, verified.stderr).toBeUndefined();
-  expect(verified.status, `${verified.stderr}\n${unit}`).toBe(0);
+  const verified = spawnSync('systemd-analyze', ['verify', service], {
+    encoding: 'utf8',
+    env: { ...process.env, SYSTEMD_LOG_LEVEL: 'debug' },
+  });
+  const diagnostics = `${verified.stdout}\n${verified.stderr}`.split('\n').filter((line) =>
+    line.includes(basename(service)) || /WorkingDirectory:|Environment:|StandardOutput:|StandardError:|StandardOutputFileToAppend|Command Line:|PATH=/.test(line),
+  ).join('\n');
+  expect(verified.error, diagnostics).toBeUndefined();
+  expect(verified.status, `${diagnostics}\n${unit}`).toBe(0);
+  expect(diagnostics).not.toContain('Failed to parse output specifier, ignoring:');
+  expect(diagnostics).not.toContain(`${basename(service)}: Failed to load configuration`);
+  expect(diagnostics).toContain(`WorkingDirectory: ${join(home, 'work').replace(/\\/g, '\\\\')}`);
+  expect(diagnostics).toContain(`StandardOutputFileToAppend: ${join(home, 'ahpd.log').replace(/\\/g, '\\\\')}`);
+  expect(diagnostics).toContain(`Environment: PATH=${dirname(process.execPath)}:${providerDirectory}:`);
+  const parsedCommand = diagnostics.split('\n').find((line) => line.includes('Command Line:'));
+  expect(parsedCommand).toBeDefined();
+  expect(parsedCommand).toContain(`Command Line: ${process.execPath.replace(/\\/g, '\\\\')}`);
+  expect(parsedCommand).toContain('\\$\\$SOURCE');
+  expect(parsedCommand).toContain('\\$\\${literal}');
+  expect(parsedCommand).not.toContain('\\$\\$\\$\\$SOURCE');
 });
 
 it('migrates only the managed npm adapter and preserves customized configuration on rerun', () => {

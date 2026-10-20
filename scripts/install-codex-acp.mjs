@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 
 const pin = JSON.parse(await readFile(new URL('./codex-acp.json', import.meta.url), 'utf8'));
@@ -28,6 +28,31 @@ async function fileDigest(path) {
   return digest(await readFile(path));
 }
 
+async function codexRuntimeMatches(path, lock) {
+  const packagePath = join(path, 'node_modules/@openai/codex/package.json');
+  const executable = join(path, 'node_modules/@openai/codex/bin/codex.js');
+  const command = join(path, 'node_modules/.bin/codex');
+  const expectedVersion = lock.packages?.['node_modules/@openai/codex']?.version;
+  if (typeof expectedVersion !== 'string') return false;
+  try {
+    const codexPackage = JSON.parse(await readFile(packagePath, 'utf8'));
+    const entrypoint = await stat(executable);
+    const commandInfo = await lstat(command);
+    if (codexPackage.name !== '@openai/codex' || codexPackage.version !== expectedVersion || codexPackage.bin?.codex !== 'bin/codex.js') return false;
+    if (!entrypoint.isFile() || (entrypoint.mode & 0o111) === 0) return false;
+    if (commandInfo.isSymbolicLink()) {
+      if (await realpath(command) !== await realpath(executable)) return false;
+    } else if (!commandInfo.isFile() || (commandInfo.mode & 0o111) === 0) {
+      return false;
+    }
+    const result = spawnSync(command, ['--version'], { cwd: path, encoding: 'utf8', timeout: 15_000 });
+    return !result.error && result.status === 0 && `${result.stdout ?? ''}${result.stderr ?? ''}`.includes(expectedVersion);
+  } catch (error) {
+    if (error.code === 'ENOENT' || error instanceof SyntaxError) return false;
+    throw error;
+  }
+}
+
 async function installState(path) {
   let marker;
   try {
@@ -50,7 +75,11 @@ async function installState(path) {
   }
   if ((entrypointInfo.mode & 0o111) === 0) return { managed: true, matches: false };
   const packageJson = JSON.parse(await readFile(packageFile, 'utf8'));
-  if (packageJson.name !== '@agentclientprotocol/codex-acp' || packageJson.bin?.['codex-acp'] !== 'dist/index.js') {
+  if (packageJson.name !== '@agentclientprotocol/codex-acp' || packageJson.bin?.['codex-acp'] !== 'dist/index.js' || typeof packageJson.dependencies?.['@openai/codex'] !== 'string') {
+    return { managed: true, matches: false };
+  }
+  const lock = JSON.parse(await readFile(lockFile, 'utf8'));
+  if (lock.packages?.['']?.dependencies?.['@openai/codex'] !== packageJson.dependencies['@openai/codex']) {
     return { managed: true, matches: false };
   }
   const checks = {
@@ -59,7 +88,8 @@ async function installState(path) {
     installedDependencies: await fileDigest(installedLock),
     entrypoint: await fileDigest(entrypoint),
   };
-  return { managed: true, matches: Object.entries(checks).every(([key, value]) => marker[key] === value) };
+  const integrityMatches = Object.entries(checks).every(([key, value]) => marker[key] === value);
+  return { managed: true, matches: integrityMatches && await codexRuntimeMatches(path, lock) };
 }
 
 async function replaceInstall(staging, path, expectedExisting) {
@@ -139,14 +169,18 @@ try {
   const entrypoint = join(staging, 'dist/index.js');
   const installedLock = join(staging, 'node_modules/.package-lock.json');
   const packageJson = JSON.parse(await readFile(packageFile, 'utf8'));
-  if (packageJson.name !== '@agentclientprotocol/codex-acp' || packageJson.bin?.['codex-acp'] !== 'dist/index.js') {
-    throw new Error('Pinned Codex ACP package does not expose the expected codex-acp entrypoint');
+  if (packageJson.name !== '@agentclientprotocol/codex-acp' || packageJson.bin?.['codex-acp'] !== 'dist/index.js' || typeof packageJson.dependencies?.['@openai/codex'] !== 'string') {
+    throw new Error('Pinned Codex ACP package does not expose the expected adapter and bundled Codex CLI dependencies');
   }
   if (!await regularFile(lockFile) || !await regularFile(installedLock)) {
     throw new Error('Pinned Codex ACP install did not produce its package or dependency lock');
   }
   if (!await regularFile(entrypoint)) throw new Error(`Pinned Codex ACP build did not produce ${entrypoint}`);
   await chmod(entrypoint, 0o755);
+  const lock = JSON.parse(await readFile(lockFile, 'utf8'));
+  if (lock.packages?.['']?.dependencies?.['@openai/codex'] !== packageJson.dependencies['@openai/codex'] || !await codexRuntimeMatches(staging, lock)) {
+    throw new Error('Pinned Codex ACP build did not produce a working bundled Codex CLI and native runtime');
+  }
   const marker = {
     repository: pin.repository,
     revision: pin.revision,

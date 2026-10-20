@@ -15,9 +15,9 @@ Tell the user in one or two sentences what is about to happen, then do these ste
    - Clones or fast-forwards `terrbear/ahpd` in `~/.a3/ahpd-src`, installs its locked pnpm dependencies and builds `packages/server`, `packages/agent-claude`, and `packages/agent-acp`. Builds the pinned `terrbear/codex-acp` commit into `~/.a3/ahpd/codex-acp/<commit>` using its frozen npm lockfile; an integrity-matched install is reused, a mismatched marked install is staged before replacement, and unmarked directories are never overwritten. If the canonical commit directory is markerless, it is left untouched while setup builds a verified `<commit>-managed` sibling. No floating npm package or global install is used.
    - Preserves existing ahpd config and the configured `paths` allowlist. It migrates the known obsolete npm shim, a marker-backed pinned install, or the legacy markerless layout only when its package identity and executable match; a custom Codex adapter remains untouched. The old npm package tree is left unused rather than removing unrelated packages.
    - Uses port 9187 or the next free port only for a new config, binds to 127.0.0.1, and uses `~/.a3/ahpd/work` as the fresh-install default.
-   - ahpd creates the connection token at `~/.a3/ahpd/token` (owner-only) on first start.
+   - ahpd creates the connection token at the configured `connectionTokenFile` (owner-only); for a fresh config this is `~/.a3/ahpd/token`. Existing relative token paths are resolved from `~/.a3/ahpd/config.json`.
    - Installs a login service from the fork server at `~/.a3/ahpd-src/packages/server/dist/main.js`: `~/.config/systemd/user/anton-ahpd.service` on Linux, `~/Library/LaunchAgents/io.trustgrid.anton.ahpd.plist` on macOS. Its stable PATH contains the detected Node/provider locations and standard system locations; transient shell paths are excluded. Logs go to `~/.a3/ahpd/ahpd.log`.
-   - On success it prints `ADDRESS=...` and `AHPD_HOME=...`. The token file is `<AHPD_HOME>/token`; the script prints the folder rather than the file so Anton's secret redaction does not hide the path.
+   - On success it prints `ADDRESS=...`, `AHPD_HOME=...`, and the resolved `TOKEN_FILE=...`. It prints the token-file path, never the token value.
 
 ```bash
 set -euo pipefail
@@ -136,12 +136,36 @@ else
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$SERVICE_FILE"
 fi
+CONFIG_PATH="$A/config.json"
+PORT="$("$NODE" -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).port' "$CONFIG_PATH")"
+CONNECT_HOST="$("$NODE" -e '
+const fs = require("node:fs");
+const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+let host = config.host ?? "127.0.0.1";
+if (host === "" || host === "0.0.0.0") host = "127.0.0.1";
+else if (host === "::") host = "::1";
+if (/[\0\r\n]/.test(host)) process.exit(1);
+process.stdout.write(host);
+' "$CONFIG_PATH")"
+URL_HOST="$("$NODE" -e 'const host=process.argv[1];process.stdout.write(host.includes(":")?`[${host}]`:host)' "$CONNECT_HOST")"
+TOKEN_FILE="$("$NODE" -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const file = process.argv[1];
+const config = JSON.parse(fs.readFileSync(file, "utf8"));
+const configured = config.connectionTokenFile ?? "token";
+const tokenFile = path.isAbsolute(configured) ? configured : path.resolve(path.dirname(file), configured);
+if (/[\0\r\n]/.test(tokenFile)) process.exit(1);
+process.stdout.write(tokenFile);
+' "$CONFIG_PATH")"
+ADDRESS="ws://$URL_HOST:$PORT"
 for _ in $(seq 1 60); do
   SERVICE_UP=0
   if [ "$OS" = linux ]; then systemctl --user is-active --quiet anton-ahpd.service && SERVICE_UP=1; else launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 && SERVICE_UP=1; fi
-  if [ "$SERVICE_UP" -eq 1 ] && [ -s "$A/token" ] && "$NODE" -e 'const c=require("net").connect(+process.argv[1],"127.0.0.1");c.once("connect",()=>process.exit(0));c.once("error",()=>process.exit(1))' "$PORT"; then
-    echo "ADDRESS=ws://127.0.0.1:$PORT"
+  if [ "$SERVICE_UP" -eq 1 ] && [ -s "$TOKEN_FILE" ] && "$NODE" -e 'const c=require("net").connect({port:+process.argv[1],host:process.argv[2]});c.once("connect",()=>{c.destroy();process.exit(0)});c.once("error",()=>process.exit(1))' "$PORT" "$CONNECT_HOST"; then
+    echo "ADDRESS=$ADDRESS"
     echo "AHPD_HOME=$A"
+    echo "TOKEN_FILE=$TOKEN_FILE"
     exit 0
   fi
   sleep 1
@@ -151,10 +175,10 @@ tail -n 20 "$A/ahpd.log" 2>/dev/null || true
 exit 1
 ```
 
-3. **Register it in Anton.** Never read, print, or copy the token itself; pass the token file path and Anton reads it.
+3. **Register it in Anton.** Never read, print, or copy the token itself; pass the `TOKEN_FILE` path printed by setup and Anton reads it.
    - Call `anton.builtin.settingsRead` with section `ahp`. If a `server` entry for `localhost` already exists with an address other than the `ADDRESS` printed above, ask the user before replacing it: replacing it detaches Anton sessions that used the old server.
    - If `advanced-toggle.advanced` is not already true, call `anton.builtin.settingsWrite` with `{"section":"advanced-toggle","field":"advanced","value":true}`. AHP sessions only appear with Advanced settings on.
-   - Call `anton.builtin.settingsWrite` with `{"section":"ahp","field":"server","key":"localhost","value":{"address":"<ADDRESS>","tokenFile":"<AHPD_HOME>/token"}}`.
+   - Call `anton.builtin.settingsWrite` with `{"section":"ahp","field":"server","key":"localhost","value":{"address":"<ADDRESS>","tokenFile":"<TOKEN_FILE>"}}`, JSON-escaping the exact printed path as needed.
    - Call `anton.builtin.settingsWrite` with `{"section":"ahp","field":"enabled","value":true}`.
 
 4. **Tell the user how to use it.** In New Chat, pick the localhost host, a working folder (or `~/.a3/ahpd/work`), and **Claude Code** or **Codex** in the model picker (Codex needs its own sign-in first). ahpd starts automatically at login. If sessions fail, check `~/.a3/ahpd/ahpd.log` and that `claude` (or Codex) is signed in. To remove everything, uninstall the bundle; its teardown skill stops the service and cleans up.

@@ -42,9 +42,21 @@ const path = require('node:path');
 fs.appendFileSync(process.env.TEST_EVENTS, 'npm ' + process.argv.slice(2).join(' ') + '\\n');
 if (process.env.TEST_BUILD_ERROR === '1' && process.argv[2] === 'run') { console.error('synthetic npm build failure'); process.exit(1); }
 if (process.argv[2] === 'ci') {
-  fs.writeFileSync('package.json', JSON.stringify({ name: '@agentclientprotocol/codex-acp', bin: { 'codex-acp': 'dist/index.js' } }));
-  fs.writeFileSync('package-lock.json', JSON.stringify({ name: '@agentclientprotocol/codex-acp', lockfileVersion: 3, packages: { '': { name: '@agentclientprotocol/codex-acp' } } }));
-  fs.mkdirSync('node_modules', { recursive: true });
+  const dependency = '@openai/codex';
+  const version = '0.160.1';
+  fs.writeFileSync('package.json', JSON.stringify({ name: '@agentclientprotocol/codex-acp', dependencies: { [dependency]: '^' + version }, bin: { 'codex-acp': 'dist/index.js' } }));
+  fs.writeFileSync('package-lock.json', JSON.stringify({
+    name: '@agentclientprotocol/codex-acp',
+    lockfileVersion: 3,
+    packages: { '': { name: '@agentclientprotocol/codex-acp', dependencies: { [dependency]: '^' + version } }, 'node_modules/@openai/codex': { version } },
+  }));
+  fs.mkdirSync('node_modules/@openai/codex/bin', { recursive: true });
+  fs.mkdirSync('node_modules/.bin', { recursive: true });
+  fs.writeFileSync('node_modules/@openai/codex/package.json', JSON.stringify({ name: '@openai/codex', version, bin: { codex: 'bin/codex.js' } }));
+  fs.writeFileSync('node_modules/@openai/codex/native-runtime', 'ready');
+  fs.writeFileSync('node_modules/@openai/codex/bin/codex.js', '#!/usr/bin/env node\\nconst fs = require("node:fs");\\nconst path = require("node:path");\\nif (!fs.existsSync(path.join(__dirname, "..", "native-runtime"))) { console.error("missing native runtime"); process.exit(1); }\\nconsole.log("codex-cli 0.160.1");\\n');
+  fs.chmodSync('node_modules/@openai/codex/bin/codex.js', 0o755);
+  fs.symlinkSync('../@openai/codex/bin/codex.js', 'node_modules/.bin/codex');
   fs.writeFileSync('node_modules/.package-lock.json', JSON.stringify({ lockfileVersion: 3, packages: { '': {} } }));
 }
 if (process.argv[2] === 'run') {
@@ -105,6 +117,24 @@ it('installs the pinned build, reuses a verified match, and replaces it on pin t
   expect(installedRevision()).toBe(nextRevision);
   expect(readFileSync(join(install, 'dist/index.js'), 'utf8')).toContain(`adapter ${nextRevision}`);
   expect(readdirSync(join(root, 'AHPD home'))).toEqual(['codex adapter']);
+});
+
+it('rebuilds a marked install when its bundled Codex CLI entrypoint or native runtime is missing', () => {
+  expect(run().status).toBe(0);
+  const nativeRuntime = join(install, 'node_modules/@openai/codex/native-runtime');
+  rmSync(nativeRuntime);
+
+  const missingRuntime = run();
+  expect(missingRuntime.status).toBe(0);
+  expect(missingRuntime.stdout).toContain(`Installed terrbear/codex-acp@${revision}`);
+  expect(readFileSync(nativeRuntime, 'utf8')).toBe('ready');
+
+  const cliEntrypoint = join(install, 'node_modules/@openai/codex/bin/codex.js');
+  rmSync(cliEntrypoint);
+  const missingCli = run();
+  expect(missingCli.status).toBe(0);
+  expect(missingCli.stdout).toContain(`Installed terrbear/codex-acp@${revision}`);
+  expect(readFileSync(cliEntrypoint, 'utf8')).toContain('codex-cli 0.160.1');
 });
 
 it('refuses a destination that appears while the pinned build is being staged', () => {
