@@ -24,7 +24,8 @@ async function talking() {
     return base.create(start);
   } }], tools: hostTools() });
   cleanups.push(async () => { await host.close(); rmSync(path, { recursive: true, force: true }); });
-  const peer: Peer = { send: () => {}, notify: () => {}, request: async () => ({}), answered: () => {}, close: () => {} };
+  const notes: { method: string; params: Bag }[] = [];
+  const peer: Peer = { send: () => {}, notify: (method, params) => { notes.push({ method, params: params as Bag }); }, request: async () => ({}), answered: () => {}, close: () => {} };
   const client = host.accept(peer);
   await client.handle({ method: 'initialize', params: { clientId: 'coordinator', protocolVersions: ['0.9.0'] } });
   for (const id of ['caller', 'target']) {
@@ -46,7 +47,7 @@ async function talking() {
     channel: chat, action: { type: 'chat/turnStarted', turnId: 'busy-turn', message: { text } },
   } });
   const requests = () => readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Bag);
-  return { host, client, state, chat, call, begin, requests, starts };
+  return { host, client, state, chat, call, begin, requests, starts, notes };
 }
 
 it('returns the exact busy Codex queue identity and exposes it without settling the permission', async () => {
@@ -124,4 +125,43 @@ it('rejects unsupported steering and invalid control identities without touching
   await expect(send?.run?.({ session: 'codex:/target', message: 'correction', supersedes: 'unknown' })).rejects.toThrow(/not your confirmed pending/);
   expect(t.requests().filter((one) => one.method === 'session/cancel')).toHaveLength(0);
   expect(t.requests().filter((one) => one.method === 'session/prompt')).toHaveLength(1);
+});
+
+it.each(['wait', 'ask'])('rejects a second direct turn while %s is active without losing or running it', async (prompt) => {
+  const t = await talking();
+  await t.begin(prompt);
+  await expect.poll(() => t.requests().filter((one) => one.method === 'session/prompt').length).toBe(1);
+  await expect.poll(async () => (((await t.state(t.chat)).activeTurn as Bag)?.responseParts as unknown[])?.length).toBeGreaterThan(0);
+  if (prompt === 'ask') {
+    await expect.poll(async () => ((await t.state('codex:/target')).inputNeeded as unknown[])?.length).toBe(1);
+  }
+  const before = structuredClone(await t.state(t.chat));
+  const pending = structuredClone((await t.state('codex:/target')).inputNeeded);
+  await t.client.handle({ method: 'dispatchAction', params: {
+    channel: t.chat, clientSeq: 42,
+    action: { type: 'chat/turnStarted', turnId: 'second-turn', message: { text: 'second instruction' } },
+  } });
+  const receipts = t.notes.filter((note) => note.method === 'action' && (note.params.origin as Bag)?.clientSeq === 42);
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]?.params).toMatchObject({
+    channel: t.chat, origin: { clientId: 'coordinator', clientSeq: 42 },
+    action: { type: 'chat/turnStarted', turnId: 'second-turn' },
+    rejectionReason: expect.stringMatching(/active turn/i),
+  });
+  expect((await t.state(t.chat)).activeTurn).toEqual(before.activeTurn);
+  expect((await t.state(t.chat)).queuedMessages).toEqual([]);
+  expect((await t.state('codex:/target')).inputNeeded).toEqual(pending);
+  expect(t.requests().filter((one) => one.method === 'session/prompt')).toHaveLength(1);
+  await t.client.handle({ method: 'dispatchAction', params: {
+    channel: t.chat, action: { type: 'chat/turnCancelled', turnId: 'busy-turn' },
+  } });
+  await expect.poll(async () => (await t.state(t.chat)).activeTurn).toBeUndefined();
+  await t.client.handle({ method: 'dispatchAction', params: {
+    channel: t.chat, clientSeq: 43,
+    action: { type: 'chat/turnStarted', turnId: 'second-turn', message: { text: 'second instruction' } },
+  } });
+  await expect.poll(async () => (await t.state(t.chat)).turns).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'second-turn', state: 'complete' }),
+  ]));
+  expect(t.requests().filter((one) => one.method === 'session/prompt')).toHaveLength(2);
 });
