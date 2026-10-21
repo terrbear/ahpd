@@ -5292,8 +5292,12 @@ export function createHost(options: HostOptions): Host {
      * across there rather than looked for here under an id it will never
      * carry again.
      */
-    if (sender !== undefined) senders.set(queuedAs ?? turnId, sender);
     const command = text.startsWith(BANG) ? text.slice(BANG.length).trim() : '';
+    if ((command === '' || !options.terminals) && queuedAs === undefined
+      && (session.chatState() as { activeTurn?: unknown }).activeTurn !== undefined) {
+      return 'This chat has an active turn; queue the message or stop the active turn first';
+    }
+    if (sender !== undefined) senders.set(queuedAs ?? turnId, sender);
     if (command === '' || !options.terminals) {
       if (queuedAs === undefined) session.begin(turnId, text, model, from);
       else session.queue(queuedAs, text, model, from);
