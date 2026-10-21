@@ -14,7 +14,7 @@ const node = resolve(nodeArg);
 const serviceFile = resolve(serviceFileArg);
 const configFile = join(home, 'config.json');
 const work = join(home, 'work');
-const server = join(source, 'packages/server/dist/main.js');
+const server = join(source, 'scripts/managed-host.mjs');
 const token = join(home, 'token');
 const port = Number(portArg);
 const markerName = '.codex-acp-install.json';
@@ -114,13 +114,13 @@ function xmlEscape(value) {
 
 function renderSystemd(pathValue) {
   const logFile = systemdPath(join(home, 'ahpd.log'));
-  const command = [systemdExecExecutable(node), ...[server, '--config-file', configFile].map(systemdExecArgument)].join(' ');
+  const command = [systemdExecExecutable(node), ...[server, source, configFile].map(systemdExecArgument)].join(' ');
   return `[Unit]\nDescription=ahpd agent host for Anton\n\n[Service]\nWorkingDirectory=${systemdPath(work)}\nEnvironment=${systemdEnvironment(`PATH=${pathValue}`)}\nExecStart=${command}\nRestart=on-failure\nRestartSec=5\nStandardOutput=append:${logFile}\nStandardError=append:${logFile}\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 function renderLaunchd(pathValue) {
   const esc = xmlEscape;
-  const args = [node, server, '--config-file', configFile];
+  const args = [node, server, source, configFile];
   const argList = args.map((value) => `    <string>${esc(value)}</string>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n  <key>Label</key><string>io.trustgrid.anton.ahpd</string>\n  <key>ProgramArguments</key>\n  <array>\n${argList}\n  </array>\n  <key>WorkingDirectory</key><string>${esc(work)}</string>\n  <key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>${esc(pathValue)}</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>StandardOutPath</key><string>${esc(join(home, 'ahpd.log'))}</string>\n  <key>StandardErrorPath</key><string>${esc(join(home, 'ahpd.log'))}</string>\n</dict>\n</plist>\n`;
 }

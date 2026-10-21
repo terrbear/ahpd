@@ -1011,7 +1011,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * arrives later and from somewhere else, and anything that ends the turn has
    * to settle them itself or the CLI waits for ever on a promise nobody owns.
    */
-  const byClient = new Map<string, { owner: string; settle: (answer: { text: string; ok: boolean }) => void }>();
+  const byClient = new Map<string, { owner: string; request: Bag; settle: (answer: { text: string; ok: boolean }) => void }>();
 
   /** Every outstanding client call, answered the same way and forgotten. */
   const releaseCalls = (why: string, whose?: string): void => {
@@ -1031,7 +1031,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const toolName = fullName.startsWith(prefix) ? fullName.slice(prefix.length) : fullName;
     const displayName = tool.definition.title ?? toolName;
     const requestId = `${id}:client`;
-    inputNeededSet({
+    const request = {
       id: requestId,
       chat: scope.chat?.uri ?? chatUri,
       kind: 'toolClientExecution',
@@ -1047,10 +1047,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
         confirmed: 'not-needed',
         status: 'running',
       },
-    });
-    doing(`Waiting on ${owner}: ${tool.definition.title ?? tool.definition.name}`);
-    try { return await new Promise((settle) => { byClient.set(id, { owner, settle }); }); }
-    finally { inputNeededRemoved(requestId); }
+    };
+    try {
+      return await new Promise<{ text: string; ok: boolean }>((settle) => {
+        byClient.set(id, { owner, request, settle });
+        inputNeededSet(request);
+        doing(`Waiting on ${owner}: ${tool.definition.title ?? tool.definition.name}`);
+      });
+    } finally { inputNeededRemoved(requestId); }
   };
   /**
    * Tool calls running against an MCP server, by call id.
@@ -3436,7 +3440,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
         : {}),
       // Set only while something is wanted. A key that is always present and
       // sometimes empty is a client that has to guess which it is.
-      ...(pending.size > 0 ? { inputNeeded: [...pending.values()].map((one) => one.entry) } : {}),
+      ...(pending.size + byClient.size > 0 ? { inputNeeded: [
+        ...[...pending.values()].map((one) => one.entry),
+        ...[...byClient.values()].map((one) => one.request),
+      ] } : {}),
       ...(failed ? { error: failed } : {}),
     }),
 

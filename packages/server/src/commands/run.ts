@@ -46,6 +46,7 @@ import { loadPlugins } from '../plugins.js';
 import { pty } from '../pty.js';
 import { MAX_AGE_MS, checkingUpdates, readUpdate, refreshUpdate, registry as npmRegistry, stale, updateLine } from '../update.js';
 import { manifest, version } from '../version.js';
+import { managedLifecycle, managedPlugins } from '../managed.js';
 import { conflict, optionsFrom, secret, flagFields, stop } from './options.js';
 import { accountProvider } from '../account.js';
 import { cliHistoryProvider } from '../cli-history.js';
@@ -109,6 +110,15 @@ export function apiOrigins(host: string, resource: string | undefined, port: num
  * has no place to ask.
  */
 export async function runForeground(options: Options): Promise<void> {
+  const managed = process.env.AHPD_MANAGED_CHILD === '1' && process.send !== undefined;
+  const managedSource = process.env.AHPD_MANAGED_SOURCE;
+  const managedRelease = process.env.AHPD_MANAGED_RELEASE;
+  const managedProviders = managed ? JSON.parse(process.env.AHPD_MANAGED_PROVIDERS ?? '[]') as string[] : [];
+  delete process.env.AHPD_MANAGED_CHILD;
+  delete process.env.AHPD_MANAGED_SOURCE;
+  delete process.env.AHPD_MANAGED_RELEASE;
+  delete process.env.AHPD_MANAGED_PROVIDERS;
+  if (managed && managedSource && managedRelease) options.plugins = managedPlugins(options.plugins, managedSource, managedRelease);
   const { token, from } = secret(options);
   /*
    * Whether `ahpd start` spawned this process, and so will record it. Taken out
@@ -522,6 +532,7 @@ export async function runForeground(options: Options): Promise<void> {
   }
 
   folded.resourceProviders = { ...folded.resourceProviders, 'ahpd-account': accountProvider(folded.agents), 'ahpd-cli-history': cliHistoryProvider(folded.agents) };
+  if (managedProviders.some((provider) => !folded.agents.some((agent) => agent.provider === provider))) stop('A managed update is missing an installed provider.');
   const host = createHost(folded);
   turning = () => host.turning();
   // What the host was finally built over, which is what a served `ahpd usage`
@@ -716,6 +727,7 @@ export async function runForeground(options: Options): Promise<void> {
   });
   process.on('SIGINT', way.shutdown);
   process.on('SIGTERM', way.shutdown);
+  if (managed) managedLifecycle({ on: process.on.bind(process), send: (message) => process.send?.(message as object) }, host, way.shutdown, folded.agents.map((agent) => agent.provider));
   /*
    * A restart, served or signalled: the recorded line and its token read over
    * the configuration as it is now, before anything goes down; then, after the
