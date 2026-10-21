@@ -5,7 +5,7 @@ description: One-time setup for the ahpd bundle. Installs the ahpd agent host wi
 
 # Set up ahpd for Anton
 
-This installs the [terrbear/ahpd](https://github.com/terrbear/ahpd) fork of the Agent Host Protocol server, so Anton can run Claude Code and Codex sessions on this machine. The fork contains the session and model-listing fixes used by the existing Anton setup.
+This installs the [terrbear/ahpd](https://github.com/terrbear/ahpd) fork of the Agent Host Protocol server, so Anton can run Claude Code and Codex sessions on this machine. The fork contains the session and model-listing fixes used by the existing Anton setup. Managed installations automatically adopt CI-validated ahpd releases when idle; set `{"enabled":false}` in `~/.a3/ahpd/self-update.json` to opt out. Node, custom plugins, and separately pinned Codex ACP installations remain operator-managed.
 
 Tell the user in one or two sentences what is about to happen, then do these steps in order. Stop and report the error if a step fails; do not improvise workarounds.
 
@@ -16,7 +16,7 @@ Tell the user in one or two sentences what is about to happen, then do these ste
    - Preserves existing ahpd config and the configured `paths` allowlist. It migrates the known obsolete npm shim, a marker-backed pinned install, or the legacy markerless layout only when its package identity and executable match; a custom Codex adapter remains untouched. The old npm package tree is left unused rather than removing unrelated packages.
    - Uses port 9187 or the next free port only for a new config, binds to 127.0.0.1, and uses `~/.a3/ahpd/work` as the fresh-install default.
    - ahpd creates the connection token at the configured `connectionTokenFile` (owner-only); for a fresh config this is `~/.a3/ahpd/token`. Existing relative token paths are resolved from `~/.a3/ahpd/config.json`.
-   - Installs a login service from the fork server at `~/.a3/ahpd-src/packages/server/dist/main.js`: `~/.config/systemd/user/anton-ahpd.service` on Linux, `~/Library/LaunchAgents/io.trustgrid.anton.ahpd.plist` on macOS. Its stable PATH contains the detected Node/provider locations and standard system locations; transient shell paths are excluded. Logs go to `~/.a3/ahpd/ahpd.log`.
+   - Installs a login service through the managed supervisor at `~/.a3/ahpd-src/scripts/managed-host.mjs`: `~/.config/systemd/user/anton-ahpd.service` on Linux, `~/Library/LaunchAgents/io.trustgrid.anton.ahpd.plist` on macOS. Its stable PATH contains the detected Node/provider locations and standard system locations; transient shell paths are excluded. Logs go to `~/.a3/ahpd/ahpd.log`.
    - On success it prints `ADDRESS=...`, `AHPD_HOME=...`, and the resolved `TOKEN_FILE=...`. It prints the token-file path, never the token value.
 
 ```bash

@@ -72,6 +72,7 @@ it('generates a fresh Codex configuration and a systemd-parsed service with lite
   const unit = readFileSync(service, 'utf8');
   expect(unit).not.toContain('\\s');
   expect(unit).toContain('StandardOutput=append:');
+  expect(unit).toContain('scripts/managed-host.mjs');
   expect(unit).toContain('StandardError=append:');
   expect(unit).toContain('$$SOURCE');
   expect(unit).toContain('$${literal}');
@@ -257,6 +258,7 @@ it('writes a valid escaped launchd plist and rejects transient provider location
   const result = run({ kind: 'mac', serviceFile: plist, claude: '' });
   expect(result.status).toBe(0);
   const text = readFileSync(plist, 'utf8');
+  expect(text).toContain('scripts/managed-host.mjs');
   expect(text).toContain('&amp;');
   expect(text).toContain('&quot;');
   expect(text).toContain('%');
