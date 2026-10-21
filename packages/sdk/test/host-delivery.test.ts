@@ -131,6 +131,7 @@ it.each(['wait', 'ask'])('rejects a second direct turn while %s is active withou
   const t = await talking();
   await t.begin(prompt);
   await expect.poll(() => t.requests().filter((one) => one.method === 'session/prompt').length).toBe(1);
+  await expect.poll(async () => (((await t.state(t.chat)).activeTurn as Bag)?.responseParts as unknown[])?.length).toBeGreaterThan(0);
   if (prompt === 'ask') {
     await expect.poll(async () => ((await t.state('codex:/target')).inputNeeded as unknown[])?.length).toBe(1);
   }
