@@ -2339,7 +2339,7 @@ export function createHost(options: HostOptions): Host {
      * turn waiting on a promise nothing can settle.
      */
     for (const chat of sessions.get(uri)?.chats.values() ?? []) chat.clientGone?.(clientId);
-    retool(uri);
+    void queueClientToolUpdate(uri, async () => { await retool(uri); });
   };
 
   /**
@@ -9704,6 +9704,7 @@ export function createHost(options: HostOptions): Host {
                 no('The agent could not publish the client tools');
                 return;
               }
+              if (!presence.get(idOf(channel))?.has(clientId)) return;
               if (origin.clientSeq > 0) {
                 const alias = connection.aliases.get(channel);
                 connection.peer.notify('action', {
@@ -9715,6 +9716,7 @@ export function createHost(options: HostOptions): Host {
             const previous = held.get(clientId);
             held.set(clientId, activeClient);
             const published = await retool(channel);
+            if (presence.get(idOf(channel))?.get(clientId) !== activeClient) return;
             if (!published) {
               if (previous === undefined) held.delete(clientId);
               else held.set(clientId, previous);

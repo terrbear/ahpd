@@ -5588,6 +5588,76 @@ describe('tools a client contributes', () => {
     }[];
   }> | undefined)?.ahp?.tools ?? [];
 
+  it('keeps reannounced client tools after an in-flight disconnect update', async () => {
+    const { host, client, uri, chatUri } = await providing();
+    let release: () => void = () => {};
+    sdk.mcpDeclareWait = new Promise<void>((resolve) => { release = resolve; });
+    client.close();
+    await settle();
+    const nextPeer = peer();
+    const next = host.accept(nextPeer);
+    await next.handle(hello(['0.9.0']));
+    await next.handle({ method: 'subscribe', params: { channel: uri } });
+    next.handle({ method: 'dispatchAction', params: {
+      channel: uri, clientSeq: 61,
+      action: { type: 'session/activeClientSet', activeClient: { name: 'VS Code', tools: [OPEN_FILE] } },
+    } });
+    await settle();
+    const premature = actions(nextPeer, uri).some((event) => event.origin?.clientSeq === 61);
+    release();
+    await settle(8);
+    expect(premature).toBe(false);
+    expect(offered().map((tool) => tool.name)).toContain('probe__openFile');
+    const snapshot = await next.handle({ method: 'subscribe', params: { channel: uri } }) as {
+      snapshot: { state: { activeClients: { clientId: string }[] } };
+    };
+    expect(snapshot.snapshot.state.activeClients.map((one) => one.clientId)).toContain('probe');
+    expect(actions(nextPeer, uri).find((event) => event.origin?.clientSeq === 61)?.rejectionReason).toBeUndefined();
+    await next.handle({ method: 'subscribe', params: { channel: chatUri } });
+    await next.handle({ method: 'dispatchAction', params: {
+      channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'reconnected-turn', message: { text: 'open it' } },
+    } });
+    await emit({ type: 'assistant', message: { id: 'reconnected-message', content: [{
+      type: 'tool_use', id: 'reconnected-call', name: 'mcp__ahp__probe__openFile', input: { path: '/a.txt' },
+    }] } });
+    const answering = offered().find((tool) => tool.name === 'probe__openFile')?.handler({ path: '/a.txt' });
+    await settle();
+    const request = actions(nextPeer, uri).find((event) => event.action.type === 'session/inputNeededSet');
+    expect(request?.action.request).toMatchObject({ kind: 'toolClientExecution', clientId: 'probe' });
+    await next.handle({ method: 'dispatchAction', params: {
+      channel: chatUri, action: {
+        type: 'chat/toolCallComplete', turnId: 'reconnected-turn', toolCallId: 'reconnected-call',
+        result: { success: true, pastTenseMessage: 'Opened it', content: [{ type: 'text', text: 'reconnected result' }] },
+      },
+    } });
+    expect((await answering)?.content[0]?.text).toBe('reconnected result');
+  });
+
+  it('removes tools when their client disconnects during an announcement', async () => {
+    const { host, client, uri } = await running();
+    const observerPeer = peer();
+    const observer = host.accept(observerPeer);
+    await observer.handle(hello(['0.9.0'], { clientId: 'observer' }));
+    await observer.handle({ method: 'subscribe', params: { channel: uri } });
+    let release: () => void = () => {};
+    sdk.mcpDeclareWait = new Promise<void>((resolve) => { release = resolve; });
+    client.handle({ method: 'dispatchAction', params: {
+      channel: uri, clientSeq: 62,
+      action: { type: 'session/activeClientSet', activeClient: { tools: [OPEN_FILE] } },
+    } });
+    await settle();
+    client.close();
+    await settle();
+    release();
+    await settle(8);
+    const snapshot = await observer.handle({ method: 'subscribe', params: { channel: uri } }) as {
+      snapshot: { state: { activeClients: unknown[] } };
+    };
+    expect(snapshot.snapshot.state.activeClients).toEqual([]);
+    expect(actions(observerPeer, uri).some((event) => event.action.type === 'session/activeClientSet')).toBe(false);
+    expect(offered().map((tool) => tool.name)).not.toContain('probe__openFile');
+  });
+
   it('offers what a client announced to the model, under a name of its own', async () => {
     await providing();
     // Re-declared on the running session rather than only at creation: a
