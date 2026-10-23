@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { textOf } from '@cofold/agents';
 import { createFakeModel } from '@cofold/agents/testing';
 import { createFileStore } from '@cofold/store-file';
@@ -23,21 +23,12 @@ import type { Peer } from '../../sdk/src/types/rpc.js';
  * than continuing from the wrong place.
  */
 
-/** Let the run's zero-delay work finish, up to a point; no wall-clock waiting on a real model. */
-const until = async (check: () => boolean, times = 400): Promise<void> => {
-  for (let i = 0; i < times; i++) {
-    if (check()) return;
-    await new Promise((r) => { setTimeout(r, 0); });
-  }
-};
+const until = async (check: () => boolean): Promise<void> =>
+  vi.waitFor(() => { expect(check()).toBe(true); }, { timeout: 2000, interval: 5 });
 
 /** The same, for a condition only the store or an async read can answer. */
-const untilAsync = async (check: () => Promise<boolean>, times = 400): Promise<void> => {
-  for (let i = 0; i < times; i++) {
-    if (await check()) return;
-    await new Promise((r) => { setTimeout(r, 0); });
-  }
-};
+const untilAsync = async (check: () => Promise<boolean>): Promise<void> =>
+  vi.waitFor(async () => { expect(await check()).toBe(true); }, { timeout: 2000, interval: 5 });
 
 type Note = { channel: 'session' | 'chat' | 'terminal'; action: Bag };
 
@@ -303,12 +294,19 @@ it('still opens a session when neither was asked', () => {
  */
 
 /** A connected client with one cofold session, watching both its channels. */
-async function throughHost(root: string) {
+async function throughHost(root: string, firstReplyDelay = 0) {
   const path = mkdtempSync(join(tmpdir(), 'ahpd-cofold-fork-host-'));
   const model = createFakeModel({
     script: [{ text: 'answer one' }, { text: 'answer two' }, { text: 'answer three' }, { text: 'answer four' }],
     stream: true,
   });
+  const stream = model.stream;
+  if (stream !== undefined && firstReplyDelay > 0) {
+    model.stream = async function* (request) {
+      if (model.requests.length === 0) await new Promise((resolve) => { setTimeout(resolve, firstReplyDelay); });
+      yield* stream.call(model, request);
+    };
+  }
   const agent = cofoldAgent({ adapter: model, store: root, policy: allowAll() });
   const host = createHost({ path, agents: [agent] });
   const notes: { method: string; params: unknown }[] = [];
@@ -352,8 +350,11 @@ const say = async (
     method: 'dispatchAction',
     params: { channel: chatUri, action: { type: 'chat/turnStarted', turnId, message: { text } } },
   });
-  await until(() => told(through.notes, chatUri).some((action) =>
-    action.type === 'chat/turnComplete' || action.type === 'chat/turnCancelled' || action.type === 'chat/error'));
+  const ending = (): Bag | undefined => told(through.notes, chatUri).find((action) =>
+    action.turnId === turnId
+    && (action.type === 'chat/turnComplete' || action.type === 'chat/turnCancelled' || action.type === 'chat/error'));
+  await until(() => ending() !== undefined);
+  expect(ending()).toMatchObject({ type: 'chat/turnComplete', turnId });
 };
 
 it('forks through the host, from the source chat into a chat of its own', async () => {
@@ -368,6 +369,7 @@ it('forks through the host, from the source chat into a chat of its own', async 
     method: 'createChat',
     params: { channel: through.uri, chat: forkedChat, source: { kind: 'fork', chat: through.chatUri, turnId: 't2' } },
   });
+  await through.client.handle({ method: 'subscribe', params: { channel: forkedChat } });
 
   const store = createFileStore({ root });
   // The cut is a store call the session makes before its first turn, so the
@@ -396,9 +398,9 @@ it('forks through the host, from the source chat into a chat of its own', async 
     .toEqual(['question one', 'answer one', 'question two', 'answer two', 'question three', 'answer three']);
 });
 
-it('rewinds through the host, under the id the session already had', async () => {
+it.each([0, 650])('rewinds through the host, under the id the session already had (first reply delayed %i ms)', async (firstReplyDelay) => {
   const { root } = place();
-  const through = await throughHost(root);
+  const through = await throughHost(root, firstReplyDelay);
   await say(through, through.chatUri, 't1', 'question one');
   await say(through, through.chatUri, 't2', 'question two');
   await say(through, through.chatUri, 't3', 'question three');
