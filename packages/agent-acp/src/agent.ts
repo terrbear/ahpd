@@ -14,10 +14,11 @@
 
 import { readExternalHistory } from './external-history.js';
 import { persistentCatalog } from './persistence.js';
-import type { Agent, Bag, HistoricalTurnStatus, Listed, Offered } from '@ahpd/sdk';
+import type { Agent, Bag, HistoricalTurnStatus, Listed } from '@ahpd/sdk';
 import { isAbsolute } from 'node:path';
 import { catalogueOf, stateFile, watchedSession } from './catalog.js';
 import { acpSession } from './session.js';
+import { codexModels } from './codex-models.js';
 import { connectAcp } from './connection.js';
 import { turnsOf } from './transcript.js';
 import type { AcpOptions } from './types.js';
@@ -111,17 +112,7 @@ export function acpAgent(options: AcpOptions): Agent {
       }
     },
 
-    /**
-     * What the server offers before a session exists.
-     *
-     * Nothing, and that is the honest answer: ACP advertises models and
-     * commands on `session/new` and in `session/update`, never on
-     * `initialize`, so there is no pre-session catalogue to report. A server's
-     * models are the session's to report, which is what `Session.models()` is
-     * for. The method states that emptiness rather than being omitted, and no
-     * server is spawned to answer it.
-     */
-    probe: async (): Promise<Offered> => ({ models: [], customizations: [], commands: [] }),
+    probe: () => codexModels(options),
 
     /*
      * The server's own session list where it has one, and this process's record

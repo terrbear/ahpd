@@ -145,3 +145,24 @@ per message.
 The `codex` provider accepts the host's `ahpd.clientSystemInstructions` extension and forwards the saved instructions through the pinned Codex ACP adapter's `ahpd.clientSystemInstructions` metadata on `session/new`. The adapter passes them to Codex `thread/start` as `developerInstructions`. The bridge checks the adapter's advertised version 1 `ahpd.clientSystemInstructions` capability before opening or resuming an instructed session. Unsupported adapters fail the turn before sending its user prompt. Other ACP providers do not advertise instruction support. The extension does not enable AIR rendering or alter command/file/MCP output.
 
 Instructions are separate from user messages and do not replace the provider's base instructions. The existing Codex thread retains its developer instructions on `session/load`; a new chat receives its own copy through `session/new`. Changing a client's prompt requires a fresh session. Acceptance by the AHP host records its transport contract, not proof that the model followed the instructions.
+
+## Codex catalog before the first session
+
+For the pinned Codex adapter, discovery runs its `cli app-server` passthrough,
+using the same bundled Codex executable, environment and working directory.
+It initializes the app server, reads account status without requesting a token
+refresh, and reads every `model/list` page. It never creates a thread, sends a
+prompt, starts login or changes authentication. The subprocess tree is stopped
+after the query, with a two-second deadline and bounded response size.
+
+The host waits up to 2.2 seconds for pending discovery before returning its
+initial catalog. Concurrent handshakes share the probe. An empty or failed
+catalog can retry on a later handshake after five seconds; session-reported
+models still update the catalog and take precedence over an older probe.
+
+Discovery recognizes `codex-acp` and the pinned installer's package-verified
+`dist/index.js` entrypoint, including invocation through Node. Unknown wrappers,
+extra adapter arguments, and adapter-specific `CODEX_CONFIG`, `MODEL_PROVIDER`
+or `DEFAULT_AUTH_REQUEST` overrides retain session-based discovery because a
+standalone CLI query cannot reliably reproduce those adapter settings. Other
+ACP providers also retain session-based discovery.

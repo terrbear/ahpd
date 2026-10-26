@@ -2528,10 +2528,16 @@ export function createHost(options: HostOptions): Host {
     }
   });
 
-  for (const agent of agents.values()) {
-    if (!agent.probe)
-      continue;
-    void agent.probe().then((offered) => {
+  const probing = new Map<string, Promise<void>>();
+  const probeAttempts = new Map<string, number>();
+  const probeAgent = (agent: Agent): Promise<void> => {
+    const pending = probing.get(agent.provider);
+    if (pending) return pending;
+    if (!agent.probe || about(agent.provider).models.length > 0) return Promise.resolve();
+    const last = probeAttempts.get(agent.provider);
+    if (last !== undefined && Date.now() - last < 5000) return Promise.resolve();
+    probeAttempts.set(agent.provider, Date.now());
+    const run = Promise.resolve().then(() => agent.probe!()).then((offered) => {
       const held = about(agent.provider);
       held.commands = offered.commands;
       held.seeds = offered.customizations;
@@ -2544,11 +2550,23 @@ export function createHost(options: HostOptions): Host {
        * customizations either way, or the only client that ever sees them is
        * one that connected after the probe answered.
        */
-      if (offered.models.length > 0) held.models = offered.models;
+      if (offered.models.length > 0 && held.models.length === 0) held.models = offered.models;
       log(`${agent.provider}: ${held.models.length} model(s), ${held.commands.length} command(s), ${held.seeds.length} customization(s)`);
       dispatch(ROOT, { type: 'root/agentsChanged', agents: descriptors() });
-    }).catch(() => { });
-  }
+    }).catch(() => {}).finally(() => { probing.delete(agent.provider); });
+    probing.set(agent.provider, run);
+    return run;
+  };
+  const awaitProbes = async (): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all([...agents.values()].map(probeAgent)),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, 2200); }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+  };
+  for (const agent of agents.values()) void probeAgent(agent);
+
   /**
    * Start one chat, and the session holding it if there is not one yet.
    *
@@ -7233,6 +7251,7 @@ export function createHost(options: HostOptions): Host {
            * no is a client that never offers the flow. A probe that throws is
            * a no, because it answered nothing.
            */
+          await awaitProbes();
           const containersReady = options.containers === undefined
             ? false
             : await options.containers.available().catch(() => false);
