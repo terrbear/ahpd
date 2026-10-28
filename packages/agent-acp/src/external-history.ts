@@ -39,7 +39,7 @@ export async function readExternalHistory(options: AcpOptions, provider: string,
     stopped = true;
     clearTimeout(timer);
     signal?.removeEventListener('abort', aborted);
-    await connection.close(250);
+    await connection.close();
     await connection.ended;
   }
 }

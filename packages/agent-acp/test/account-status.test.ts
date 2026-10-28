@@ -40,6 +40,6 @@ it('bounds account-probe teardown when the ACP process ignores SIGTERM', async (
   const agent = acpAgent({ command, args: [fixture, '--ignore-term'], provider: 'codex' });
   const started = Date.now();
   expect(await agent.accountIdentity?.(root)).toEqual({ status: 'verified', name: `${root.split('/').at(-1)}@example.com` });
-  expect(Date.now() - started).toBeGreaterThanOrEqual(200);
-  expect(Date.now() - started).toBeLessThan(2000);
+  expect(Date.now() - started).toBeGreaterThanOrEqual(3000);
+  expect(Date.now() - started).toBeLessThan(5000);
 });

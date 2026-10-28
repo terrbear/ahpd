@@ -181,6 +181,8 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
     return Promise.race([answered, ended.then((why): never => { throw why; })]);
   };
 
+  let closing: Promise<void> | undefined;
+
   return {
     initialize: (): Promise<InitializeResponse> => {
       if (handshake !== undefined) return Promise.resolve(handshake);
@@ -208,26 +210,29 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
     })),
     cancel: (sessionId: string): Promise<void> => heard(() => connection.agent.notify('session/cancel', { sessionId })),
     ended,
-    close: async (graceMs?: number): Promise<void> => {
-      // The stdin end is what a well-behaved server reads as a shutdown; the
-      // kill is for one that does not.
-      child.stdin.end();
-      child.kill();
-      if (graceMs === undefined) {
+    close: (graceMs = 3000): Promise<void> => {
+      closing ??= (async () => {
+        if (death !== undefined) return;
+        const wait = async (milliseconds: number): Promise<void> => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            ended,
+            new Promise<void>((resolve) => { timer = setTimeout(resolve, milliseconds); }),
+          ]);
+          if (timer !== undefined) clearTimeout(timer);
+        };
+        // Let the adapter shut down its own children on EOF before signalling
+        // it. An immediate SIGTERM bypasses that cleanup and can orphan them.
+        child.stdin.end();
+        await wait(graceMs);
+        if (death !== undefined) return;
+        child.kill();
+        await wait(250);
+        if (death !== undefined) return;
+        child.kill('SIGKILL');
         await ended;
-        return;
-      }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([
-        ended,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(() => {
-            child.kill('SIGKILL');
-            resolve();
-          }, graceMs);
-        }),
-      ]);
-      if (timer !== undefined) clearTimeout(timer);
+      })();
+      return closing;
     },
   };
 }
