@@ -5723,6 +5723,50 @@ describe('tools a client contributes', () => {
     expect(uri).toBeTruthy();
   });
 
+  it.each(['before', 'after'])('delivers a permission-opened client call when canonical arrives %s approval', async (order) => {
+    const { client, peer: p, uri, chatUri } = await providing();
+    client.handle({ method: 'dispatchAction', params: {
+      channel: chatUri, action: { type: 'chat/turnStarted', turnId: 't1', message: { text: 'open it' } },
+    } });
+    await settle();
+    const input = { path: '/a.txt' };
+    const decision = sdk.canUseTool!('mcp__ahp__probe__openFile', input, { toolUseID: 'approved-call' });
+    await settle();
+    expect(actions(p, uri).find((event) => event.action.type === 'session/inputNeededSet')?.action.request).toMatchObject({
+      kind: 'toolConfirmation', toolCall: { toolCallId: 'approved-call', contributor: { kind: 'client', clientId: 'probe' } },
+    });
+    const canonical = {
+      type: 'assistant', uuid: 'approved-reply', message: {
+        id: 'approved-message', content: [{ type: 'tool_use', id: 'approved-call', name: 'mcp__ahp__probe__openFile', input }],
+      },
+    };
+    if (order === 'before') await emit(canonical);
+    expect(actions(p, uri).some((event) => (event.action.request as { kind?: string } | undefined)?.kind === 'toolClientExecution')).toBe(false);
+    client.handle({ method: 'dispatchAction', params: {
+      channel: chatUri, action: { type: 'chat/toolCallConfirmed', toolCallId: 'approved-call', approved: true },
+    } });
+    await expect(decision).resolves.toMatchObject({ behavior: 'allow', updatedInput: input });
+    const answering = offered().find((tool) => tool.name === 'probe__openFile')!.handler(input);
+    // Include the replay after approval: it must neither reopen the row nor
+    // register a second claim for the same provider call id.
+    await emit(canonical, canonical);
+    const executions = actions(p, uri).filter((event) => (event.action.request as { kind?: string } | undefined)?.kind === 'toolClientExecution');
+    expect(executions).toHaveLength(1);
+    expect(executions[0]!.action.request).toMatchObject({
+      id: 'approved-call:client', clientId: 'probe', chat: chatUri,
+      toolCall: { toolCallId: 'approved-call', toolName: 'openFile', contributor: { kind: 'client', clientId: 'probe' } },
+    });
+    expect(actions(p, chatUri).filter((event) => event.action.type === 'chat/toolCallStart' && event.action.toolCallId === 'approved-call')).toHaveLength(1);
+    client.handle({ method: 'dispatchAction', params: {
+      channel: chatUri, action: {
+        type: 'chat/toolCallComplete', toolCallId: 'approved-call',
+        result: { success: true, pastTenseMessage: 'Opened it', content: [{ type: 'text', text: 'approved receipt' }] },
+      },
+    } });
+    await expect(answering).resolves.toMatchObject({ content: [{ type: 'text', text: 'approved receipt' }] });
+    expect(actions(p, uri).some((event) => event.action.type === 'session/inputNeededRemoved' && event.action.id === 'approved-call:client')).toBe(true);
+  });
+
   it('says a failed call failed, in the words the client used', async () => {
     const { client, chatUri } = await providing();
     client.handle({

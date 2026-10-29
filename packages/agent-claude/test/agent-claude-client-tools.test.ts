@@ -231,3 +231,86 @@ for (const order of ['permission-first', 'streaming-first', 'assistant-first', '
     await expect(answer).resolves.toMatchObject({ behavior: 'deny' });
   });
 }
+
+for (const order of ['approval-before-canonical', 'canonical-before-approval', 'canonical-before-permission'] as const) {
+  it.each([true, false])(`settles the actual client handler with ${order} (approved: %s), without replaying claims`, async (approved) => {
+    const sent: Bag[] = [];
+    const input = { command: 'pwd' };
+    const name = 'mcp__ahp__launch_shell';
+    const contributor = { kind: 'client', clientId: shellOwner };
+    const session = createSession({
+      uri: 'claude:/permission-execution',
+      chatUri: 'ahp-chat:/permission-execution',
+      cwd: mkdtempSync(join(tmpdir(), 'ahpd-permission-execution-')),
+      emit: (_channel, action) => { sent.push(structuredClone(action) as Bag); },
+      tools: [shellTool(shellOwner)],
+    });
+    const controller = new AbortController();
+    onTestFinished(() => { controller.abort(); session.close(); });
+    session.begin('execution-turn', 'Inspect the working directory');
+    await until(() => sdk.canUseTool !== undefined && sdk.server !== undefined);
+    const tool = sdk.server!.tools.find((one) => one.name === 'launch_shell')!;
+    expect(tool).toBeDefined();
+    const executions = () => sent.filter((action) => action.type === 'session/inputNeededSet'
+      && (action.request as Bag).kind === 'toolClientExecution');
+    let frame = 0;
+    const canonical = async (id: string) => {
+      // A fresh text part after the tool block acknowledges that even an
+      // ignored/replayed tool block was consumed, without a timing sleep.
+      const marker = `frame-${++frame}`;
+      sdk.push({ type: 'assistant', uuid: marker, parent_tool_use_id: null, message: {
+        id: marker, role: 'assistant', content: [
+          { type: 'tool_use', id, name, input },
+          { type: 'text', text: marker },
+        ],
+      } });
+      await until(() => sent.some((action) => action.type === 'chat/responsePart' && (action.part as Bag).content === marker));
+    };
+    const permission = (id: string) => sdk.canUseTool!(name, input, { toolUseID: id, signal: controller.signal });
+    const finish = async (id: string, result: Promise<Bag>, count: number) => {
+      await until(() => executions().length === count);
+      expect(executions().at(-1)!.request).toMatchObject({
+        id: `${id}:client`, kind: 'toolClientExecution', clientId: shellOwner,
+        chat: 'ahp-chat:/permission-execution', turnId: 'execution-turn',
+        toolCall: { toolCallId: id, toolName: 'launch_shell', toolInput: JSON.stringify(input), contributor },
+      });
+      expect(session.completeToolCall?.(id, 'wrong-client', { text: 'wrong', ok: true })).toBe(false);
+      expect(session.completeToolCall?.(id, shellOwner, { text: `receipt ${id}`, ok: true })).toBe(true);
+      await expect(result).resolves.toMatchObject({ content: [{ type: 'text', text: `receipt ${id}` }] });
+      expect(session.sessionState().inputNeeded ?? []).toEqual([]);
+    };
+
+    if (order === 'canonical-before-permission') await canonical('first');
+    const answer = permission('first');
+    await until(() => (session.sessionState().inputNeeded as Bag[] | undefined)?.some((request) => request.kind === 'toolConfirmation') === true);
+    expect((session.sessionState().inputNeeded as Bag[])[0]!.toolCall).toMatchObject({ status: 'pending-confirmation', contributor });
+    if (order === 'canonical-before-approval') {
+      await canonical('first');
+      await canonical('first');
+      expect((session.sessionState().inputNeeded as Bag[])[0]!.toolCall).toMatchObject({ status: 'pending-confirmation', contributor });
+    }
+    expect(executions()).toHaveLength(0);
+    session.confirm('first', approved);
+    await expect(answer).resolves.toMatchObject(approved ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny' });
+    // Mirror the SDK: invoke the real contributed handler only after allow.
+    const result = approved ? tool.handler(input) : undefined;
+    await canonical('first');
+    await canonical('first');
+    const activeTurn = session.chatState().activeTurn as Bag;
+    const firstCall = (activeTurn.responseParts as Bag[]).find((part) => part.id === 'first')!.toolCall;
+    expect(firstCall).toMatchObject({ status: approved ? 'running' : 'cancelled', contributor, ...(approved ? { confirmed: 'user-action' } : {}) });
+    if (result) await finish('first', result, 1);
+    else expect(executions()).toHaveLength(0);
+    await canonical('first');
+    expect(sent.filter((action) => action.type === 'chat/toolCallStart' && action.toolCallId === 'first')).toHaveLength(1);
+
+    // Identical arguments must claim the next call, never a replayed or
+    // denied predecessor. Start its handler before its canonical frame.
+    const nextAnswer = permission('next');
+    session.confirm('next', true);
+    await expect(nextAnswer).resolves.toMatchObject({ behavior: 'allow', updatedInput: input });
+    const nextResult = tool.handler(input);
+    await canonical('next');
+    await finish('next', nextResult, approved ? 2 : 1);
+  });
+}
