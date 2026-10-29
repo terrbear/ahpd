@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +58,19 @@ interface Held {
   }[];
   calls: string[][];
 }
+
+/** Wait for each plugin's startup listing and its fixture lock to finish. */
+const answered = async (state: string, calls: number): Promise<void> => {
+  const limit = Date.now() + 4_000;
+  while (!existsSync(state)
+    || (JSON.parse(readFileSync(state, 'utf8')) as Held).calls.length < calls
+    || existsSync(`${state}.lock`)) {
+    if (Date.now() > limit) {
+      throw new Error(`the scripted docker never finished ${calls} calls on ${state}`);
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
+  }
+};
 
 const load = (pluginOptions: Record<string, unknown>, agents: Agent[] = []) => loadPlugins(
   [{ name: SOURCE, options: pluginOptions }],
@@ -214,6 +227,10 @@ it('refuses a missing path, an unknown agent, a shared target and a missing fold
   // And a folder that is not there is refused like any other host path.
   const noFolder = await bad(withAgents({ claude: { agents: ['claude'], folder: gone } }), [agent('claude')], { profile: 'claude' });
   expect((noFolder as Error).message).toMatch(/folder names .* and that path is not there/);
+
+  // Each load starts a listing without awaiting it. Let the fixture release its
+  // shared state file before afterEach removes the directory they write into.
+  await answered(state, 4);
 });
 
 it('offers a machine only to the agents it was prepared for', async () => {
