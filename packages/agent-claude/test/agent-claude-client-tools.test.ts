@@ -292,10 +292,10 @@ for (const order of ['approval-before-canonical', 'canonical-before-approval', '
     expect(executions()).toHaveLength(0);
     session.confirm('first', approved);
     await expect(answer).resolves.toMatchObject(approved ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny' });
-    // Mirror the SDK: invoke the real contributed handler only after allow.
+    await canonical('first');
+    await canonical('first');
+    // Exercise the exact approval/canonical orders before handler dispatch.
     const result = approved ? tool.handler(input) : undefined;
-    await canonical('first');
-    await canonical('first');
     const activeTurn = session.chatState().activeTurn as Bag;
     const firstCall = (activeTurn.responseParts as Bag[]).find((part) => part.id === 'first')!.toolCall;
     expect(firstCall).toMatchObject({ status: approved ? 'running' : 'cancelled', contributor, ...(approved ? { confirmed: 'user-action' } : {}) });

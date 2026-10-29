@@ -5746,10 +5746,11 @@ describe('tools a client contributes', () => {
       channel: chatUri, action: { type: 'chat/toolCallConfirmed', toolCallId: 'approved-call', approved: true },
     } });
     await expect(decision).resolves.toMatchObject({ behavior: 'allow', updatedInput: input });
-    const answering = offered().find((tool) => tool.name === 'probe__openFile')!.handler(input);
     // Include the replay after approval: it must neither reopen the row nor
     // register a second claim for the same provider call id.
     await emit(canonical, canonical);
+    const answering = offered().find((tool) => tool.name === 'probe__openFile')!.handler(input);
+    await settle();
     const executions = actions(p, uri).filter((event) => (event.action.request as { kind?: string } | undefined)?.kind === 'toolClientExecution');
     expect(executions).toHaveLength(1);
     expect(executions[0]!.action.request).toMatchObject({
