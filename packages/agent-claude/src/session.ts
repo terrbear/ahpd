@@ -992,7 +992,18 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const unclaimed = new Map<string, { id: string; input: string }[]>();
   const expecting = new Map<string, ((id: string) => void)[]>();
 
+  // Claim registration is independent of the transcript row's status: a
+  // permission callback can open that row before the canonical frame arrives.
+  // Keep the id after it is claimed so replayed frames cannot enqueue it again.
+  const registeredCalls = new Set<string>();
+  const discardOpening = (toolName: string, id: string): void => {
+    registeredCalls.add(id);
+    unclaimed.set(toolName, (unclaimed.get(toolName) ?? []).filter((one) => one.id !== id));
+  };
+
   const opening = (toolName: string, id: string, input: Bag): void => {
+    if (registeredCalls.has(id)) return;
+    registeredCalls.add(id);
     const waiting = expecting.get(toolName) ?? [];
     const first = waiting.shift();
     expecting.set(toolName, waiting);
@@ -1874,6 +1885,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
       if (kind === 'tool_use') {
         const id = str(block.id) ?? `${of}:${index}`;
+        const name = str(block.name) ?? 'tool';
+        // Joining the SDK handler must still happen for a permission-opened
+        // row, without completing or approving that row here.
+        if (providedBy(name) !== undefined) opening(name, id, bag(block.input));
         /*
          * The call as it stands, if something opened it already.
          *
@@ -1887,7 +1902,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
          */
         const open = scope.parts.get(id);
         if (open !== undefined && str(bag(open.toolCall).status) !== 'streaming') continue;
-        const name = str(block.name) ?? 'tool';
         const line = lineOf(name, bag(block.input));
         pastLines.set(id, pastLineOf(name, bag(block.input)));
         const input = toolInputOf(name, bag(block.input));
@@ -1925,8 +1939,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
          * one as this host's contribution would tell every client that the
          * call is nobody's to answer, including the one whose call it is.
          */
-        const own = providedBy(name);
-        if (own !== undefined) opening(name, id, bag(block.input));
         const contributor = contributorOf(name);
         // Running against somebody else's server, and so a call that can end
         // up waiting on a sign-in rather than on its own work.
@@ -2346,9 +2358,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
         asked: new Map(),
         answers: new Map(),
         ...(options !== undefined ? { options, suggestions } : {}),
-        settle: (result) => settle(result.behavior === 'allow'
-          ? { behavior: 'allow', updatedInput: raw, ...(scopeApproval !== undefined || result.updatedPermissions === undefined ? {} : { updatedPermissions: result.updatedPermissions }) }
-          : result),
+        settle: (result) => {
+          // A denied call has no SDK handler. Do not leave its canonical
+          // registration for a later call with the same name/input to claim.
+          if (result.behavior !== 'allow' && contributor?.kind === 'client') discardOpening(toolName, id);
+          settle(result.behavior === 'allow'
+            ? { behavior: 'allow', updatedInput: raw, ...(scopeApproval !== undefined || result.updatedPermissions === undefined ? {} : { updatedPermissions: result.updatedPermissions }) }
+            : result);
+        },
       };
       pending.set(id, pendingInput);
       let requestPublished = false;
