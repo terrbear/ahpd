@@ -573,6 +573,16 @@ const shaped = (property: object): z.ZodTypeAny => {
   return value;
 };
 
+/** The same parser shape used by the SDK's in-process MCP server. */
+const inputShape = (schema: BoundTool['definition']['inputSchema']): Record<string, z.ZodTypeAny> => {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, property] of Object.entries(schema?.properties ?? {})) {
+    const value = shaped(property);
+    shape[key] = (schema?.required ?? []).includes(key) ? value : value.optional();
+  }
+  return shape;
+};
+
 const isAntonAHPClient = (owner: string | undefined): owner is string =>
   owner !== undefined && /^anton-ahp_[0-9A-Za-z]{27}$/.test(owner);
 
@@ -610,16 +620,10 @@ const contributed = (
   version: '1.0.0',
   tools: tools.map((one) => {
     const name = exposedToolName(one, tools);
-    const schema = one.definition.inputSchema;
-    const shape: Record<string, z.ZodTypeAny> = {};
-    for (const [key, property] of Object.entries(schema?.properties ?? {})) {
-      const value = shaped(property);
-      shape[key] = (schema?.required ?? []).includes(key) ? value : value.optional();
-    }
     return {
       name,
       description: one.definition.description ?? one.definition.title ?? name,
-      inputSchema: shape,
+      inputSchema: inputShape(one.definition.inputSchema),
       /*
        * A raw SDK definition, not the SDK's `tool()` helper, so the eager flag
        * rides `_meta`. Passed only when the host defined it: `false` is the
@@ -994,25 +998,86 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * other.
    */
   const unclaimed = new Map<string, { id: string; input: string }[]>();
-  const expecting = new Map<string, ((id: string) => void)[]>();
+  const expecting = new Map<string, { id?: string; input: string; settle: (id: string | undefined) => void }[]>();
+  let claimGeneration = 0;
+  const clientClaimGenerations = new Map<string, number>();
 
-  const opening = (toolName: string, id: string, input: Bag): void => {
-    const waiting = expecting.get(toolName) ?? [];
-    const first = waiting.shift();
-    expecting.set(toolName, waiting);
-    if (first) { first(id); return; }
-    unclaimed.set(toolName, [...(unclaimed.get(toolName) ?? []), { id, input: JSON.stringify(input) }]);
+  // Claim registration is independent of the transcript row's status: a
+  // permission callback can open that row before the canonical frame arrives.
+  // Keep the id after it is claimed so replayed frames cannot enqueue it again.
+  const registeredCalls = new Set<string>();
+  const awaitingApproval = new Map<string, { toolName: string; input: string }>();
+  const approvedClaims = new Map<string, { toolName: string; input: string; taken: boolean }>();
+  const discardOpening = (toolName: string, id: string): void => {
+    registeredCalls.add(id);
+    awaitingApproval.delete(id);
+    approvedClaims.delete(id);
+    unclaimed.set(toolName, (unclaimed.get(toolName) ?? []).filter((one) => one.id !== id));
   };
 
-  const claim = (toolName: string, input: Bag): Promise<string> => {
+  // MCP parses the arguments before invoking the handler: property order
+  // and undeclared top-level keys can differ from the canonical frame.
+  const claimInput = (toolName: string, input: Bag): string => {
+    const tool = offering.find((one) => called(exposedToolName(one, offering)) === toolName);
+    const parsed = z.object(inputShape(tool?.definition.inputSchema)).safeParse(input);
+    return JSON.stringify(parsed.success ? parsed.data : input, (_key, value: unknown) =>
+      value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+        : value);
+  };
+
+  const eligibleOpening = (toolName: string, id: string, written: string): void => {
+    const waiting = expecting.get(toolName) ?? [];
+    const at = waiting.findIndex((one) => one.input === written
+      && (one.id === id || (one.id === undefined && !approvedClaims.has(id))));
+    const first = at >= 0 ? waiting.splice(at, 1)[0] : undefined;
+    expecting.set(toolName, waiting);
+    if (first) { first.settle(id); return; }
+    unclaimed.set(toolName, [...(unclaimed.get(toolName) ?? []), { id, input: written }]);
+  };
+
+  const opening = (toolName: string, id: string, input: Bag): void => {
+    if (closed || registeredCalls.has(id)) return;
+    registeredCalls.add(id);
+    const written = claimInput(toolName, input);
+    // A canonical frame establishes identity, not permission. Another
+    // approved handler with identical arguments must not consume this ID.
+    if (pending.has(id)) awaitingApproval.set(id, { toolName, input: written });
+    else eligibleOpening(toolName, id, written);
+  };
+
+  const holdOpening = (toolName: string, id: string): void => {
+    const queued = unclaimed.get(toolName) ?? [];
+    const at = queued.findIndex((one) => one.id === id);
+    if (at < 0) return;
+    const held = queued.splice(at, 1)[0]!;
+    awaitingApproval.set(id, { toolName, input: held.input });
+  };
+
+  const approveOpening = (toolName: string, id: string, input: Bag): void => {
+    // Reserve the permission's ID before its handler can start. Even a
+    // canonical frame whose permission has not arrived cannot steal it.
+    if (!approvedClaims.has(id)) approvedClaims.set(id, { toolName, input: claimInput(toolName, input), taken: false });
+    const held = awaitingApproval.get(id);
+    if (!held) return;
+    awaitingApproval.delete(id);
+    eligibleOpening(held.toolName, id, held.input);
+  };
+
+  const claim = (toolName: string, input: Bag): Promise<string | undefined> => {
     const open = unclaimed.get(toolName) ?? [];
-    const written = JSON.stringify(input);
-    const at = open.findIndex((one) => one.input === written);
-    const took = at >= 0 ? open.splice(at, 1)[0] : open.shift();
+    const written = claimInput(toolName, input);
+    const reservation = [...approvedClaims.entries()].find(([, one]) => !one.taken && one.toolName === toolName && one.input === written);
+    if (reservation) reservation[1].taken = true;
+    const reservedId = reservation?.[0];
+    const at = open.findIndex((one) => reservedId !== undefined
+      ? one.id === reservedId
+      : one.input === written && !approvedClaims.has(one.id) && !pending.has(one.id));
+    const took = at >= 0 ? open.splice(at, 1)[0] : undefined;
     unclaimed.set(toolName, open);
     if (took !== undefined) return Promise.resolve(took.id);
     return new Promise((resolve) => {
-      expecting.set(toolName, [...(expecting.get(toolName) ?? []), resolve]);
+      expecting.set(toolName, [...(expecting.get(toolName) ?? []), { ...(reservedId !== undefined ? { id: reservedId } : {}), input: written, settle: resolve }]);
     });
   };
 
@@ -1027,6 +1092,32 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
   /** Every outstanding client call, answered the same way and forgotten. */
   const releaseCalls = (why: string, whose?: string): void => {
+    // A handler may still be waiting for its canonical frame, or be between
+    // claim resolution and publication. Settle both without publishing later.
+    if (whose === undefined) claimGeneration++;
+    else clientClaimGenerations.set(whose, (clientClaimGenerations.get(whose) ?? 0) + 1);
+    // Permission/streaming rows may know the ID before a canonical frame.
+    // Retain those IDs as tombstones so late frames cannot revive them.
+    for (const scope of scopes.values()) {
+      for (const [id, part] of scope.parts) {
+        const contributor = bag(bag(part.toolCall).contributor);
+        if (contributor.kind === 'client' && (whose === undefined || contributor.clientId === whose)) registeredCalls.add(id);
+      }
+    }
+    for (const [id, held] of approvedClaims) {
+      if (whose !== undefined && providedBy(held.toolName) !== whose) continue;
+      registeredCalls.add(id);
+      approvedClaims.delete(id);
+    }
+    for (const [id, held] of awaitingApproval) {
+      if (whose === undefined || providedBy(held.toolName) === whose) awaitingApproval.delete(id);
+    }
+    for (const name of new Set([...expecting.keys(), ...unclaimed.keys()])) {
+      if (whose !== undefined && providedBy(name) !== whose) continue;
+      for (const held of expecting.get(name) ?? []) held.settle(undefined);
+      expecting.delete(name);
+      unclaimed.delete(name);
+    }
     for (const [id, held] of [...byClient.entries()]) {
       if (whose !== undefined && held.owner !== whose) continue;
       byClient.delete(id);
@@ -1035,8 +1126,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const ranByClient = async (tool: BoundTool, input: Bag): Promise<{ text: string; ok: boolean }> => {
-    const id = await claim(called(exposedToolName(tool, offering)), input);
     const owner = tool.owner ?? '';
+    const generation = claimGeneration;
+    const clientGeneration = clientClaimGenerations.get(owner) ?? 0;
+    if (closed) return { text: 'The session was disposed', ok: false };
+    const id = await claim(called(exposedToolName(tool, offering)), input);
+    if (id === undefined || closed || generation !== claimGeneration
+      || clientGeneration !== (clientClaimGenerations.get(owner) ?? 0)) {
+      return { text: 'The client call ended before it could be dispatched', ok: false };
+    }
     const scope = scopeOfCall(id) ?? mainScope;
     const fullName = tool.definition.name;
     const prefix = `${owner}__`;
@@ -1878,6 +1976,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
       if (kind === 'tool_use') {
         const id = str(block.id) ?? `${of}:${index}`;
+        const name = str(block.name) ?? 'tool';
+        // Joining the SDK handler must still happen for a permission-opened
+        // row, without completing or approving that row here.
+        if (providedBy(name) !== undefined) opening(name, id, bag(block.input));
         /*
          * The call as it stands, if something opened it already.
          *
@@ -1891,7 +1993,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
          */
         const open = scope.parts.get(id);
         if (open !== undefined && str(bag(open.toolCall).status) !== 'streaming') continue;
-        const name = str(block.name) ?? 'tool';
         const line = lineOf(name, bag(block.input));
         pastLines.set(id, pastLineOf(name, bag(block.input)));
         const input = toolInputOf(name, bag(block.input));
@@ -1929,8 +2030,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
          * one as this host's contribution would tell every client that the
          * call is nobody's to answer, including the one whose call it is.
          */
-        const own = providedBy(name);
-        if (own !== undefined) opening(name, id, bag(block.input));
         const contributor = contributorOf(name);
         // Running against somebody else's server, and so a call that can end
         // up waiting on a sign-in rather than on its own work.
@@ -2189,9 +2288,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const canUseTool = async (toolName: string, raw: Bag, asked?: Bag): Promise<unknown> => {
+    const refuse = (message: string) => {
+      const id = str(bag(asked).toolUseID);
+      if (id !== undefined && providedBy(toolName) !== undefined) discardOpening(toolName, id);
+      return { behavior: 'deny', message };
+    };
     const scopeApproval = jiraIssueMutation(toolName, raw, declared);
     if (scopeApproval?.keys.length === 0) {
-      return { behavior: 'deny', message: 'AHP blocked this Jira/Atlassian mutation: include the exact existing issue key in the tool input, then retry.' };
+      return refuse('AHP blocked this Jira/Atlassian mutation: include the exact existing issue key in the tool input, then retry.');
     }
     /*
      * Answered from the lists, before anybody is asked.
@@ -2204,10 +2308,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * for a decision made before the turn began.
      */
     const already = settled(toolName);
-    if (already === 'allow' && scopeApproval === undefined) return { behavior: 'allow', updatedInput: raw };
-    if (already === 'deny') return { behavior: 'deny', message: `${toolName} is denied for this session` };
+    if (already === 'allow' && scopeApproval === undefined) {
+      const id = str(bag(asked).toolUseID);
+      if (id !== undefined && providedBy(toolName) !== undefined) approveOpening(toolName, id, raw);
+      return { behavior: 'allow', updatedInput: raw };
+    }
+    if (already === 'deny') return refuse(`${toolName} is denied for this session`);
     const abortSignal = bag(asked).signal as AbortSignal | undefined;
-    if (abortSignal?.aborted) return { behavior: 'deny', message: 'AHP confirmation was aborted before it was requested' };
+    if (abortSignal?.aborted) return refuse('AHP confirmation was aborted before it was requested');
     return await new Promise((settle) => {
       const about = bag(asked);
       /*
@@ -2350,11 +2458,20 @@ export function createSession(options: ClaudeSessionOptions): Session {
         asked: new Map(),
         answers: new Map(),
         ...(options !== undefined ? { options, suggestions } : {}),
-        settle: (result) => settle(result.behavior === 'allow'
-          ? { behavior: 'allow', updatedInput: raw, ...(scopeApproval !== undefined || result.updatedPermissions === undefined ? {} : { updatedPermissions: result.updatedPermissions }) }
-          : result),
+        settle: (result) => {
+          // A denied call has no SDK handler. Do not leave its canonical
+          // registration for a later call with the same name/input to claim.
+          if (contributor?.kind === 'client') {
+            if (result.behavior === 'allow') approveOpening(toolName, id, raw);
+            else discardOpening(toolName, id);
+          }
+          settle(result.behavior === 'allow'
+            ? { behavior: 'allow', updatedInput: raw, ...(scopeApproval !== undefined || result.updatedPermissions === undefined ? {} : { updatedPermissions: result.updatedPermissions }) }
+            : result);
+        },
       };
       pending.set(id, pendingInput);
+      if (contributor?.kind === 'client') holdOpening(toolName, id);
       let requestPublished = false;
       const abort = (): void => {
         const waiting = pending.get(id);
@@ -4156,6 +4273,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
         one.settle({ behavior: 'deny', message: 'The session was disposed' });
       }
       releaseCalls('The session was disposed');
+      registeredCalls.clear();
+      clientClaimGenerations.clear();
       try { rmSync(initScript, { force: true }); }
       catch { /* a script that was never written */ }
       return idle.dispose();
