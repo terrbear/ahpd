@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { modelsProblem, offeredModels, ownModels } from '../src/models.js';
+import { modelsProblem, offeredModels, ownModels, pinnedModels } from '../src/models.js';
 
 /*
  * The models a Claude harness offers when its operator names them: written by
@@ -62,4 +62,31 @@ it('names what is wrong with a models option', () => {
   expect(modelsProblem([''])).toBe('options.models[0] is an empty id');
   expect(modelsProblem([{ name: 'x' }])).toBe('options.models[0] has neither an id nor a fetch');
   expect(modelsProblem([{ fetch: 'https://x', key: 'K' }])).toBe('options.models[0].key is not { fromEnv }');
+});
+
+it('offers pinned IDs with context and per-model controls while retaining aliases and explicit versions', () => {
+  const schema = { type: 'object', properties: { thinkingLevel: { enum: ['high'] } } };
+  const models = [
+    { id: 'default', name: 'Default' },
+    { id: 'sonnet[1m]', name: 'Sonnet', configSchema: schema },
+    { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5' },
+    { id: 'haiku', name: 'Haiku' },
+    { id: 'claude-haiku-5-5', name: 'Already explicit' },
+  ];
+  const offered = pinnedModels(models, {});
+  expect(offered.map((model) => model.id)).toEqual([
+    'default', 'claude-sonnet-5-5[1m]', 'sonnet[1m]', 'claude-haiku-4-5-20251001', 'haiku', 'claude-haiku-5-5',
+  ]);
+  expect(offered[1]).toMatchObject({ name: 'Sonnet 5.5[1m] (pinned)', configSchema: schema });
+});
+
+it.each([{ ANTHROPIC_BASE_URL: 'https://provider.invalid' }, { CLAUDE_CODE_USE_BEDROCK: '1' }])('preserves custom-provider catalogs with %j', (env) => {
+  expect(pinnedModels(CLI, env)).toEqual(CLI);
+});
+
+it.each([true, false])('preserves existing canonical model metadata with alias first: %s', (aliasFirst) => {
+  const alias = { id: 'haiku', name: 'Alias', configSchema: { marker: 'alias' } };
+  const exact = { id: 'claude-haiku-5-5', name: 'Canonical from SDK', configSchema: { marker: 'canonical' }, extra: 'preserve me' };
+  const original = aliasFirst ? [alias, exact] : [exact, alias];
+  expect(pinnedModels(original, {})).toEqual(original);
 });

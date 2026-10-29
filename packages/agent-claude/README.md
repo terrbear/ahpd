@@ -40,6 +40,31 @@ It takes no options in the ordinary install: it catalogues whatever directories 
 | `idleTimeoutMs` | release locally owned idle Claude processes after this many milliseconds; defaults to `3600000` (one hour), `0` disables eviction. Active or queued turns, pending tools, input requests, subagents and background tasks prevent eviction. The next turn resumes the same native Claude session without replaying previous prompts. Direct transcript and chat-state reads do not start a process. Reattaching a client with changed tools or changing native controls can wake an evicted process. Computer/custom-spawn sessions are excluded because their host transport exiting does not prove the remote native process exited |
 | `presets` | named sets of Claude options, by name. One is what every session runs on; two or more offer a session a choice, and the first is the default |
 
+For first-party Claude sessions, explicit family selections are pinned before
+reaching the SDK: `fable` → `claude-fable-5-1`, `opus` → `claude-opus-5-5`,
+`sonnet` → `claude-sonnet-5-5`, and `haiku` → `claude-haiku-5-5`.
+`[1m]` and `[200k]` suffixes are retained. Explicit version IDs are unchanged;
+`default` still delegates to the CLI. Turn selection, model config changes, and
+idle query restarts use the same pins. The model catalog also offers each
+canonical pin beside its family alias, so clients requiring an advertised
+exact ID can select it. An unavailable pinned model fails through the existing
+SDK error path; ahpd does not retry an older model.
+
+Custom `models` catalogs, non-Anthropic `ANTHROPIC_BASE_URL` endpoints, and the
+CLI's alternate-provider environment switches retain their own alias semantics.
+The environment includes daemon variables, preset overrides and session variables.
+First-party family selections deliberately bypass older `ANTHROPIC_DEFAULT_*_MODEL`
+values; choose an explicit model ID to retain an older first-party release.
+
+These are request targets, not an account availability guarantee. The canonical
+IDs are documented in [Anthropic's model overview](https://platform.claude.com/docs/en/about-claude/models/overview).
+[Claude Code's model documentation](https://code.claude.com/docs/en/model-config)
+requires v2.1.257+ for Fable 5.1, v2.1.280+ for Opus 5.5, v2.1.284+ for
+Sonnet 5.5, and v2.1.293+ for Haiku 5.5. Older runtimes or accounts without access
+may reject these requests. The bundled SDK minimum is 0.3.293 (Claude Code
+v2.1.293); this source dependency update does not upgrade a separately installed
+CLI or grant account access.
+
 ### Presets
 
 A preset is a set of Claude options an operator writes once and sessions run on, rather than options each session offers a control for. Two of them give a session a `preset` to choose from, fixed when the session is created:

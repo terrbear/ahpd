@@ -1,8 +1,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import type { Bag } from '@ahpd/sdk';
+import type { ClaudeSessionOptions } from '../src/session.js';
 
 /*
  * A turn that names a model the CLI will not take.
@@ -80,6 +81,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { createSession } = await import('../src/session.js');
+afterEach(() => vi.unstubAllEnvs());
 
 const settle = async (times = 30): Promise<void> => {
   for (let i = 0; i < times; i++) await new Promise((r) => { setTimeout(r, 0); });
@@ -96,7 +98,7 @@ const ended = (): Record<string, unknown> => ({ type: 'result', subtype: 'succes
  * `next()` on the same generator queues behind the first - which would make an
  * absent prompt look like a late one.
  */
-async function open() {
+async function open(options: Partial<ClaudeSessionOptions> = {}) {
   sdk.reset();
   const said: Bag[] = [];
   const prompts: string[] = [];
@@ -105,6 +107,7 @@ async function open() {
     chatUri: 'ahp-chat:/model',
     cwd: mkdtempSync(join(tmpdir(), 'ahpd-model-')),
     emit: (_channel, action) => { said.push(action as Bag); },
+    ...options,
   });
   await settle();
   const stream = sdk.prompt as AsyncGenerator<Bag>;
@@ -155,7 +158,7 @@ it('runs on a model the CLI takes, and says which one, as before', async () => {
   session.begin('t1', 'first', { id: 'opus' });
   await settle();
 
-  expect(sdk.asked).toEqual(['opus']);
+  expect(sdk.asked).toEqual(['claude-opus-5-5']);
   expect(message('t1').model).toEqual({ id: 'opus' });
   expect(prompts).toEqual(['first']);
   expect(chat().filter((one) => one === 'chat/turnStarted' || one === 'chat/error')).toEqual(['chat/turnStarted']);
@@ -187,4 +190,76 @@ it('holds the queue behind a turn that is switching models, and sends the prompt
   await settle(30);
   expect(prompts).toEqual(['first', 'second']);
   expect(sdk.asked).toEqual(['slow']);
+});
+
+it.each([
+  ['fable', 'claude-fable-5-1'],
+  ['opus', 'claude-opus-5-5'],
+  ['sonnet', 'claude-sonnet-5-5'],
+  ['haiku', 'claude-haiku-5-5'],
+  ['sonnet[1m]', 'claude-sonnet-5-5[1m]'],
+  ['haiku[200k]', 'claude-haiku-5-5[200k]'],
+  ['claude-sonnet-5', 'claude-sonnet-5'],
+  ['claude-haiku-4-5-20251001[1m]', 'claude-haiku-4-5-20251001[1m]'],
+  ['custom/sonnet', 'custom/sonnet'],
+  ['default', 'undefined'],
+])('sends %s as %s while retaining the requested selection', async (id, resolved) => {
+  const { session, prompts, message } = await open();
+  session.begin('pin', 'hello', { id });
+  await settle();
+  expect(sdk.asked).toEqual([resolved]);
+  expect(prompts).toEqual(['hello']);
+  expect(message('pin').model).toEqual({ id });
+});
+
+it('fails an unavailable pinned alias without sending its prompt or asking for an older model', async () => {
+  const { session, prompts, failure } = await open();
+  sdk.refuses['claude-haiku-5-5'] = 'model unavailable';
+  session.begin('missing', 'hello', { id: 'haiku' });
+  await settle();
+  expect(sdk.asked).toEqual(['claude-haiku-5-5']);
+  expect(prompts).toEqual([]);
+  expect(failure('missing')).toContain('model unavailable');
+});
+
+it('pins config changes and retains the previous selection when the pinned model is refused', async () => {
+  const { session } = await open();
+  expect(await session.setConfig!('model', 'sonnet[1m]')).toBe(true);
+  sdk.refuses['claude-haiku-5-5'] = 'model unavailable';
+  expect(await session.setConfig!('model', 'haiku')).toContain('would not take');
+  expect(sdk.asked).toEqual(['claude-sonnet-5-5[1m]', 'claude-haiku-5-5']);
+  expect(session.settings!().model).toBe('sonnet[1m]');
+});
+
+it.each([
+  { env: { ANTHROPIC_BASE_URL: 'https://gateway.example.test' } },
+  { env: { CLAUDE_CODE_USE_VERTEX: 'true' } },
+  { env: { CLAUDE_CODE_USE_FOUNDRY: '1' } },
+  { offerModels: async (models: { id: string; name: string }[]) => models },
+  { presets: { custom: { env: { CLAUDE_CODE_USE_BEDROCK: '1' } } } },
+])('preserves custom provider aliases for %j', async (options) => {
+  const { session } = await open(options);
+  session.begin('custom', 'hello', { id: 'sonnet' });
+  await settle();
+  expect(sdk.asked).toEqual(['sonnet']);
+});
+
+
+it('preserves a provider selected in the daemon environment', async () => {
+  vi.stubEnv('ANTHROPIC_BASE_URL', 'https://gateway.example.test');
+  const { session } = await open();
+  session.begin('custom', 'hello', { id: 'haiku[1m]' });
+  await settle();
+  expect(sdk.asked).toEqual(['haiku[1m]']);
+});
+
+it('pins first-party requests even with older CLI alias defaults', async () => {
+  const { session } = await open({ env: {
+    ANTHROPIC_BASE_URL: 'https://api.anthropic.com/',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5-20251001',
+    CLAUDE_CODE_USE_BEDROCK: '0',
+  } });
+  session.begin('pinned', 'hello', { id: 'haiku' });
+  await settle();
+  expect(sdk.asked).toEqual(['claude-haiku-5-5']);
 });

@@ -13,6 +13,7 @@ import { Status, idOf, tail } from '@ahpd/sdk';
 import { attachmentContent } from './attachments.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
+import { pinnedModel, pinnedModels } from './models.js';
 import { idleQuery } from './idle.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
 import type { Asked, Spawned } from './spawn.js';
@@ -835,6 +836,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * laid over their `env`, so a preset never replaces a signed-in token.
    */
   const fromPreset = queryOptionsOf(values);
+  const modelId = (id: string): string | undefined => id === 'default' ? undefined
+    : options.offerModels ? id
+      : pinnedModel(id, { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env });
 
   /*
    * The shell init script, on disk where a shell can source it.
@@ -2558,7 +2562,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
           // From the settings, which is where it lives: it is a config key like
           // the others, and a second way in was a second thing to keep in step.
           ...(typeof settings.permissionMode === 'string' ? { permissionMode: settings.permissionMode } : {}),
-          ...(chosen === undefined ? {} : { model: chosen }),
+          ...(chosen === undefined ? {} : { model: modelId(chosen) }),
           ...(typeof settings.effortLevel === 'string' ? { effort: settings.effortLevel } : {}),
           // Before every shell command, while a client has a script in force.
           hooks: { PreToolUse: [
@@ -2695,7 +2699,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    */
   const take = async (id: string): Promise<string | undefined> => {
     try {
-      await handle.setModel(id === 'default' ? undefined : id);
+      await handle.setModel(modelId(id));
       return undefined;
     }
     catch (error: unknown) {
@@ -2977,6 +2981,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       })
       .filter((model) => model.id !== '');
     if (options.offerModels) offered = await options.offerModels(offered);
+    else offered = pinnedModels(offered, { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env });
     /*
      * The style the preset names, applied once the CLI is there to take it.
      *
@@ -3518,7 +3523,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const said = typeof value === 'string' ? value : '';
       if (key === 'model') {
         try {
-          await handle.setModel(said === 'default' ? undefined : said);
+          await handle.setModel(modelId(said));
           chosen = said;
           settings.model = said;
           return true;
