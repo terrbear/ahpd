@@ -46,6 +46,7 @@ export const optionsSchema = {
     description: { type: 'string', description: 'One line about what this backend is.' },
     model: { type: 'string', description: 'The model a session that names none runs on.' },
     hostTools: { type: 'boolean', description: "Whether a session is given the host's tools, and its clients' tools, as an MCP server. Default true; skipped for a server that takes no http MCP servers." },
+    idleTimeoutMs: { type: 'integer', minimum: 0, maximum: 2147483647, description: 'Retire a safely idle ACP runtime after this many milliseconds. Defaults to 3600000 (one hour); zero disables retirement.' },
   },
   required: ['command'],
 };

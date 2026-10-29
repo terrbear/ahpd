@@ -118,6 +118,9 @@ export function clientTools() {
 
     owner: (id: string): string | undefined => byClient.get(id)?.owner,
 
+    /** Whether any host-tool request is still waiting for an agent or client. */
+    busy: (): boolean => expecting.size > 0 || [...unclaimed.values()].some((reports) => reports.length > 0) || byClient.size > 0,
+
     complete: (id: string, clientId: string, result: ClientToolResult): boolean => {
       const reported = [...unclaimed.values()].flat().find((one) => one.id === id);
       if (reported !== undefined && reported.owner === clientId) {
