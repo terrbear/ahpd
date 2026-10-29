@@ -16,6 +16,20 @@ const report = (id: string): ToolCall => ({
 
 afterEach(() => { vi.useRealTimers(); });
 
+it('reports agent and client tool work until the result is settled', async () => {
+  const bridge = clientTools();
+  bridge.set([tool]);
+  expect(bridge.busy()).toBe(false);
+  bridge.clientOf(report('call-busy'));
+  expect(bridge.busy()).toBe(true);
+  const pending = bridge.run({ tool, input }, () => {});
+  await Promise.resolve();
+  expect(bridge.busy()).toBe(true);
+  expect(bridge.complete('call-busy', tool.owner!, { text: 'done', ok: true })).toBe(true);
+  await expect(pending).resolves.toEqual({ text: 'done', ok: true });
+  expect(bridge.busy()).toBe(false);
+});
+
 it('removes an expired report waiter before the next read-only invocation', async () => {
   vi.useFakeTimers();
   const bridge = clientTools();

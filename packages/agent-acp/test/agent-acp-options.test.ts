@@ -57,6 +57,7 @@ it.each<[string, unknown]>([
   ['displayName', 5],
   ['description', 5],
   ['model', 5],
+  ['idleTimeoutMs', 'soon'],
 ])('reports %s of the wrong type and skips the plugin', async (key, value) => {
   const { loaded, problems } = await load({ ...VALID, [key]: value });
   expect(problems).toHaveLength(1);

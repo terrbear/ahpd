@@ -70,6 +70,8 @@ export interface AcpOptions {
    * with a line in the log, for a server that does not take HTTP MCP servers.
    */
   hostTools?: boolean;
+  /** Retire a safely idle local ACP runtime after this many milliseconds. Default one hour; zero disables it. */
+  idleTimeoutMs?: number;
 }
 
 /**

@@ -78,6 +78,10 @@ const UNTITLED = 'ACP session';
  * turn, so a session somebody opened and never used costs no subprocess.
  */
 export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatalog): Session {
+  const idleTimeoutMs = options.idleTimeoutMs ?? 3_600_000;
+  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 2_147_483_647) {
+    throw new Error('idleTimeoutMs must be an integer from 0 to 2147483647 milliseconds');
+  }
   const hostId = idOf(start.uri);
   let record = catalog?.get(start.resume ?? hostId);
   const provider = options.provider ?? 'acp';
@@ -87,9 +91,11 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     if (where === 'session' && action.type === 'session/inputNeededSet') {
       const request = bag(action.request);
       pendingInputs.set(String(request.id), structuredClone(request));
+      scheduleIdleRetirement();
     }
     if (where === 'session' && action.type === 'session/inputNeededRemoved') {
       pendingInputs.delete(String(action.id));
+      scheduleIdleRetirement();
     }
     start.emit(where, action);
   };
@@ -141,6 +147,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   const offered = clientTools();
   offered.set(start.tools ?? []);
   const runClientTool = async (call: ClientToolCall) => {
+    invalidateIdleTimer();
     let requestId: string | undefined;
     try {
       return await offered.run(call, (id) => {
@@ -174,12 +181,15 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     }
     finally {
       if (requestId !== undefined) emit('session', { type: 'session/inputNeededRemoved', id: requestId });
+      scheduleIdleRetirement();
     }
   };
   /** The tools server this session opened for the agent, while it has one. */
   let toolsEndpoint: ToolsEndpoint | undefined;
   /** The connection this session spawned, once it has one. */
   let live: AcpConnection | undefined;
+  /** Whether this server can reload its saved conversation after the process exits. */
+  let supportsSessionLoad = false;
   /** The server's own id for this conversation, once `session/new` answered. */
   let acpSessionId: string | undefined = record?.id;
   const inputs = elicitations(emit, start.chatUri, () => ({ sessionId: acpSessionId, turn: mapping }));
@@ -233,12 +243,52 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   }>();
   /** The terminals this session opened for the server, by the server's own id. */
   const terminals = new Map<string, { handle: OpenedTerminal; limit?: number }>();
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleGeneration = 0;
+  let retirement: Promise<void> | undefined;
+  let retirementFailure: Error | undefined;
 
   const messageOf = (why: unknown): string => (why instanceof Error ? why.message : String(why));
+
+  const invalidateIdleTimer = (): void => {
+    idleGeneration++;
+    clearTimeout(idleTimer);
+    idleTimer = undefined;
+  };
+
+  /** Do not retire a runtime while any turn, saved answer, tool or terminal is still owned. */
+  const safelyIdle = (): boolean => !closed && live !== undefined && supportsSessionLoad && acpSessionId !== undefined
+    && active === undefined && queued.length === 0 && pendingInputs.size === 0 && permissions.size === 0
+    && inputs.size() === 0 && terminals.size === 0 && !offered.busy();
+
+  const scheduleIdleRetirement = (): void => {
+    invalidateIdleTimer();
+    if (idleTimeoutMs === 0 || !safelyIdle()) return;
+    const connection = live!;
+    const ticket = idleGeneration;
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      if (ticket !== idleGeneration || live !== connection || !safelyIdle()) return;
+      // Detach first so new work cannot reuse a connection as it is shutting down.
+      live = undefined;
+      opening = undefined;
+      toolsEndpoint?.close();
+      toolsEndpoint = undefined;
+      const stopping = Promise.resolve().then(() => connection.close()).catch((error: unknown) => {
+        retirementFailure = new Error(`${provider}: idle ACP shutdown failed; refusing to spawn a replacement: ${messageOf(error)}`);
+      });
+      const retiring = stopping.finally(() => {
+        if (retirement === retiring) retirement = undefined;
+      });
+      retirement = retiring;
+    }, idleTimeoutMs);
+    idleTimer.unref?.();
+  };
 
   const touch = (): void => {
     modified = new Date().toISOString();
     if (record !== undefined) record.modifiedAt = modified;
+    scheduleIdleRetirement();
   };
 
   /** Say what it is doing, on both channels, the way a session mirrors its chat. */
@@ -446,6 +496,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
 
   /** A shell the agent asked for, opened and listed by the host. */
   const openTerminal = async (request: CreateTerminalRequest): Promise<CreateTerminalResponse> => {
+    invalidateIdleTimer();
     const shells = start.terminals;
     if (shells === undefined) throw new Error(`${provider}: this session has no shells`);
     const env = environmentOf(request);
@@ -501,6 +552,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   const releaseTerminal = async (request: ReleaseTerminalRequest): Promise<ReleaseTerminalResponse> => {
     terminalOf(request.terminalId).handle.release();
     terminals.delete(request.terminalId);
+    scheduleIdleRetirement();
     return {};
   };
 
@@ -668,9 +720,14 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    * for, with nothing on screen saying so.
    */
   const open = (): Promise<{ connection: AcpConnection; sessionId: string }> => {
+    invalidateIdleTimer();
     if (opening !== undefined) return opening;
     const pending = (async () => {
+      await retirement;
+      if (retirementFailure !== undefined) throw retirementFailure;
+      if (closed) throw new Error(`${provider}: the session is closed`);
       const moved = await placed();
+      if (closed) throw new Error(`${provider}: the session is closed`);
       const connection = connectAcp({
         customInstructions: instructions !== undefined,
         command: moved?.command ?? options.command,
@@ -709,11 +766,14 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
         inputs.cancel();
       });
       const handshake = await connection.initialize();
+      if (closed || live !== connection) throw new Error(`${provider}: the session closed while the ACP server was opening`);
+      supportsSessionLoad = handshake.agentCapabilities?.loadSession === true;
       const instructionMeta = customInstructionsMeta(instructions, handshake);
       const extra = start.additional !== undefined && start.additional.length > 0
         ? { additionalDirectories: start.additional }
         : {};
       const mcpServers = await mcpServersFor(handshake.agentCapabilities?.mcpCapabilities);
+      if (closed || live !== connection) throw new Error(`${provider}: the session closed while the ACP server was opening`);
       const requestedMode = settings.permissionMode;
       const resume = acpSessionId ?? start.resume;
       if (resume !== undefined) {
@@ -1025,6 +1085,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     queuedMessageId?: string,
   ): void => {
     if (closed || active !== undefined) return;
+    invalidateIdleTimer();
     cancelRequested = false;
     failed = undefined;
     if (title === UNTITLED && command !== '') {
@@ -1143,6 +1204,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     queuedMessageId?: string,
   ): void => {
     if (closed || active !== undefined) return;
+    invalidateIdleTimer();
     cancelRequested = false;
     failed = undefined;
     if (title === UNTITLED && text !== '') {
@@ -1377,8 +1439,11 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     },
 
     answer: (id, accepted, answers) => {
-      if (asynchronous.has(id)) return asynchronous.answer(id, accepted, answers);
-      return inputs.answer(id, accepted, answers);
+      const answer = asynchronous.has(id)
+        ? asynchronous.answer(id, accepted, answers)
+        : inputs.answer(id, accepted, answers);
+      touch();
+      return answer;
     },
 
     /**
@@ -1447,8 +1512,12 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       if (toolsEndpoint === undefined && next.some((tool) => tool.owner !== undefined)) {
         await open();
       }
-      if (toolsEndpoint === undefined) return !next.some((tool) => tool.owner !== undefined);
+      if (toolsEndpoint === undefined) {
+        scheduleIdleRetirement();
+        return !next.some((tool) => tool.owner !== undefined);
+      }
       toolsEndpoint.setTools(next);
+      scheduleIdleRetirement();
       return true;
     },
     toolCallOwner: (toolCallId) => offered.owner(toolCallId),
@@ -1459,6 +1528,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
 
     close: () => {
       closed = true;
+      invalidateIdleTimer();
       inputs.cancel();
       offered.release('The session closed before a client answered this tool call');
       toolsEndpoint?.close();
@@ -1482,7 +1552,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       // record of it. Only the live connection goes.
       // A turn still open has nobody left to answer it.
       if (active !== undefined) finish(String(active.id), 'cancelled');
-      return gone;
+      return retirement ?? gone;
     },
   };
 }
