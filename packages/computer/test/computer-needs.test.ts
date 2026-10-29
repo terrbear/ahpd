@@ -59,14 +59,14 @@ interface Held {
   calls: string[][];
 }
 
-/** Wait for each plugin's startup listing and its fixture lock to finish. */
-const answered = async (state: string, calls: number): Promise<void> => {
+const answered = async (state: string, listings: number): Promise<void> => {
   const limit = Date.now() + 4_000;
-  while (!existsSync(state)
-    || (JSON.parse(readFileSync(state, 'utf8')) as Held).calls.length < calls
-    || existsSync(`${state}.lock`)) {
+  const recorded = (): number => (existsSync(state)
+    ? (JSON.parse(readFileSync(state, 'utf8')) as Held).calls.filter((call) => call[0] === 'ps').length
+    : 0);
+  while (recorded() < listings || existsSync(`${state}.lock`)) {
     if (Date.now() > limit) {
-      throw new Error(`the scripted docker never finished ${calls} calls on ${state}`);
+      throw new Error(`the scripted docker never finished ${listings} listings on ${state}`);
     }
     await new Promise((resolve) => { setTimeout(resolve, 5); });
   }
@@ -228,8 +228,6 @@ it('refuses a missing path, an unknown agent, a shared target and a missing fold
   const noFolder = await bad(withAgents({ claude: { agents: ['claude'], folder: gone } }), [agent('claude')], { profile: 'claude' });
   expect((noFolder as Error).message).toMatch(/folder names .* and that path is not there/);
 
-  // Each load starts a listing without awaiting it. Let the fixture release its
-  // shared state file before afterEach removes the directory they write into.
   await answered(state, 4);
 });
 
