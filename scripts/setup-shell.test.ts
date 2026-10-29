@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 
@@ -76,11 +76,13 @@ it.each([
       connectionTokenFile: relativeToken,
       plugins: [{ name: '/custom/adapter', options: { provider: 'codex', command: '/custom/adapter' } }],
     }));
+    const env = { ...process.env, HOME: home, REAL_NODE: process.execPath, PATH: `${bin}:${process.env.PATH}` };
+    delete env.AHPD_CHANNEL;
     const result = spawnSync('bash', ['-c', setupScript], {
       cwd: process.cwd(),
       encoding: 'utf8',
       timeout: 30_000,
-      env: { ...process.env, HOME: home, REAL_NODE: process.execPath, PATH: `${bin}:${process.env.PATH}` },
+      env,
     });
     expect(result.error, result.stderr).toBeUndefined();
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -96,4 +98,126 @@ it.each([
   } finally {
     listener.child.kill('SIGTERM');
   }
+});
+
+/** The files the installer needs after a clone, or in a checkout that already exists. */
+function seedCheckout(dir: string) {
+  mkdirSync(join(dir, 'scripts'), { recursive: true });
+  mkdirSync(join(dir, 'packages/server/dist'), { recursive: true });
+  mkdirSync(join(dir, 'packages/agent-claude'), { recursive: true });
+  mkdirSync(join(dir, 'packages/agent-acp'), { recursive: true });
+  mkdirSync(join(dir, '.git'), { recursive: true });
+  writeFileSync(join(dir, 'scripts/codex-acp.json'), JSON.stringify({ repository: 'https://github.com/terrbear/codex-acp.git', revision }));
+  copyFileSync(new URL('./configure-codex-acp.mjs', import.meta.url), join(dir, 'scripts/configure-codex-acp.mjs'));
+  writeFileSync(join(dir, 'packages/server/dist/main.js'), 'process.exit(0);');
+}
+
+async function runInstaller(options: { branch?: string; channel?: string; existing?: boolean; healthy?: boolean }) {
+  const root = mkdtempSync(join(process.cwd(), '.ahpd-shell-test-'));
+  roots.push(root);
+  const home = join(root, 'home');
+  const bin = join(root, 'bin');
+  const gitLog = join(root, 'git.log');
+  const template = join(root, 'template');
+  mkdirSync(bin, { recursive: true });
+  seedCheckout(template);
+  if (options.existing) seedCheckout(join(home, '.a3', 'ahpd-src'));
+  executable(join(bin, 'git'), `#!/bin/sh
+printf '%s\\n' "$*" >> "$GIT_LOG"
+if [ "$1" = clone ]; then
+  mkdir -p "$5"
+  cp -a "$GIT_TEMPLATE/." "$5/"
+  exit 0
+fi
+case "$3:$4" in
+  remote:get-url) echo https://github.com/terrbear/ahpd.git ;;
+  branch:--show-current) printf '%s\\n' "$GIT_BRANCH" ;;
+  status:--porcelain) ;;
+esac
+exit 0
+`);
+  executable(join(bin, 'pnpm'), '#!/bin/sh\nexit 0\n');
+  executable(join(bin, 'claude'), '#!/bin/sh\nexit 0\n');
+  executable(join(bin, 'systemctl'), '#!/bin/sh\nexit 0\n');
+  executable(join(bin, 'systemd-analyze'), '#!/bin/sh\nexit 0\n');
+  executable(join(bin, 'seq'), '#!/bin/sh\necho 1\n');
+  executable(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
+  executable(join(bin, 'node'), `#!/bin/sh
+case "$1" in
+  */scripts/install-codex-acp.mjs)
+    destination="$2"
+    mkdir -p "$destination/dist" "$destination/node_modules/.bin"
+    printf '#!/bin/sh\\nexit 0\\n' > "$destination/dist/index.js"
+    chmod 755 "$destination/dist/index.js"
+    ln -s ../../dist/index.js "$destination/node_modules/.bin/codex"
+    ;;
+  *) exec "${process.execPath}" "$@" ;;
+esac
+`);
+  const listener = options.healthy === false ? undefined : await listen('127.0.0.1');
+  if (listener) {
+    const ahpdHome = join(home, '.a3', 'ahpd');
+    mkdirSync(ahpdHome, { recursive: true });
+    writeFileSync(join(ahpdHome, 'token'), 'synthetic-token-not-a-credential');
+    writeFileSync(join(ahpdHome, 'config.json'), JSON.stringify({
+      port: listener.port, host: '127.0.0.1', paths: ['/srv/only-this-workspace'], connectionTokenFile: 'token',
+    }));
+  }
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${bin}:${process.env.PATH}`,
+    GIT_LOG: gitLog,
+    GIT_BRANCH: options.branch ?? 'main',
+    GIT_TEMPLATE: template,
+  };
+  if (options.channel === undefined) delete env.AHPD_CHANNEL;
+  else env.AHPD_CHANNEL = options.channel;
+  try {
+    const result = spawnSync('bash', ['-c', setupScript!], {
+      cwd: process.cwd(), encoding: 'utf8', timeout: 30_000, env,
+    });
+    return { result, log: existsSync(gitLog) ? readFileSync(gitLog, 'utf8') : '' };
+  } finally {
+    listener?.child.kill('SIGTERM');
+  }
+}
+
+it('rejects an unknown channel before touching the checkout', async () => {
+  const { result, log } = await runInstaller({ channel: 'beta', healthy: false });
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+  expect(result.stdout).toContain('AHPD_CHANNEL must be main or develop');
+  expect(log).toBe('');
+});
+
+it('refuses to switch an existing checkout via AHPD_CHANNEL', async () => {
+  const { result } = await runInstaller({ existing: true, branch: 'main', channel: 'develop', healthy: false });
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+  expect(result.stdout).toContain('is on main');
+  expect(result.stdout).toContain('does not switch an existing checkout');
+  expect(result.stdout).toContain('check out develop');
+});
+
+it('refuses a checkout that is neither main nor develop', async () => {
+  const { result } = await runInstaller({ existing: true, branch: 'feature', healthy: false });
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
+  expect(result.stdout).toContain('is not on main or develop');
+});
+
+it('fast-forwards an existing develop checkout and leaves main alone', async () => {
+  const { result, log } = await runInstaller({ existing: true, branch: 'develop' });
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  expect(log).toContain('fetch origin develop');
+  expect(log).toContain('merge --ff-only origin/develop');
+  expect(log).not.toContain('origin/main');
+  expect(log).not.toContain('origin main');
+});
+
+it('clones develop only when asked, and otherwise clones main explicitly', async () => {
+  const develop = await runInstaller({ channel: 'develop' });
+  expect(develop.result.status, `${develop.result.stdout}\n${develop.result.stderr}`).toBe(0);
+  expect(develop.log).toContain('clone --branch develop https://github.com/terrbear/ahpd.git');
+  const main = await runInstaller({});
+  expect(main.result.status, `${main.result.stdout}\n${main.result.stderr}`).toBe(0);
+  expect(main.log).toContain('clone --branch main https://github.com/terrbear/ahpd.git');
 });
