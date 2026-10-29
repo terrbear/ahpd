@@ -5,14 +5,14 @@ description: One-time setup for the ahpd bundle. Installs the ahpd agent host wi
 
 # Set up ahpd for Anton
 
-This installs the [terrbear/ahpd](https://github.com/terrbear/ahpd) fork of the Agent Host Protocol server, so Anton can run Claude Code and Codex sessions on this machine. The fork contains the session and model-listing fixes used by the existing Anton setup. Managed installations automatically adopt CI-validated ahpd releases when idle; set `{"enabled":false}` in `~/.a3/ahpd/self-update.json` to opt out. Node, custom plugins, and separately pinned Codex ACP installations remain operator-managed.
+This installs the [terrbear/ahpd](https://github.com/terrbear/ahpd) fork of the Agent Host Protocol server, so Anton can run Claude Code and Codex sessions on this machine. The fork contains the session and model-listing fixes used by the existing Anton setup. Managed installations follow the branch checked out in `~/.a3/ahpd-src`: `develop` adopts the CI-validated `anton-ahpd-develop` tag, and `main` (the default) adopts `anton-ahpd`, which moves only after that commit is promoted to `main`. Set `{"enabled":false}` in `~/.a3/ahpd/self-update.json` to opt out. Node, custom plugins, and the Codex ACP adapter pinned by commit in `scripts/codex-acp.json` remain operator-managed. The pin does not follow the channel.
 
 Tell the user in one or two sentences what is about to happen, then do these steps in order. Stop and report the error if a step fails; do not improvise workarounds.
 
 1. **Check prerequisites.** macOS or Linux with systemd, Git, pnpm through Corepack, Node.js 22 or newer on PATH, and Claude Code installed and signed in (`claude` works in a terminal). The Codex ACP adapter is built from the full commit pinned in `~/.a3/ahpd-src/scripts/codex-acp.json`; Codex uses its own sign-in via the active install's `node_modules/.bin/codex login` (normally `~/.a3/ahpd/codex-acp/<pinned-commit>/node_modules/.bin/codex`, or `<pinned-commit>-managed` when preserving an older markerless directory), or an existing login in `~/.codex`. The script checks Git, pnpm, Node.js and the OS itself.
 
 2. **Install and start ahpd.** Run this script exactly as written with bash. It is safe to run again: it reuses the existing port and token, reuses only an integrity-checked adapter build for the pinned commit, and rolls back config/service files if the new service does not become healthy.
-   - Clones or fast-forwards `terrbear/ahpd` in `~/.a3/ahpd-src`, installs its locked pnpm dependencies and builds `packages/server`, `packages/agent-claude`, and `packages/agent-acp`. Builds the pinned `terrbear/codex-acp` commit into `~/.a3/ahpd/codex-acp/<commit>` using its frozen npm lockfile; an integrity-matched install is reused, a mismatched marked install is staged before replacement, and unmarked directories are never overwritten. If the canonical commit directory is markerless, it is left untouched while setup builds a verified `<commit>-managed` sibling. No floating npm package or global install is used.
+   - Clones `terrbear/ahpd` into `~/.a3/ahpd-src` on `main`, or on `develop` when `AHPD_CHANNEL=develop`. A later run fast-forwards whichever of those two branches is already checked out. It does not switch an existing checkout. Installs its locked pnpm dependencies and builds `packages/server`, `packages/agent-claude`, and `packages/agent-acp`. Builds the pinned `terrbear/codex-acp` commit into `~/.a3/ahpd/codex-acp/<commit>` using its frozen npm lockfile; an integrity-matched install is reused, a mismatched marked install is staged before replacement, and unmarked directories are never overwritten. If the canonical commit directory is markerless, it is left untouched while setup builds a verified `<commit>-managed` sibling. No floating npm package or global install is used. The adapter commit stays the pin in `scripts/codex-acp.json` on either channel.
    - Preserves existing ahpd config and the configured `paths` allowlist. It migrates the known obsolete npm shim, a marker-backed pinned install, or the legacy markerless layout only when its package identity and executable match; a custom Codex adapter remains untouched. The old npm package tree is left unused rather than removing unrelated packages.
    - Uses port 9187 or the next free port only for a new config, binds to 127.0.0.1, and uses `~/.a3/ahpd/work` as the fresh-install default.
    - ahpd creates the connection token at the configured `connectionTokenFile` (owner-only); for a fresh config this is `~/.a3/ahpd/token`. Existing relative token paths are resolved from `~/.a3/ahpd/config.json`.
@@ -35,6 +35,12 @@ case "$(uname -s)" in
 esac
 command -v git >/dev/null || { echo "ERROR: git is not on PATH"; exit 1; }
 command -v pnpm >/dev/null || { echo "ERROR: pnpm is not on PATH; enable it with Corepack"; exit 1; }
+if [ "${AHPD_CHANNEL+set}" = set ]; then
+  case "$AHPD_CHANNEL" in
+    main|develop) ;;
+    *) echo "ERROR: AHPD_CHANNEL must be main or develop"; exit 1 ;;
+  esac
+fi
 SRC="$HOME/.a3/ahpd-src"
 mkdir -p "$HOME/.a3"
 if [ -e "$SRC" ]; then
@@ -44,11 +50,19 @@ if [ -e "$SRC" ]; then
     *) echo "ERROR: $SRC has an unexpected origin"; exit 1 ;;
   esac
   [ -z "$(git -C "$SRC" status --porcelain)" ] || { echo "ERROR: $SRC has local changes"; exit 1; }
-  [ "$(git -C "$SRC" branch --show-current)" = main ] || { echo "ERROR: $SRC is not on main"; exit 1; }
-  git -C "$SRC" fetch origin main
-  git -C "$SRC" merge --ff-only origin/main
+  BRANCH="$(git -C "$SRC" branch --show-current)"
+  case "$BRANCH" in
+    main|develop) ;;
+    *) echo "ERROR: $SRC is not on main or develop"; exit 1 ;;
+  esac
+  if [ "${AHPD_CHANNEL+set}" = set ] && [ "$AHPD_CHANNEL" != "$BRANCH" ]; then
+    echo "ERROR: $SRC is on $BRANCH. AHPD_CHANNEL does not switch an existing checkout; check out $AHPD_CHANNEL in $SRC and run setup again."
+    exit 1
+  fi
+  git -C "$SRC" fetch origin "$BRANCH"
+  git -C "$SRC" merge --ff-only "origin/$BRANCH"
 else
-  git clone https://github.com/terrbear/ahpd.git "$SRC"
+  git clone --branch "${AHPD_CHANNEL:-main}" https://github.com/terrbear/ahpd.git "$SRC"
 fi
 (
   cd "$SRC"
@@ -182,3 +196,18 @@ exit 1
    - Call `anton.builtin.settingsWrite` with `{"section":"ahp","field":"enabled","value":true}`.
 
 4. **Tell the user how to use it.** In New Chat, pick the localhost host, a working folder (or `~/.a3/ahpd/work`), and **Claude Code** or **Codex** in the model picker (Codex needs its own sign-in first). ahpd starts automatically at login. If sessions fail, check `~/.a3/ahpd/ahpd.log` and that `claude` (or Codex) is signed in. To remove everything, uninstall the bundle; its teardown skill stops the service and cleans up.
+
+## Release channel
+
+The updater follows the branch left checked out in `~/.a3/ahpd-src`. `develop` pulls the `anton-ahpd-develop` tag, which CI moves only after a successful push to `develop`. `main` and any other checkout pull `anton-ahpd`, which CI moves only after a successful push to `main`. Promoting develop is merging it into `main`. Main installs then see the change; they never fetch the develop tag. The Codex ACP pin in `scripts/codex-acp.json` is the same on both channels.
+
+To switch an existing install, check out the other branch and restart the service:
+
+```bash
+git -C ~/.a3/ahpd-src fetch origin
+git -C ~/.a3/ahpd-src switch develop
+git -C ~/.a3/ahpd-src merge --ff-only origin/develop
+systemctl --user restart anton-ahpd.service
+```
+
+Use `main` and `origin/main` to switch back. On macOS, boot out and bootstrap `gui/$(id -u)/io.trustgrid.anton.ahpd` from `~/Library/LaunchAgents/io.trustgrid.anton.ahpd.plist` instead of restarting the systemd unit. A detached checkout is treated as `main`.

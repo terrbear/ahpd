@@ -91,6 +91,17 @@ it('times out a candidate that never becomes ready and falls back', async () => 
   expect(await result).toMatchObject({ current: '/source' });
 });
 
+it('reads the release channel from the source checkout, not the detached release', async () => {
+  const f = fixture();
+  const result = cycle({ ...f.options, current: '/release' }, f.dependencies);
+  await until(() => f.dependencies.start.mock.calls.length > 0);
+  f.child.emit('message', { type: 'managed-ready' });
+  await until(() => f.dependencies.prepare.mock.calls.length > 0);
+  expect(f.dependencies.prepare).toHaveBeenCalledWith(f.root, '/release', expect.any(AbortSignal), '/source');
+  f.child.emit('exit', 1);
+  await expect(result).rejects.toThrow('exited unexpectedly');
+});
+
 it('rejects a ready candidate that silently lost a provider', async () => {
   const f = fixture();
   writeFileSync(join(f.root, 'managed-update-state.json'), JSON.stringify({ current: '/source', providers: ['claude', 'codex'] }));
