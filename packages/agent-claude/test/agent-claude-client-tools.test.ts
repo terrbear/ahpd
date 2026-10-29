@@ -322,12 +322,12 @@ for (const order of ['approval-before-canonical', 'canonical-before-approval', '
   });
 }
 
-const claimFixture = async (definition = shellTool(shellOwner)) => {
+const claimFixture = async (definition = shellTool(shellOwner), onAction?: (action: Bag) => void) => {
   const sent: Bag[] = [];
   const session = createSession({
     uri: 'claude:/claim-lifecycle', chatUri: 'ahp-chat:/claim-lifecycle',
     cwd: mkdtempSync(join(tmpdir(), 'ahpd-claim-lifecycle-')),
-    emit: (_channel, action) => { sent.push(structuredClone(action) as Bag); },
+    emit: (_channel, action) => { sent.push(structuredClone(action) as Bag); onAction?.(action as Bag); },
     tools: [definition],
   });
   onTestFinished(() => { session.close(); });
@@ -429,4 +429,92 @@ it.each(['canonical-first', 'handler-first'] as const)('matches MCP-validated re
   expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'validated', toolInput: JSON.stringify(parsed) });
   expect(session.completeToolCall?.('validated', shellOwner, { text: 'validated receipt', ok: true })).toBe(true);
   await expect(result).resolves.toMatchObject({ content: [{ text: 'validated receipt' }] });
+});
+
+for (const order of ['permission-first', 'canonical-first'] as const) {
+  it.each([true, false])(`does not let a pending ${order} call satisfy another approved handler (identical input: %s)`, async (identical) => {
+    const { session, tool, canonical, approve, executions } = await claimFixture();
+    const pendingInput = { command: 'pending' };
+    const approvedInput = identical ? pendingInput : { command: 'approved' };
+    if (order === 'canonical-first') await canonical('pending-b', pendingInput);
+    const pendingAnswer = sdk.canUseTool!('mcp__ahp__launch_shell', pendingInput, { toolUseID: 'pending-b' });
+    await until(() => (session.sessionState().inputNeeded as Bag[] | undefined)?.some((request) => request.id === 'pending-b') === true);
+    await canonical('pending-b', pendingInput);
+    await approve('approved-a', approvedInput);
+    const result = tool.handler(approvedInput);
+    await canonical('pending-b', pendingInput);
+    expect(executions()).toHaveLength(0);
+    await canonical('approved-a', approvedInput);
+    await until(() => executions().length === 1);
+    expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'approved-a', contributor: { kind: 'client', clientId: shellOwner } });
+    expect(session.completeToolCall?.('pending-b', shellOwner, { text: 'must not execute', ok: true })).toBe(false);
+    expect(session.completeToolCall?.('approved-a', otherShellOwner, { text: 'wrong owner', ok: true })).toBe(false);
+    expect(session.completeToolCall?.('approved-a', shellOwner, { text: 'approved receipt', ok: true })).toBe(true);
+    await expect(result).resolves.toMatchObject({ content: [{ text: 'approved receipt' }] });
+    session.confirm('pending-b', false);
+    await expect(pendingAnswer).resolves.toMatchObject({ behavior: 'deny' });
+    await approve('approved-c', pendingInput);
+    const next = tool.handler(pendingInput);
+    await canonical('pending-b', pendingInput);
+    await canonical('approved-c', pendingInput);
+    await until(() => executions().length === 2);
+    expect(executions()[1]!.toolCall).toMatchObject({ toolCallId: 'approved-c' });
+    expect(session.completeToolCall?.('approved-c', shellOwner, { text: 'next receipt', ok: true })).toBe(true);
+    await expect(next).resolves.toMatchObject({ content: [{ text: 'next receipt' }] });
+  });
+}
+
+it.each(['during-canonical', 'after-canonical'] as const)('reserves an approved handler ID when another permission arrives %s', async (order) => {
+  const input = { command: 'identical' };
+  let pendingAnswer: Promise<unknown> | undefined;
+  const askB = () => { pendingAnswer = sdk.canUseTool!('mcp__ahp__launch_shell', input, { toolUseID: 'pending-b' }); };
+  const { session, tool, canonical, approve, executions } = await claimFixture(shellTool(shellOwner), (action) => {
+    if (order === 'during-canonical' && action.type === 'chat/toolCallStart' && action.toolCallId === 'pending-b') askB();
+  });
+  await approve('approved-a', input);
+  const result = tool.handler(input);
+  await canonical('pending-b', input);
+  if (order === 'after-canonical') askB();
+  expect(pendingAnswer).toBeDefined();
+  expect(executions()).toHaveLength(0);
+  await canonical('approved-a', input);
+  await until(() => executions().length === 1);
+  expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'approved-a' });
+  session.confirm('pending-b', false);
+  await expect(pendingAnswer).resolves.toMatchObject({ behavior: 'deny' });
+  expect(session.completeToolCall?.('pending-b', shellOwner, { text: 'unapproved', ok: true })).toBe(false);
+  expect(session.completeToolCall?.('approved-a', shellOwner, { text: 'A receipt', ok: true })).toBe(true);
+  await expect(result).resolves.toMatchObject({ content: [{ text: 'A receipt' }] });
+});
+
+it('invalidates a permission aborted before its prompt for a later SDK-autoallowed handler', async () => {
+  const { session, tool, canonical, executions } = await claimFixture();
+  const input = { command: 'identical' };
+  const signal = AbortSignal.abort();
+  await expect(sdk.canUseTool!('mcp__ahp__launch_shell', input, { toolUseID: 'aborted', signal })).resolves.toMatchObject({ behavior: 'deny' });
+  await canonical('aborted', input);
+  const result = tool.handler(input);
+  await canonical('autoallowed', input);
+  await until(() => executions().length === 1);
+  expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'autoallowed' });
+  expect(session.completeToolCall?.('autoallowed', shellOwner, { text: 'auto receipt', ok: true })).toBe(true);
+  await expect(result).resolves.toMatchObject({ content: [{ text: 'auto receipt' }] });
+});
+
+it.each(['cancel', 'disconnect'] as const)('tombstones an allowed-list reservation without a transcript row on %s', async (ending) => {
+  const { session, tool, canonical, executions } = await claimFixture();
+  const input = { command: 'identical' };
+  await session.setConfig?.('permissions', { allow: ['mcp__ahp__launch_shell'], deny: [] });
+  await expect(sdk.canUseTool!('mcp__ahp__launch_shell', input, { toolUseID: 'early-allow' })).resolves.toMatchObject({ behavior: 'allow' });
+  if (ending === 'cancel') {
+    session.cancel('claim-turn');
+    session.begin('next-turn', 'Continue');
+  } else session.clientGone?.(shellOwner);
+  await canonical('early-allow', input);
+  const result = tool.handler(input);
+  await canonical('autoallowed-next', input);
+  await until(() => executions().length === 1);
+  expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'autoallowed-next' });
+  expect(session.completeToolCall?.('autoallowed-next', shellOwner, { text: 'next receipt', ok: true })).toBe(true);
+  await expect(result).resolves.toMatchObject({ content: [{ text: 'next receipt' }] });
 });

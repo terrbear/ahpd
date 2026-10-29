@@ -994,7 +994,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * other.
    */
   const unclaimed = new Map<string, { id: string; input: string }[]>();
-  const expecting = new Map<string, { input: string; settle: (id: string | undefined) => void }[]>();
+  const expecting = new Map<string, { id?: string; input: string; settle: (id: string | undefined) => void }[]>();
   let claimGeneration = 0;
   const clientClaimGenerations = new Map<string, number>();
 
@@ -1002,8 +1002,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
   // permission callback can open that row before the canonical frame arrives.
   // Keep the id after it is claimed so replayed frames cannot enqueue it again.
   const registeredCalls = new Set<string>();
+  const awaitingApproval = new Map<string, { toolName: string; input: string }>();
+  const approvedClaims = new Map<string, { toolName: string; input: string; taken: boolean }>();
   const discardOpening = (toolName: string, id: string): void => {
     registeredCalls.add(id);
+    awaitingApproval.delete(id);
+    approvedClaims.delete(id);
     unclaimed.set(toolName, (unclaimed.get(toolName) ?? []).filter((one) => one.id !== id));
   };
 
@@ -1018,27 +1022,58 @@ export function createSession(options: ClaudeSessionOptions): Session {
         : value);
   };
 
-  const opening = (toolName: string, id: string, input: Bag): void => {
-    if (closed || registeredCalls.has(id)) return;
-    registeredCalls.add(id);
+  const eligibleOpening = (toolName: string, id: string, written: string): void => {
     const waiting = expecting.get(toolName) ?? [];
-    const written = claimInput(toolName, input);
-    const at = waiting.findIndex((one) => one.input === written);
+    const at = waiting.findIndex((one) => one.input === written
+      && (one.id === id || (one.id === undefined && !approvedClaims.has(id))));
     const first = at >= 0 ? waiting.splice(at, 1)[0] : undefined;
     expecting.set(toolName, waiting);
     if (first) { first.settle(id); return; }
     unclaimed.set(toolName, [...(unclaimed.get(toolName) ?? []), { id, input: written }]);
   };
 
+  const opening = (toolName: string, id: string, input: Bag): void => {
+    if (closed || registeredCalls.has(id)) return;
+    registeredCalls.add(id);
+    const written = claimInput(toolName, input);
+    // A canonical frame establishes identity, not permission. Another
+    // approved handler with identical arguments must not consume this ID.
+    if (pending.has(id)) awaitingApproval.set(id, { toolName, input: written });
+    else eligibleOpening(toolName, id, written);
+  };
+
+  const holdOpening = (toolName: string, id: string): void => {
+    const queued = unclaimed.get(toolName) ?? [];
+    const at = queued.findIndex((one) => one.id === id);
+    if (at < 0) return;
+    const held = queued.splice(at, 1)[0]!;
+    awaitingApproval.set(id, { toolName, input: held.input });
+  };
+
+  const approveOpening = (toolName: string, id: string, input: Bag): void => {
+    // Reserve the permission's ID before its handler can start. Even a
+    // canonical frame whose permission has not arrived cannot steal it.
+    if (!approvedClaims.has(id)) approvedClaims.set(id, { toolName, input: claimInput(toolName, input), taken: false });
+    const held = awaitingApproval.get(id);
+    if (!held) return;
+    awaitingApproval.delete(id);
+    eligibleOpening(held.toolName, id, held.input);
+  };
+
   const claim = (toolName: string, input: Bag): Promise<string | undefined> => {
     const open = unclaimed.get(toolName) ?? [];
     const written = claimInput(toolName, input);
-    const at = open.findIndex((one) => one.input === written);
+    const reservation = [...approvedClaims.entries()].find(([, one]) => !one.taken && one.toolName === toolName && one.input === written);
+    if (reservation) reservation[1].taken = true;
+    const reservedId = reservation?.[0];
+    const at = open.findIndex((one) => reservedId !== undefined
+      ? one.id === reservedId
+      : one.input === written && !approvedClaims.has(one.id) && !pending.has(one.id));
     const took = at >= 0 ? open.splice(at, 1)[0] : undefined;
     unclaimed.set(toolName, open);
     if (took !== undefined) return Promise.resolve(took.id);
     return new Promise((resolve) => {
-      expecting.set(toolName, [...(expecting.get(toolName) ?? []), { input: written, settle: resolve }]);
+      expecting.set(toolName, [...(expecting.get(toolName) ?? []), { ...(reservedId !== undefined ? { id: reservedId } : {}), input: written, settle: resolve }]);
     });
   };
 
@@ -1064,6 +1099,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
         const contributor = bag(bag(part.toolCall).contributor);
         if (contributor.kind === 'client' && (whose === undefined || contributor.clientId === whose)) registeredCalls.add(id);
       }
+    }
+    for (const [id, held] of approvedClaims) {
+      if (whose !== undefined && providedBy(held.toolName) !== whose) continue;
+      registeredCalls.add(id);
+      approvedClaims.delete(id);
+    }
+    for (const [id, held] of awaitingApproval) {
+      if (whose === undefined || providedBy(held.toolName) === whose) awaitingApproval.delete(id);
     }
     for (const name of new Set([...expecting.keys(), ...unclaimed.keys()])) {
       if (whose !== undefined && providedBy(name) !== whose) continue;
@@ -2241,9 +2284,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const canUseTool = async (toolName: string, raw: Bag, asked?: Bag): Promise<unknown> => {
+    const refuse = (message: string) => {
+      const id = str(bag(asked).toolUseID);
+      if (id !== undefined && providedBy(toolName) !== undefined) discardOpening(toolName, id);
+      return { behavior: 'deny', message };
+    };
     const scopeApproval = jiraIssueMutation(toolName, raw, declared);
     if (scopeApproval?.keys.length === 0) {
-      return { behavior: 'deny', message: 'AHP blocked this Jira/Atlassian mutation: include the exact existing issue key in the tool input, then retry.' };
+      return refuse('AHP blocked this Jira/Atlassian mutation: include the exact existing issue key in the tool input, then retry.');
     }
     /*
      * Answered from the lists, before anybody is asked.
@@ -2256,10 +2304,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * for a decision made before the turn began.
      */
     const already = settled(toolName);
-    if (already === 'allow' && scopeApproval === undefined) return { behavior: 'allow', updatedInput: raw };
-    if (already === 'deny') return { behavior: 'deny', message: `${toolName} is denied for this session` };
+    if (already === 'allow' && scopeApproval === undefined) {
+      const id = str(bag(asked).toolUseID);
+      if (id !== undefined && providedBy(toolName) !== undefined) approveOpening(toolName, id, raw);
+      return { behavior: 'allow', updatedInput: raw };
+    }
+    if (already === 'deny') return refuse(`${toolName} is denied for this session`);
     const abortSignal = bag(asked).signal as AbortSignal | undefined;
-    if (abortSignal?.aborted) return { behavior: 'deny', message: 'AHP confirmation was aborted before it was requested' };
+    if (abortSignal?.aborted) return refuse('AHP confirmation was aborted before it was requested');
     return await new Promise((settle) => {
       const about = bag(asked);
       /*
@@ -2405,13 +2457,17 @@ export function createSession(options: ClaudeSessionOptions): Session {
         settle: (result) => {
           // A denied call has no SDK handler. Do not leave its canonical
           // registration for a later call with the same name/input to claim.
-          if (result.behavior !== 'allow' && contributor?.kind === 'client') discardOpening(toolName, id);
+          if (contributor?.kind === 'client') {
+            if (result.behavior === 'allow') approveOpening(toolName, id, raw);
+            else discardOpening(toolName, id);
+          }
           settle(result.behavior === 'allow'
             ? { behavior: 'allow', updatedInput: raw, ...(scopeApproval !== undefined || result.updatedPermissions === undefined ? {} : { updatedPermissions: result.updatedPermissions }) }
             : result);
         },
       };
       pending.set(id, pendingInput);
+      if (contributor?.kind === 'client') holdOpening(toolName, id);
       let requestPublished = false;
       const abort = (): void => {
         const waiting = pending.get(id);
