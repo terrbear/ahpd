@@ -1537,7 +1537,7 @@ describe('what the harness offers', () => {
      * and a schema a client draws as a control that changes nothing is worse
      * than no control at all.
      */
-    expect(sdk.modelsSet).toContain('sonnet');
+    expect(sdk.modelsSet).toContain('claude-sonnet-5-5');
     expect(sdk.effortsSet).toContain('xhigh');
     // And the session-wide control is told, because the CLI holds one effort
     // setting for the whole query: two controls describing different futures
@@ -2150,7 +2150,7 @@ describe('choosing a model', () => {
       },
     });
     await settle();
-    expect(sdk.modelsSet).toEqual(['haiku']);
+    expect(sdk.modelsSet).toEqual(['claude-haiku-5-5']);
 
     const chat = (await client.handle({ method: 'subscribe', params: { channel: 'ahp-chat:/live' } }) as {
       snapshot: { state: { activeTurn: { message: { model?: { id: string } } } } };

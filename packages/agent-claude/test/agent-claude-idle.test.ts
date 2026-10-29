@@ -416,3 +416,17 @@ it('records an actionable failed resume turn without replaying any prompt or sta
   await vi.advanceTimersByTimeAsync(1_000);
   expect(sdk.runs).toHaveLength(2);
 });
+
+
+it('restarts an evicted query with the pinned model and its context suffix', async () => {
+  const held = session({ idleTimeoutMs: 100 });
+  held.begin('first', 'Hello', { id: 'sonnet[1m]' });
+  await settle();
+  await complete();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(sdk.runs[0]!.closed).toBe(true);
+  held.begin('next', 'Continue');
+  await settle();
+  expect(sdk.runs[1]!.options.model).toBe('claude-sonnet-5-5[1m]');
+  expect(held.settings!().model).toBe('sonnet[1m]');
+});

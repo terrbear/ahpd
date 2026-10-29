@@ -119,3 +119,29 @@ export const offeredModels = <T extends OfferedModel>(
   if (own === undefined) return [...cli];
   return keepCliModels === true ? unique<T | OfferedModel>([...cli, ...own]) : [...own];
 };
+
+/** Explicit first-party targets; see https://platform.claude.com/docs/en/about-claude/models/overview. */
+const ALIAS_PINS: Record<string, string> = {
+  fable: 'claude-fable-5-1',
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  haiku: 'claude-haiku-5-5',
+};
+
+/**
+ * Pin only first-party family aliases. A custom endpoint/provider owns its
+ * own names; explicit IDs and context suffixes must survive unchanged.
+ * Passing a full ID lets the CLI reject an unavailable version instead of
+ * resolving an alias to an older release. This is not an availability probe.
+ */
+export const pinnedModel = (id: string, env: Record<string, unknown>): string => {
+  const customProvider = [
+    'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+    'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_GATEWAY',
+  ].some((key) => /^(1|true|yes|on)$/iu.test(String(env[key] ?? '')));
+  const endpoint = env.ANTHROPIC_BASE_URL;
+  if (customProvider || typeof endpoint === 'string' && endpoint !== ''
+    && endpoint.replace(/\/$/u, '') !== 'https://api.anthropic.com') return id;
+  const match = /^(fable|opus|sonnet|haiku)(\[(?:1m|200k)\])?$/u.exec(id);
+  return match ? `${ALIAS_PINS[match[1] as string]}${match[2] ?? ''}` : id;
+};
