@@ -1,13 +1,14 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { z } from 'zod';
 import { beforeEach, expect, it, onTestFinished, vi } from 'vitest';
 import type { Bag, BoundTool } from '@ahpd/sdk';
 
 const sdk = vi.hoisted(() => {
   const state = {
     canUseTool: undefined as undefined | ((name: string, input: Bag, about?: Bag) => Promise<unknown>),
-    server: undefined as undefined | { tools: { name: string; handler: (input: Bag) => Promise<Bag> }[] },
+    server: undefined as undefined | { tools: { name: string; inputSchema: Record<string, z.ZodTypeAny>; handler: (input: Bag) => Promise<Bag> }[] },
     frames: [] as Bag[],
     wake: undefined as undefined | (() => void),
     push(frame: Bag) {
@@ -232,7 +233,7 @@ for (const order of ['permission-first', 'streaming-first', 'assistant-first', '
   });
 }
 
-for (const order of ['approval-before-canonical', 'canonical-before-approval', 'canonical-before-permission'] as const) {
+for (const order of ['approval-before-canonical', 'canonical-before-approval', 'canonical-before-permission', 'streaming-before-permission'] as const) {
   it.each([true, false])(`settles the actual client handler with ${order} (approved: %s), without replaying claims`, async (approved) => {
     const sent: Bag[] = [];
     const input = { command: 'pwd' };
@@ -280,11 +281,17 @@ for (const order of ['approval-before-canonical', 'canonical-before-approval', '
       expect(session.sessionState().inputNeeded ?? []).toEqual([]);
     };
 
+    if (order === 'streaming-before-permission') {
+      sdk.push({ type: 'stream_event', parent_tool_use_id: null, uuid: 'stream-first', event: {
+        type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'first', name, input: {} },
+      } });
+      await until(() => sent.some((action) => action.type === 'chat/toolCallStart'));
+    }
     if (order === 'canonical-before-permission') await canonical('first');
     const answer = permission('first');
     await until(() => (session.sessionState().inputNeeded as Bag[] | undefined)?.some((request) => request.kind === 'toolConfirmation') === true);
     expect((session.sessionState().inputNeeded as Bag[])[0]!.toolCall).toMatchObject({ status: 'pending-confirmation', contributor });
-    if (order === 'canonical-before-approval') {
+    if (order === 'canonical-before-approval' || order === 'streaming-before-permission') {
       await canonical('first');
       await canonical('first');
       expect((session.sessionState().inputNeeded as Bag[])[0]!.toolCall).toMatchObject({ status: 'pending-confirmation', contributor });
@@ -314,3 +321,112 @@ for (const order of ['approval-before-canonical', 'canonical-before-approval', '
     await finish('next', nextResult, approved ? 2 : 1);
   });
 }
+
+const claimFixture = async (definition = shellTool(shellOwner)) => {
+  const sent: Bag[] = [];
+  const session = createSession({
+    uri: 'claude:/claim-lifecycle', chatUri: 'ahp-chat:/claim-lifecycle',
+    cwd: mkdtempSync(join(tmpdir(), 'ahpd-claim-lifecycle-')),
+    emit: (_channel, action) => { sent.push(structuredClone(action) as Bag); },
+    tools: [definition],
+  });
+  onTestFinished(() => { session.close(); });
+  session.begin('claim-turn', 'Run the contributed tools');
+  await until(() => sdk.canUseTool !== undefined && sdk.server !== undefined);
+  const tool = sdk.server!.tools.find((one) => one.name === 'launch_shell')!;
+  const name = 'mcp__ahp__launch_shell';
+  let frame = 0;
+  const canonical = async (id: string, input: Bag) => {
+    const marker = `claim-frame-${++frame}`;
+    sdk.push({ type: 'assistant', uuid: marker, parent_tool_use_id: null, message: {
+      id: marker, role: 'assistant', content: [{ type: 'tool_use', id, name, input }, { type: 'text', text: marker }],
+    } });
+    await until(() => sent.some((action) => action.type === 'chat/responsePart' && (action.part as Bag).content === marker));
+  };
+  const approve = async (id: string, input: Bag) => {
+    const answer = sdk.canUseTool!(name, input, { toolUseID: id });
+    session.confirm(id, true);
+    await expect(answer).resolves.toMatchObject({ behavior: 'allow' });
+  };
+  const executions = () => sent.filter((action) => action.type === 'session/inputNeededSet'
+    && (action.request as Bag).kind === 'toolClientExecution').map((action) => action.request as Bag);
+  return { session, tool, canonical, approve, executions };
+};
+
+it.each(['canonical-first', 'handler-first'] as const)('matches concurrent calls by input with reversed %s arrivals and canonical replay', async (order) => {
+  const { session, tool, canonical, approve, executions } = await claimFixture();
+  const a = { command: 'first' };
+  const b = { command: 'second' };
+  await approve('a', a);
+  await approve('b', b);
+  if (order === 'canonical-first') {
+    await canonical('b', b);
+    await canonical('b', b);
+  }
+  const first = tool.handler(a);
+  const second = tool.handler(b);
+  session.clientGone?.(otherShellOwner);
+  await canonical('b', b);
+  await canonical('a', a);
+  await canonical('a', a);
+  await until(() => executions().length === 2);
+  expect(executions().map((request) => request.toolCall)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ toolCallId: 'a', toolInput: JSON.stringify(a), contributor: { kind: 'client', clientId: shellOwner } }),
+    expect.objectContaining({ toolCallId: 'b', toolInput: JSON.stringify(b), contributor: { kind: 'client', clientId: shellOwner } }),
+  ]));
+  expect(session.completeToolCall?.('a', otherShellOwner, { text: 'wrong', ok: true })).toBe(false);
+  expect(session.completeToolCall?.('a', shellOwner, { text: 'first receipt', ok: true })).toBe(true);
+  expect(session.completeToolCall?.('b', shellOwner, { text: 'second receipt', ok: true })).toBe(true);
+  await expect(first).resolves.toMatchObject({ content: [{ text: 'first receipt' }] });
+  await expect(second).resolves.toMatchObject({ content: [{ text: 'second receipt' }] });
+});
+
+for (const ending of ['cancel', 'disconnect', 'dispose'] as const) {
+  it.each(['waiting', 'queued', 'joining'] as const)(`cleans client registrations on ${ending} while %s`, async (phase) => {
+    const { session, tool, canonical, approve, executions } = await claimFixture();
+    const input = { command: 'same-input' };
+    await approve('old', input);
+    if (phase !== 'waiting') await canonical('old', input);
+    const result = phase !== 'queued' ? tool.handler(input) : undefined;
+    if (ending === 'cancel') session.cancel('claim-turn');
+    if (ending === 'disconnect') session.clientGone?.(shellOwner);
+    if (ending === 'dispose') session.close();
+    if (result) await expect(result).resolves.toMatchObject({ isError: true });
+    expect(executions()).toHaveLength(0);
+    expect(session.sessionState().inputNeeded ?? []).toEqual([]);
+    if (ending === 'dispose') return;
+    if (ending === 'cancel') session.begin('next-turn', 'Continue');
+    await approve('next', input);
+    const next = tool.handler(input);
+    await canonical('old', input);
+    await canonical('next', input);
+    await until(() => executions().length === 1);
+    expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'next' });
+    expect(session.completeToolCall?.('old', shellOwner, { text: 'stale', ok: true })).toBe(false);
+    expect(session.completeToolCall?.('next', shellOwner, { text: 'next receipt', ok: true })).toBe(true);
+    await expect(next).resolves.toMatchObject({ content: [{ text: 'next receipt' }] });
+  });
+}
+
+it.each(['canonical-first', 'handler-first'] as const)('matches MCP-validated reordered nested input with %s', async (order) => {
+  const definition = shellTool(shellOwner);
+  definition.definition.inputSchema = {
+    type: 'object', properties: {
+      first: { type: 'string' },
+      nested: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } },
+      items: { type: 'array', items: { type: 'object', properties: { x: { type: 'string' }, y: { type: 'string' } } } },
+    },
+  };
+  const { session, tool, canonical, approve, executions } = await claimFixture(definition);
+  const input = { items: [{ y: 'Y', x: 'X' }], nested: { b: 'B', a: 'A' }, first: 'F', extra: 'stripped by MCP' };
+  const parsed = z.object(tool.inputSchema).parse(input);
+  expect(JSON.stringify(parsed)).not.toBe(JSON.stringify(input));
+  await approve('validated', input);
+  if (order === 'canonical-first') await canonical('validated', input);
+  const result = tool.handler(parsed);
+  if (order === 'handler-first') await canonical('validated', input);
+  await until(() => executions().length === 1);
+  expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'validated', toolInput: JSON.stringify(parsed) });
+  expect(session.completeToolCall?.('validated', shellOwner, { text: 'validated receipt', ok: true })).toBe(true);
+  await expect(result).resolves.toMatchObject({ content: [{ text: 'validated receipt' }] });
+});

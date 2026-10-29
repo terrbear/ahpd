@@ -572,6 +572,16 @@ const shaped = (property: object): z.ZodTypeAny => {
   return value;
 };
 
+/** The same parser shape used by the SDK's in-process MCP server. */
+const inputShape = (schema: BoundTool['definition']['inputSchema']): Record<string, z.ZodTypeAny> => {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, property] of Object.entries(schema?.properties ?? {})) {
+    const value = shaped(property);
+    shape[key] = (schema?.required ?? []).includes(key) ? value : value.optional();
+  }
+  return shape;
+};
+
 const isAntonAHPClient = (owner: string | undefined): owner is string =>
   owner !== undefined && /^anton-ahp_[0-9A-Za-z]{27}$/.test(owner);
 
@@ -609,16 +619,10 @@ const contributed = (
   version: '1.0.0',
   tools: tools.map((one) => {
     const name = exposedToolName(one, tools);
-    const schema = one.definition.inputSchema;
-    const shape: Record<string, z.ZodTypeAny> = {};
-    for (const [key, property] of Object.entries(schema?.properties ?? {})) {
-      const value = shaped(property);
-      shape[key] = (schema?.required ?? []).includes(key) ? value : value.optional();
-    }
     return {
       name,
       description: one.definition.description ?? one.definition.title ?? name,
-      inputSchema: shape,
+      inputSchema: inputShape(one.definition.inputSchema),
       /*
        * A raw SDK definition, not the SDK's `tool()` helper, so the eager flag
        * rides `_meta`. Passed only when the host defined it: `false` is the
@@ -990,7 +994,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * other.
    */
   const unclaimed = new Map<string, { id: string; input: string }[]>();
-  const expecting = new Map<string, ((id: string) => void)[]>();
+  const expecting = new Map<string, { input: string; settle: (id: string | undefined) => void }[]>();
+  let claimGeneration = 0;
+  const clientClaimGenerations = new Map<string, number>();
 
   // Claim registration is independent of the transcript row's status: a
   // permission callback can open that row before the canonical frame arrives.
@@ -1001,25 +1007,38 @@ export function createSession(options: ClaudeSessionOptions): Session {
     unclaimed.set(toolName, (unclaimed.get(toolName) ?? []).filter((one) => one.id !== id));
   };
 
-  const opening = (toolName: string, id: string, input: Bag): void => {
-    if (registeredCalls.has(id)) return;
-    registeredCalls.add(id);
-    const waiting = expecting.get(toolName) ?? [];
-    const first = waiting.shift();
-    expecting.set(toolName, waiting);
-    if (first) { first(id); return; }
-    unclaimed.set(toolName, [...(unclaimed.get(toolName) ?? []), { id, input: JSON.stringify(input) }]);
+  // MCP parses the arguments before invoking the handler: property order
+  // and undeclared top-level keys can differ from the canonical frame.
+  const claimInput = (toolName: string, input: Bag): string => {
+    const tool = offering.find((one) => called(exposedToolName(one, offering)) === toolName);
+    const parsed = z.object(inputShape(tool?.definition.inputSchema)).safeParse(input);
+    return JSON.stringify(parsed.success ? parsed.data : input, (_key, value: unknown) =>
+      value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+        : value);
   };
 
-  const claim = (toolName: string, input: Bag): Promise<string> => {
+  const opening = (toolName: string, id: string, input: Bag): void => {
+    if (closed || registeredCalls.has(id)) return;
+    registeredCalls.add(id);
+    const waiting = expecting.get(toolName) ?? [];
+    const written = claimInput(toolName, input);
+    const at = waiting.findIndex((one) => one.input === written);
+    const first = at >= 0 ? waiting.splice(at, 1)[0] : undefined;
+    expecting.set(toolName, waiting);
+    if (first) { first.settle(id); return; }
+    unclaimed.set(toolName, [...(unclaimed.get(toolName) ?? []), { id, input: written }]);
+  };
+
+  const claim = (toolName: string, input: Bag): Promise<string | undefined> => {
     const open = unclaimed.get(toolName) ?? [];
-    const written = JSON.stringify(input);
+    const written = claimInput(toolName, input);
     const at = open.findIndex((one) => one.input === written);
-    const took = at >= 0 ? open.splice(at, 1)[0] : open.shift();
+    const took = at >= 0 ? open.splice(at, 1)[0] : undefined;
     unclaimed.set(toolName, open);
     if (took !== undefined) return Promise.resolve(took.id);
     return new Promise((resolve) => {
-      expecting.set(toolName, [...(expecting.get(toolName) ?? []), resolve]);
+      expecting.set(toolName, [...(expecting.get(toolName) ?? []), { input: written, settle: resolve }]);
     });
   };
 
@@ -1034,6 +1053,24 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
   /** Every outstanding client call, answered the same way and forgotten. */
   const releaseCalls = (why: string, whose?: string): void => {
+    // A handler may still be waiting for its canonical frame, or be between
+    // claim resolution and publication. Settle both without publishing later.
+    if (whose === undefined) claimGeneration++;
+    else clientClaimGenerations.set(whose, (clientClaimGenerations.get(whose) ?? 0) + 1);
+    // Permission/streaming rows may know the ID before a canonical frame.
+    // Retain those IDs as tombstones so late frames cannot revive them.
+    for (const scope of scopes.values()) {
+      for (const [id, part] of scope.parts) {
+        const contributor = bag(bag(part.toolCall).contributor);
+        if (contributor.kind === 'client' && (whose === undefined || contributor.clientId === whose)) registeredCalls.add(id);
+      }
+    }
+    for (const name of new Set([...expecting.keys(), ...unclaimed.keys()])) {
+      if (whose !== undefined && providedBy(name) !== whose) continue;
+      for (const held of expecting.get(name) ?? []) held.settle(undefined);
+      expecting.delete(name);
+      unclaimed.delete(name);
+    }
     for (const [id, held] of [...byClient.entries()]) {
       if (whose !== undefined && held.owner !== whose) continue;
       byClient.delete(id);
@@ -1042,8 +1079,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const ranByClient = async (tool: BoundTool, input: Bag): Promise<{ text: string; ok: boolean }> => {
-    const id = await claim(called(exposedToolName(tool, offering)), input);
     const owner = tool.owner ?? '';
+    const generation = claimGeneration;
+    const clientGeneration = clientClaimGenerations.get(owner) ?? 0;
+    if (closed) return { text: 'The session was disposed', ok: false };
+    const id = await claim(called(exposedToolName(tool, offering)), input);
+    if (id === undefined || closed || generation !== claimGeneration
+      || clientGeneration !== (clientClaimGenerations.get(owner) ?? 0)) {
+      return { text: 'The client call ended before it could be dispatched', ok: false };
+    }
     const scope = scopeOfCall(id) ?? mainScope;
     const fullName = tool.definition.name;
     const prefix = `${owner}__`;
@@ -4168,6 +4212,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
         one.settle({ behavior: 'deny', message: 'The session was disposed' });
       }
       releaseCalls('The session was disposed');
+      registeredCalls.clear();
+      clientClaimGenerations.clear();
       try { rmSync(initScript, { force: true }); }
       catch { /* a script that was never written */ }
       return idle.dispose();
