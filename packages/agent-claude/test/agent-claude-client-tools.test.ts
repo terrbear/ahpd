@@ -1,11 +1,12 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeEach, expect, it, onTestFinished, vi } from 'vitest';
 import type { Bag, BoundTool } from '@ahpd/sdk';
 
 const sdk = vi.hoisted(() => {
   const state = {
+    canUseTool: undefined as undefined | ((name: string, input: Bag, about?: Bag) => Promise<unknown>),
     server: undefined as undefined | { tools: { name: string; handler: (input: Bag) => Promise<Bag> }[] },
     frames: [] as Bag[],
     wake: undefined as undefined | (() => void),
@@ -27,23 +28,26 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
     sdk.server = given;
     return { type: 'sdk', name: 'ahp', tools: given?.tools };
   },
-  query: () => ({
-    async *[Symbol.asyncIterator]() { for (;;) yield await sdk.next(); },
-    interrupt: async () => {},
-    setPermissionMode: async () => {},
-    setModel: async () => {},
-    applyFlagSettings: async () => {},
-    toggleMcpServer: async () => {},
-    reconnectMcpServer: async () => {},
-    setMcpServers: async () => {},
-    initializationResult: async () => ({}),
-    mcpServerStatus: async () => [],
-    reloadSkills: async () => ({ skills: [] }),
-    reloadPlugins: async () => ({ plugins: [] }),
-    supportedModels: async () => [],
-    streamInput: async () => {},
-    close: () => {},
-  }),
+  query: ({ options }: { options: Bag }) => {
+    sdk.canUseTool = options.canUseTool as typeof sdk.canUseTool;
+    return {
+      async *[Symbol.asyncIterator]() { for (;;) yield await sdk.next(); },
+      interrupt: async () => {},
+      setPermissionMode: async () => {},
+      setModel: async () => {},
+      applyFlagSettings: async () => {},
+      toggleMcpServer: async () => {},
+      reconnectMcpServer: async () => {},
+      setMcpServers: async () => {},
+      initializationResult: async () => ({}),
+      mcpServerStatus: async () => [],
+      reloadSkills: async () => ({ skills: [] }),
+      reloadPlugins: async () => ({ plugins: [] }),
+      supportedModels: async () => [],
+      streamInput: async () => {},
+      close: () => {},
+    };
+  },
 }));
 
 const { createSession } = await import('../src/session.js');
@@ -57,6 +61,7 @@ const until = async (check: () => boolean): Promise<void> => {
 };
 
 beforeEach(() => {
+  sdk.canUseTool = undefined;
   sdk.server = undefined;
   sdk.frames = [];
   sdk.wake = undefined;
@@ -147,3 +152,82 @@ it.each(['cancel', 'disconnect', 'dispose', 'complete-during-publication'] as co
   expect(response.isError === true).toBe(ending !== 'complete-during-publication');
   expect(session.sessionState().inputNeeded ?? []).toEqual([]);
 });
+
+const shellOwner = 'anton-ahp_0ujtsYcgvSTl8PAuAdqWYSMnLOv';
+const otherShellOwner = 'anton-ahp_1ujtsYcgvSTl8PAuAdqWYSMnLOv';
+const shellInputSchema = {
+  type: 'object' as const,
+  properties: { command: { type: 'string' } },
+  additionalProperties: false,
+};
+const shellTool = (owner: string): BoundTool => ({
+  definition: {
+    name: `${owner}__launch_shell`,
+    inputSchema: shellInputSchema,
+  },
+  owner,
+});
+const permissionContributors = [
+  { label: 'Anton client', name: 'mcp__ahp__launch_shell', tools: [shellTool(shellOwner)], contributor: { kind: 'client', clientId: shellOwner } },
+  { label: 'foreign client', name: 'mcp__ahp__foreign__launch_shell', tools: [shellTool('foreign')], contributor: { kind: 'client', clientId: 'foreign' } },
+  { label: 'unadvertised alias', name: 'mcp__ahp__launch_shell', tools: [shellTool('foreign')], contributor: { kind: 'mcp', customizationId: 'mcp:ahp' } },
+  { label: 'ambiguous alias', name: 'mcp__ahp__launch_shell', tools: [shellTool(shellOwner), shellTool(otherShellOwner)], contributor: { kind: 'mcp', customizationId: 'mcp:ahp' } },
+  { label: 'host collision', name: 'mcp__ahp__launch_shell', tools: [shellTool(shellOwner), { definition: { name: 'launch_shell' }, handler: async () => ({ text: 'unused' }) } as BoundTool], contributor: { kind: 'mcp', customizationId: 'mcp:ahp' } },
+  { label: 'external MCP', name: 'mcp__other__launch_shell', tools: [shellTool(shellOwner)], contributor: { kind: 'mcp', customizationId: 'mcp:other' } },
+  { label: 'built-in', name: 'Bash', tools: [shellTool(shellOwner)], contributor: undefined },
+];
+
+for (const order of ['permission-first', 'streaming-first', 'assistant-first', 'streaming-assistant-first']) {
+  it.each(permissionContributors)(`preserves $label permission contributor with ${order}`, async ({ name, tools, contributor }) => {
+    const sent: Bag[] = [];
+    const input = { command: 'pwd' };
+    const session = createSession({
+      uri: 'claude:/permission-contributor',
+      chatUri: 'ahp-chat:/permission-contributor',
+      cwd: mkdtempSync(join(tmpdir(), 'ahpd-permission-contributor-')),
+      emit: (_channel, action) => { sent.push(structuredClone(action) as Bag); },
+      tools,
+    });
+    const controller = new AbortController();
+    onTestFinished(() => { controller.abort(); session.close(); });
+    session.begin('permission-turn', 'Inspect the working directory');
+    await until(() => sdk.canUseTool !== undefined);
+    const streaming = {
+      type: 'stream_event', parent_tool_use_id: null, uuid: 'stream-1',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'permission-call', name, input: {} } },
+    };
+    const assistant = {
+      type: 'assistant', parent_tool_use_id: null, uuid: 'assistant-1',
+      message: { id: 'message-1', role: 'assistant', content: [{ type: 'tool_use', id: 'permission-call', name, input }] },
+    };
+    if (order.startsWith('streaming')) {
+      sdk.push(streaming);
+      await until(() => sent.some((action) => action.type === 'chat/toolCallStart'));
+    }
+    if (order.includes('assistant')) {
+      sdk.push(assistant);
+      await until(() => sent.some((action) => action.type === 'chat/toolCallReady'));
+    }
+    const answer = sdk.canUseTool!(name, input, { toolUseID: 'permission-call', signal: controller.signal });
+    await until(() => sent.some((action) => action.type === 'session/inputNeededSet'));
+    const requests = session.sessionState().inputNeeded as Bag[];
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ chat: 'ahp-chat:/permission-contributor', turnId: 'permission-turn', kind: 'toolConfirmation' });
+    const call = requests[0]!.toolCall as Bag;
+    expect.soft(call.contributor).toEqual(contributor);
+    expect(call).toMatchObject({ toolCallId: 'permission-call', toolName: name, status: 'pending-confirmation' });
+    const chat = session.chatState();
+    const turns = [...(chat.turns ?? []) as Bag[], ...(chat.activeTurn ? [chat.activeTurn as Bag] : [])];
+    const parts = turns.flatMap((turn) => (turn.responseParts ?? []) as Bag[]);
+    const snapshot = parts.find((part) => part.kind === 'toolCall')?.toolCall as Bag;
+    expect.soft(snapshot.contributor).toEqual(contributor);
+    const published = sent.find((action) => action.type === 'session/inputNeededSet')!.request as Bag;
+    expect.soft((published.toolCall as Bag).contributor).toEqual(contributor);
+    for (const action of sent.filter((action) => action.type === 'chat/toolCallStart' || action.type === 'chat/toolCallReady')) {
+      expect.soft(action.contributor).toEqual(contributor);
+    }
+    expect(sent.some((action) => action.type === 'session/inputNeededSet' && (action.request as Bag).kind === 'toolClientExecution')).toBe(false);
+    controller.abort();
+    await expect(answer).resolves.toMatchObject({ behavior: 'deny' });
+  });
+}

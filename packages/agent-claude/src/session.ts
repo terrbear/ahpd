@@ -970,6 +970,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const providedBy = (toolName: string): string | undefined =>
     offering.find((one) => called(exposedToolName(one, offering)) === toolName)?.owner;
 
+  const contributorOf = (toolName: string) => {
+    const owner = providedBy(toolName);
+    if (owner !== undefined) return { kind: 'client' as const, clientId: owner };
+    const server = serverOf(toolName);
+    if (server !== undefined) return { kind: 'mcp' as const, customizationId: `mcp:${server}` };
+    return undefined;
+  };
+
   /*
    * Joining the call the model made to the handler that has to answer it.
    *
@@ -1762,10 +1770,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         // Whose tool it is, when it is an MCP server's. The reducer refuses
         // `chat/toolCallAuthRequired` on a call with no MCP contributor, so
         // this is also what makes a sign-in mid-call sayable at all.
-        const from = serverOf(name);
-        const contributor = from === undefined
-          ? undefined
-          : { kind: 'mcp' as const, customizationId: `mcp:${from}` };
+        const contributor = contributorOf(name);
         // What kind of row to draw, from the name and from the first frame:
         // a client that waited for the arguments to know it was a shell
         // command would draw a generic box and then redraw it.
@@ -1922,11 +1927,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
          */
         const own = providedBy(name);
         if (own !== undefined) opening(name, id, bag(block.input));
-        const contributor = own !== undefined
-          ? { kind: 'client' as const, clientId: own }
-          : from === undefined
-            ? undefined
-            : { kind: 'mcp' as const, customizationId: `mcp:${from}` };
+        const contributor = contributorOf(name);
         // Running against somebody else's server, and so a call that can end
         // up waiting on a sign-in rather than on its own work.
         if (from !== undefined) onServer.set(id, { server: from, turnId: str(turn.id) ?? '', blocked: false });
@@ -1973,6 +1974,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
           // The half-written json is what `toolInput` now says properly, and
           // a client that kept both would draw the arguments twice.
           call.status = 'running';
+          if (contributor !== undefined) call.contributor = contributor;
+          else delete call.contributor;
           call.invocationMessage = line;
           call.confirmed = 'not-needed';
           delete call.partialInput;
@@ -2286,6 +2289,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // The call the assistant message opened, if it arrived first. Which of
       // the two comes first is the CLI's business; either order is one call.
       const held = scope.parts.get(id);
+      const contributor = contributorOf(toolName);
       const meta = scopeApproval === undefined
         ? toolMetaOf(toolName)
         : { ...bag(bag(held?.toolCall)._meta), ...(toolMetaOf(toolName) ?? {}), requiresHumanConfirmation: true };
@@ -2296,6 +2300,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
         ...(input !== undefined ? { toolInput: input } : {}),
         ...(meta ? { _meta: meta } : {}),
       } as Bag;
+      if (contributor !== undefined) call.contributor = contributor;
+      else delete call.contributor;
       if (scopeApproval !== undefined) call._meta = { ...bag(call._meta), ...meta };
       /*
        * The choices, when the SDK suggested a permission to keep.
@@ -2327,6 +2333,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         holdPart(turn, part);
         emitOn(scope, {
           type: 'chat/toolCallStart', turnId: turn.id, toolCallId: id, toolName, displayName,
+          ...(contributor !== undefined ? { contributor } : {}),
           ...(meta ? { _meta: meta } : {}),
         });
       }
@@ -2371,6 +2378,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         type: 'chat/toolCallReady',
         turnId: turn.id,
         toolCallId: id,
+        ...(contributor !== undefined ? { contributor } : {}),
         invocationMessage,
         confirmationTitle,
         ...(input !== undefined ? { toolInput: input } : {}),
