@@ -1524,6 +1524,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     completeToolCall: (toolCallId, clientId, result) => offered.complete(toolCallId, clientId, result),
     clientGone: (clientId) => {
       offered.release('The client that provides this tool is no longer here', clientId);
+      scheduleIdleRetirement();
     },
 
     close: () => {
