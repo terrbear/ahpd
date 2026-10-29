@@ -45,8 +45,10 @@ reaching the SDK: `fable` → `claude-fable-5-1`, `opus` → `claude-opus-5-5`,
 `sonnet` → `claude-sonnet-5-5`, and `haiku` → `claude-haiku-5-5`.
 `[1m]` and `[200k]` suffixes are retained. Explicit version IDs are unchanged;
 `default` still delegates to the CLI. Turn selection, model config changes, and
-idle query restarts use the same pins. An unavailable pinned model fails through
-the existing SDK error path; ahpd does not retry an older model.
+idle query restarts use the same pins. The model catalog also offers each
+canonical pin beside its family alias, so clients requiring an advertised
+exact ID can select it. An unavailable pinned model fails through the existing
+SDK error path; ahpd does not retry an older model.
 
 Custom `models` catalogs, non-Anthropic `ANTHROPIC_BASE_URL` endpoints, and the
 CLI's alternate-provider environment switches retain their own alias semantics.

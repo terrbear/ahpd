@@ -145,3 +145,15 @@ export const pinnedModel = (id: string, env: Record<string, unknown>): string =>
   const match = /^(fable|opus|sonnet|haiku)(\[(?:1m|200k)\])?$/u.exec(id);
   return match ? `${ALIAS_PINS[match[1] as string]}${match[2] ?? ''}` : id;
 };
+
+/** Offer explicit pin targets beside the CLI aliases, without asserting account access. */
+export const pinnedModels = <T extends OfferedModel>(models: readonly T[], env: Record<string, unknown>): T[] => {
+  const existing = new Set(models.map((model) => model.id));
+  return unique(models.flatMap((model) => {
+    const target = pinnedModel(model.id, env);
+    if (target === model.id || existing.has(target)) return [model];
+    const label = target.replace(/^claude-(\w+)-(\d+)-(\d+)/u,
+      (_match, family: string, major: string, minor: string) => `${family[0]!.toUpperCase()}${family.slice(1)} ${major}.${minor}`);
+    return [{ ...model, id: target, name: `${label} (pinned)` }, model];
+  }));
+};

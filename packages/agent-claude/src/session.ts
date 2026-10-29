@@ -13,7 +13,7 @@ import { Status, idOf, tail } from '@ahpd/sdk';
 import { attachmentContent } from './attachments.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
-import { pinnedModel } from './models.js';
+import { pinnedModel, pinnedModels } from './models.js';
 import { idleQuery } from './idle.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
 import type { Asked, Spawned } from './spawn.js';
@@ -2981,6 +2981,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       })
       .filter((model) => model.id !== '');
     if (options.offerModels) offered = await options.offerModels(offered);
+    else offered = pinnedModels(offered, { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env });
     /*
      * The style the preset names, applied once the CLI is there to take it.
      *

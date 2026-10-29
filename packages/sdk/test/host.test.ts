@@ -49,6 +49,7 @@ const sdk = vi.hoisted(() => {
     skills: [] as Record<string, unknown>[],
     said: [] as string[],
     modelsSet: [] as (string | undefined)[],
+    modelFailure: undefined as string | undefined,
     modesSet: [] as string[],
     effortsSet: [] as (string | null | undefined)[],
     sandboxSet: [] as ({ enabled: boolean } | null | undefined)[],
@@ -111,7 +112,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
       },
       interrupt: async () => { sdk.interrupted++; },
       setPermissionMode: async (mode: string) => { sdk.modesSet.push(mode); },
-      setModel: async (model?: string) => { sdk.modelsSet.push(model); },
+      setModel: async (model?: string) => { sdk.modelsSet.push(model); if (sdk.modelFailure) throw new Error(sdk.modelFailure); },
       applyFlagSettings: async (settings: { effortLevel?: string | null; sandbox?: { enabled: boolean } | null }) => {
         if ('effortLevel' in settings) sdk.effortsSet.push(settings.effortLevel);
         if ('sandbox' in settings) sdk.sandboxSet.push(settings.sandbox);
@@ -203,6 +204,7 @@ beforeEach(() => {
   sdk.skills.length = 0;
   sdk.said.length = 0;
   sdk.modelsSet.length = 0;
+  sdk.modelFailure = undefined;
   sdk.modesSet.length = 0;
   sdk.effortsSet.length = 0;
   sdk.sandboxSet.length = 0;
@@ -1435,7 +1437,10 @@ describe('what the harness offers', () => {
     // `provider` is required on `SessionModelInfo` and was simply absent: a
     // backend answers `{ id, name }` because it has one provider, and this is
     // the only place that knows which.
-    expect(root.agents[0]?.models).toEqual([{ id: 'sonnet', name: 'Sonnet', provider: 'claude' }]);
+    expect(root.agents[0]?.models).toEqual([
+      { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5 (pinned)', provider: 'claude' },
+      { id: 'sonnet', name: 'Sonnet', provider: 'claude' },
+    ]);
 
     // Not asserted here: `root/agentsChanged`. The boot probe learns the
     // models before any client has connected, so the change is dispatched to
@@ -8098,4 +8103,89 @@ describe('the pull request a create-pr recorded', () => {
       ?.find((one) => one.id === 'commit');
     expect(commit?.confirmation).toContain("'Fix the build'");
   });
+});
+
+const pinnedFamilies = [
+  ['fable', 'claude-fable-5-1'], ['opus', 'claude-opus-5-5'],
+  ['sonnet', 'claude-sonnet-5-5'], ['haiku', 'claude-haiku-5-5'],
+] as const;
+for (const [alias, target] of pinnedFamilies) {
+  it.each([alias, target])('advertises and dispatches pinned model %s through the host without using its default', async (selected) => {
+    sdk.init = { models: [
+      { value: 'default', displayName: 'Default (recommended)' },
+      ...pinnedFamilies.map(([value]) => ({ value, displayName: value })),
+      { value: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5' },
+    ] };
+    const { host, client, uri, chatUri } = await running();
+    try {
+      const root = await client.handle({ method: 'subscribe', params: { channel: 'ahp-root://' } }) as {
+        snapshot: { state: { agents: { models: { id: string }[] }[] } };
+      };
+      const offered = root.snapshot.state.agents[0]!.models.map((model) => model.id);
+      expect(offered).toContain(selected);
+      expect(offered).toContain('default');
+      expect(offered).toContain('claude-haiku-4-5-20251001');
+      expect(sessionQueries().at(-1)!.options.model).toBeUndefined();
+      client.handle({ method: 'dispatchAction', params: {
+        channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'pin', message: { text: 'pinned request', model: { id: selected } } },
+      } });
+      await settle();
+      expect(sdk.modelsSet).toEqual([target]);
+      expect(sdk.said).toEqual(['pinned request']);
+      const state = await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta: { model: string } } };
+      };
+      expect(state.snapshot.state._meta.model).toBe(selected);
+    } finally { host.close(); }
+  });
+}
+
+it.each(['custom-catalog', 'custom-preset'] as const)('keeps %s model names unchanged in discovery and dispatch', async (kind) => {
+  sdk.init = { models: [{ value: 'haiku', displayName: 'Provider Haiku' }] };
+  const agent = claude({ paths: ['/tmp'], ...(kind === 'custom-catalog'
+    ? { models: [{ id: 'haiku', name: 'Provider Haiku' }] }
+    : { presets: { provider: { env: { ANTHROPIC_BASE_URL: 'https://provider.invalid' } } } }) });
+  const host = createHost({ path: '/tmp', agents: [agent], ...machine() });
+  const client = host.accept(peer());
+  try {
+    await client.handle(hello(['0.8.0']));
+    const root = await client.handle({ method: 'subscribe', params: { channel: 'ahp-root://' } }) as {
+      snapshot: { state: { agents: { models: { id: string }[] }[] } };
+    };
+    expect(root.snapshot.state.agents[0]!.models.map((model) => model.id)).toEqual(['haiku']);
+    await client.handle({ method: 'createSession', params: { channel: 'claude:/custom-pin', provider: 'claude' } });
+    client.handle({ method: 'dispatchAction', params: {
+      channel: 'claude:/custom-pin', action: { type: 'chat/turnStarted', turnId: 'custom', message: { text: 'custom request', model: { id: 'haiku' } } },
+    } });
+    await settle();
+    expect(sdk.modelsSet).toEqual(['haiku']);
+  } finally { host.close(); }
+});
+
+it.each(['default', 'claude-haiku-4-5-20251001'])('preserves explicitly selected %s through the host', async (selected) => {
+  sdk.init = { models: [{ value: selected, displayName: selected }] };
+  const { host, client, chatUri } = await running();
+  try {
+    client.handle({ method: 'dispatchAction', params: {
+      channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'explicit', message: { text: 'explicit request', model: { id: selected } } },
+    } });
+    await settle();
+    expect(sdk.modelsSet).toEqual([selected === 'default' ? undefined : selected]);
+    expect(sdk.said).toEqual(['explicit request']);
+  } finally { host.close(); }
+});
+
+it('does not send a prompt or choose an older model when an advertised pin is refused', async () => {
+  sdk.init = { models: [{ value: 'haiku', displayName: 'Haiku' }] };
+  const { host, client, chatUri, peer: p } = await running();
+  try {
+    sdk.modelFailure = 'fixture model unavailable';
+    client.handle({ method: 'dispatchAction', params: {
+      channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'refused-pin', message: { text: 'must not send', model: { id: 'claude-haiku-5-5' } } },
+    } });
+    await settle();
+    expect(sdk.modelsSet).toEqual(['claude-haiku-5-5']);
+    expect(sdk.said).toEqual([]);
+    expect(actions(p, chatUri).some((event) => event.action.type === 'chat/error')).toBe(true);
+  } finally { host.close(); }
 });
