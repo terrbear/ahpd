@@ -70,6 +70,8 @@ export interface AcpOptions {
    * with a line in the log, for a server that does not take HTTP MCP servers.
    */
   hostTools?: boolean;
+  /** Retire a safely idle local ACP runtime after this many milliseconds. Default one hour; zero disables it. */
+  idleTimeoutMs?: number;
 }
 
 /**
@@ -171,7 +173,7 @@ export interface AcpConnection {
    * reason.
    */
   readonly ended: Promise<Error>;
-  /** End the subprocess; settles once it has gone, and never rejects. */
+  /** Allow EOF cleanup (default 3 s), then SIGTERM and 250 ms before SIGKILL; await exit. */
   close(graceMs?: number): Promise<void>;
 }
 

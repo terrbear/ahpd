@@ -83,10 +83,15 @@ await listen({ port: 9187 }, (peer) => host.accept(peer));
 | `description` | | one line about what this backend is |
 | `model` | | the model a session that names none runs on |
 | `hostTools` | | give each session the host's tools and its clients' tools as an HTTP MCP server; default on, skipped for a server that takes no http MCP servers |
+| `idleTimeoutMs` | | retire a safely idle local ACP runtime after this many milliseconds; default `3600000` (one hour), `0` disables retirement |
 
 ## What it does
 
 It spawns the command, completes the ACP handshake over its stdio, opens one session, and turns each `session/update` into the `chat/*` action a client already knows. A turn ends as `chat/turnComplete` or `chat/turnCancelled` from the server's own stop reason, and `cancel` reaches the server as its notification.
+
+## Idle runtime retirement
+
+After the configured idle interval, the bridge closes a local ACP process only when the server advertised `loadSession` and the conversation can be resumed by its saved ACP session id. The one-hour default can be changed with `idleTimeoutMs`; set it to `0` to disable retirement. Active turns (including tool calls and host-owned shell jobs), queued turns, pending questions or approvals, and unreleased terminals keep the runtime alive. The saved session catalogue and transcript are retained; the next turn starts a fresh ACP process and loads the same ACP session. If the server cannot load sessions or any state makes retirement unsafe, the process is kept rather than discarding resumability.
 
 A `session/request_permission` is a confirmation offering the server's own options, approvals first, and the one the person picks is the `optionId` the server receives. An answer that picked none selects the server's once option of that kind, never an `always`.
 
