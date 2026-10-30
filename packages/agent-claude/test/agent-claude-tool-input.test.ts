@@ -1,5 +1,6 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import type { SessionOptions } from '@ahpd/sdk';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import type { Bag } from '@ahpd/sdk';
@@ -101,7 +102,7 @@ const settle = async (times = 30): Promise<void> => {
 async function live(frames: Record<string, unknown>[] = [{
   type: 'assistant', parent_tool_use_id: null, uuid: 'a1',
   message: { id: 'msg_1', role: 'assistant', content: calls },
-}], asking?: () => void, options: { settings?: Bag; mcpServers?: Record<string, Bag> } = {}): Promise<{ held: Map<string, Bag>; ready: Map<string, Bag>; session: ReturnType<typeof createSession>; sent: Bag[] }> {
+}], asking?: () => void, options: { settings?: Bag; mcpServers?: Record<string, Bag>; scanPermission?: NonNullable<SessionOptions['scanPermission']> } = {}): Promise<{ held: Map<string, Bag>; ready: Map<string, Bag>; session: ReturnType<typeof createSession>; sent: Bag[] }> {
   sdk.frames = frames;
   const sent: Bag[] = [];
   const session = createSession({
@@ -593,4 +594,53 @@ it('denies a human refusal and aborts timed-out confirmations without leaving or
   expect(hookDecision(await Promise.resolve(await waiting))).toBe('deny');
   expect(callFromSnapshot(session, 'toolu_aborted_wait')?.status).toBe('cancelled');
   expect(afterAbort.filter((one) => one.type === 'chat/toolCallReady' && one.toolCallId === 'toolu_aborted_wait')).toHaveLength(1);
+});
+
+it('scans final hook-updated Bash input and allows without creating a confirmation card', async () => {
+  const original = { command: 'git status --short', description: 'Inspect task changes' };
+  const id = 'toolu_scanned';
+  sdk.hold = new Promise(() => {});
+  const scans: Bag[] = [];
+  const { session, sent } = await live([{
+    type: 'assistant', parent_tool_use_id: null, uuid: 'scan-a1', message: {
+      id: 'scan-msg', role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: original }],
+    },
+  }], undefined, { settings: { shellXdgConfigHome: '' }, scanPermission: async (request) => { scans.push({ ...request }); return 'allow'; } });
+  try {
+    const hook = ((asBag(sdk.queryOptions?.hooks).PreToolUse as Bag[]).find((group) => group.matcher === 'Bash')?.hooks as BeforeToolHook[])[0];
+    const output = await hook?.({ hook_event_name: 'PreToolUse', tool_input: original }, id, { signal: new AbortController().signal });
+    const updated = asBag(asBag(output?.hookSpecificOutput).updatedInput);
+    expect(updated.command).toBe(`unset XDG_CONFIG_HOME\n${original.command}`);
+    expect(await sdk.canUseTool?.('Bash', updated, { toolUseID: id })).toEqual({ behavior: 'allow', updatedInput: updated });
+    expect(scans).toHaveLength(1);
+    expect(scans[0]).toMatchObject({ chat: 'ahp-chat:/input', toolCallId: id, toolName: 'Bash', input: updated });
+    expect(scans[0]?.turnId).toBe(asBag(asBag(session.chatState()).activeTurn).id);
+    expect(sent.some((action) => action.type === 'session/inputNeededSet')).toBe(false);
+  }
+  finally { sdk.hold = Promise.resolve(); session.close(); }
+});
+
+it.each(['abstain', 'error', 'plan', 'ask-rule', 'unsafe-flags', 'unknown-flags', 'settings-ask'])('keeps ordinary confirmation review when scanner must abstain: %s', async (mode) => {
+  const id = `toolu_scan_fallback_${mode}`;
+  const input = { command: 'git status', ...(mode === 'unsafe-flags' ? { dangerouslyDisableSandbox: true } : {}), ...(mode === 'unknown-flags' ? { futureFlag: true } : {}) };
+  let scanned = 0;
+  sdk.hold = new Promise(() => {});
+  const { session, sent } = await live([{
+    type: 'assistant', parent_tool_use_id: null, uuid: 'fallback-a1', message: {
+      id: 'fallback-msg', role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input }],
+    },
+  }], undefined, { settings: mode === 'plan' ? { permissionMode: 'plan' } : mode === 'settings-ask' ? { permissions: { ask: ['Bash'] } } : {}, scanPermission: async () => {
+    scanned++;
+    if (mode === 'error') throw new Error('scanner unavailable');
+    return mode === 'abstain' ? 'abstain' : 'allow';
+  } });
+  try {
+    const result = sdk.canUseTool?.('Bash', input, { toolUseID: id, ...(mode === 'ask-rule' ? { matchedAskRule: { source: 'user', toolName: 'Bash' } } : {}) });
+    await settle();
+    expect(requestFor(sent, id)).toBeDefined();
+    expect(scanned).toBe(mode === 'abstain' || mode === 'error' ? 1 : 0);
+    session.confirm(id, true);
+    expect(await result).toEqual({ behavior: 'allow', updatedInput: input });
+  }
+  finally { sdk.hold = Promise.resolve(); session.close(); }
 });
