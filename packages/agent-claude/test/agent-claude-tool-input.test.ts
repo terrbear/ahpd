@@ -360,6 +360,40 @@ function callFromSnapshot(session: ReturnType<typeof createSession>, toolUseId: 
   return undefined;
 }
 
+it('keeps hook-updated Bash input identical in confirmation actions, snapshots and execution', async () => {
+  const original = { command: 'git status --short', description: 'Check task changes' };
+  const id = 'toolu_hook_updated';
+  sdk.hold = new Promise(() => {});
+  const { session, sent } = await live([{
+    type: 'assistant', parent_tool_use_id: null, uuid: 'hook-a1',
+    message: { id: 'hook-msg-1', role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: original }] },
+  }], undefined, { settings: { shellXdgConfigHome: '' } });
+  try {
+    expect(callFromSnapshot(session, id)?.status).toBe('running');
+    expect(callFromSnapshot(session, id)?.toolInput).toBe(original.command);
+    const groups = asBag(sdk.queryOptions?.hooks).PreToolUse as Bag[];
+    const hook = (groups.find((group) => group.matcher === 'Bash')?.hooks as BeforeToolHook[])[0];
+    if (hook === undefined) throw new Error('Bash PreToolUse hook is missing');
+    const output = await hook({ hook_event_name: 'PreToolUse', tool_input: original }, id, { signal: new AbortController().signal });
+    const updated = asBag(asBag(output.hookSpecificOutput).updatedInput);
+    expect(updated.command).toBe(`unset XDG_CONFIG_HOME\n${original.command}`);
+    const result = sdk.canUseTool?.('Bash', updated, { toolUseID: id });
+    await settle();
+    const ready = sent.filter((action) => action.type === 'chat/toolCallReady' && action.toolCallId === id).at(-1);
+    const pending = asBag(requestFor(sent, id)?.toolCall);
+    for (const call of [ready, pending, callFromSnapshot(session, id)]) {
+      expect(call?.toolInput).toBe(updated.command);
+    }
+    expect(pending.status).toBe('pending-confirmation');
+    session.confirm(id, true);
+    expect(await result).toMatchObject({ behavior: 'allow', updatedInput: updated });
+  }
+  finally {
+    sdk.hold = Promise.resolve();
+    session.close();
+  }
+});
+
 const hookDecision = (output: Bag): string | undefined => asBag(output.hookSpecificOutput).permissionDecision as string | undefined;
 
 it('awaits a fresh AHP confirmation on each of 15 Atlassian issue edits, despite auto mode and an allowedTools rule', async () => {

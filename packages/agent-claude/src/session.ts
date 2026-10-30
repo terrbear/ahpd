@@ -2431,7 +2431,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // assistant message that would complete it skips a call no longer
       // streaming: the whole input is given here, as the action gives it.
       if (held && str(call.status) === 'streaming') delete call.partialInput;
-      if (scopeApproval !== undefined || (held && str(call.status) === 'streaming')) call.toolInput = input;
+      if (input !== undefined) call.toolInput = input;
       call.status = 'pending-confirmation';
       call.confirmationTitle = confirmationTitle;
       if (options !== undefined) call.options = options;
