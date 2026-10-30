@@ -644,3 +644,83 @@ it.each(['abstain', 'error', 'plan', 'ask-rule', 'unsafe-flags', 'unknown-flags'
   }
   finally { sdk.hold = Promise.resolve(); session.close(); }
 });
+
+it('does not use a delayed scanner allow after raw SDK input changes', async () => {
+  const id = 'toolu_scan_mutated';
+  const input = { command: 'git status' };
+  let release: ((value: 'allow') => void) | undefined;
+  sdk.hold = new Promise(() => {});
+  const { session, sent } = await live([{
+    type: 'assistant', parent_tool_use_id: null, uuid: 'mutated-a1', message: {
+      id: 'mutated-msg', role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input }],
+    },
+  }], undefined, { scanPermission: () => new Promise((resolve) => { release = resolve; }) });
+  try {
+    const result = sdk.canUseTool?.('Bash', input, { toolUseID: id });
+    await settle();
+    expect(release).toBeDefined();
+    input.command = 'rm -rf /unrelated';
+    release?.('allow');
+    await settle();
+    expect(requestFor(sent, id)).toBeDefined();
+    session.confirm(id, false);
+    expect(await result).toMatchObject({ behavior: 'deny' });
+  }
+  finally { sdk.hold = Promise.resolve(); session.close(); }
+});
+
+it.each(['cancel', 'close', 'replacement'])('does not use a delayed scanner allow after turn %s', async (mode) => {
+  const id = `toolu_scan_ended_${mode}`;
+  const input = { command: 'git status' };
+  let release: ((value: 'allow') => void) | undefined;
+  sdk.hold = new Promise(() => {});
+  const { session, sent } = await live([{
+    type: 'assistant', parent_tool_use_id: null, uuid: 'ended-a1', message: {
+      id: 'ended-msg', role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input }],
+    },
+  }], undefined, { scanPermission: () => new Promise((resolve) => { release = resolve; }) });
+  try {
+    const result = sdk.canUseTool?.('Bash', input, { toolUseID: id });
+    await settle();
+    expect(release).toBeDefined();
+    if (mode === 'close') session.close();
+    else session.cancel('');
+    if (mode === 'replacement') {
+      session.begin('replacement-turn', 'Inspect the next task');
+      await settle();
+      expect(asBag(asBag(session.chatState()).activeTurn).id).toBe('replacement-turn');
+    }
+    release?.('allow');
+    expect(await result).toMatchObject({ behavior: 'deny' });
+    expect(requestFor(sent, id)).toBeUndefined();
+  }
+  finally { sdk.hold = Promise.resolve(); session.close(); }
+});
+
+it('abstains for an unknown child agent instead of scanning under the main conversation', async () => {
+  let scanned = 0;
+  sdk.hold = new Promise(() => {});
+  const { session, sent } = await live(undefined, undefined, { scanPermission: async () => { scanned++; return 'allow'; } });
+  try {
+    const id = 'unknown-child-call';
+    const result = sdk.canUseTool?.('Bash', { command: 'git status' }, { toolUseID: id, agentID: 'unknown-child' });
+    await settle();
+    expect(scanned).toBe(0);
+    expect(requestFor(sent, id)).toBeDefined();
+    session.confirm(id, false);
+    expect(await result).toMatchObject({ behavior: 'deny' });
+  }
+  finally { sdk.hold = Promise.resolve(); session.close(); }
+});
+
+it('preserves an explicit deny rule without consulting an allowing scanner', async () => {
+  let scanned = 0;
+  sdk.hold = new Promise(() => {});
+  const { session, sent } = await live(undefined, undefined, { settings: { permissions: { deny: ['Bash'] } }, scanPermission: async () => { scanned++; return 'allow'; } });
+  try {
+    expect(await sdk.canUseTool?.('Bash', { command: 'git status' }, { toolUseID: 'denied-call' })).toMatchObject({ behavior: 'deny' });
+    expect(scanned).toBe(0);
+    expect(requestFor(sent, 'denied-call')).toBeUndefined();
+  }
+  finally { sdk.hold = Promise.resolve(); session.close(); }
+});

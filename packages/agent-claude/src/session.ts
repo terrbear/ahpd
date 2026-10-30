@@ -2342,6 +2342,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       catch { }
     }
     if (abortSignal?.aborted) return refuse('AHP confirmation was aborted before it was requested');
+    if (closed || scanTurn !== undefined && scanScope?.turn !== scanTurn) return refuse('The tool call ended while its permission was being checked');
     return await new Promise((settle) => {
       const about = bag(asked);
       /*
