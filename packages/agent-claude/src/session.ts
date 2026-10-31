@@ -9,7 +9,7 @@ import { lineOf, pastLineOf, summarize, toolInputOf } from './input.js';
 import { toolMetaOf } from './kinds.js';
 import { flagSettingsOf, optionDefaults, presetValues, queryOptionsOf } from './options.js';
 import type { ActiveTurn, McpServerState, StringOrMarkdown, ToolCallCompletedState, ToolCallRunningState, ToolResultContent, ToolResultTerminalContent, ToolResultTextContent } from '@microsoft/agent-host-protocol';
-import { Status, idOf, tail } from '@ahpd/sdk';
+import { Status, idOf, tail, scannableBashInput } from '@ahpd/sdk';
 import { attachmentContent } from './attachments.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
@@ -2316,6 +2316,33 @@ export function createSession(options: ClaudeSessionOptions): Session {
     if (already === 'deny') return refuse(`${toolName} is denied for this session`);
     const abortSignal = bag(asked).signal as AbortSignal | undefined;
     if (abortSignal?.aborted) return refuse('AHP confirmation was aborted before it was requested');
+    const about = bag(asked);
+    const scanAgent = str(about.agentID);
+    const scanScope = scopeOfCall(str(about.toolUseID) ?? '') ?? (scanAgent === undefined ? mainScope : byAgent.get(scanAgent));
+    const scanTurn = scanScope?.turn;
+    const scannerEligible = (): boolean => {
+      const permission = bag(settings.permissions);
+      return scannableBashInput(toolName, raw) && scopeApproval === undefined && about.matchedAskRule === undefined && about.defaultToNo !== true
+        && about.suppressAlwaysAllowRule !== true && about.blockedPath === undefined && about.decisionReasonType !== 'rule'
+        && about.decisionReasonType !== 'safetyCheck' && !(Array.isArray(permission.ask) && permission.ask.length > 0)
+        && settings.permissionMode !== 'plan' && settings.permissionMode !== 'dontAsk' && settled(toolName) !== 'deny';
+    };
+    if (options.scanPermission !== undefined && scannerEligible() && scanScope !== undefined && scanTurn !== undefined && str(about.toolUseID) !== undefined) {
+      const snapshot = JSON.stringify(raw);
+      try {
+        const result = await options.scanPermission({ chat: scanScope.chat?.uri ?? options.chatUri,
+          turnId: str(scanTurn.id) ?? '', toolCallId: String(about.toolUseID), toolName, cwd: options.cwd, input: raw,
+        }, abortSignal ?? new AbortController().signal);
+        if (result === 'allow' && !abortSignal?.aborted && !closed && scanScope.turn === scanTurn && JSON.stringify(raw) === snapshot
+          && scannerEligible()) {
+          if (providedBy(toolName) !== undefined) approveOpening(toolName, String(about.toolUseID), raw);
+          return { behavior: 'allow', updatedInput: raw };
+        }
+      }
+      catch { }
+    }
+    if (abortSignal?.aborted) return refuse('AHP confirmation was aborted before it was requested');
+    if (closed || scanTurn !== undefined && scanScope?.turn !== scanTurn) return refuse('The tool call ended while its permission was being checked');
     return await new Promise((settle) => {
       const about = bag(asked);
       /*
@@ -2431,7 +2458,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // assistant message that would complete it skips a call no longer
       // streaming: the whole input is given here, as the action gives it.
       if (held && str(call.status) === 'streaming') delete call.partialInput;
-      if (scopeApproval !== undefined || (held && str(call.status) === 'streaming')) call.toolInput = input;
+      if (input !== undefined) call.toolInput = input;
       call.status = 'pending-confirmation';
       call.confirmationTitle = confirmationTitle;
       if (options !== undefined) call.options = options;

@@ -1,6 +1,7 @@
 /** One agent session: its lifecycle, its turns, and what it is waiting for. */
 
 import type { Bag } from './common.js';
+import type { PermissionScanRequest } from '../permission-scanner.js';
 import type { Message } from '@microsoft/agent-host-protocol';
 import type { OnWire } from './wire.js';
 import type { BoundTool } from './agent.js';
@@ -89,6 +90,7 @@ export interface Chosen {
 
 /** How to construct a session. */
 export interface SessionOptions {
+  scanPermission?: (request: PermissionScanRequest, signal: AbortSignal) => Promise<'allow' | 'abstain'>;
   /** The session channel URI, `ahp-session:/<id>`. */
   uri: string;
   /** The chat channel URI beneath it, `ahp-chat:/<id>`. */

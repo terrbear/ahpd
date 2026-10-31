@@ -32,6 +32,7 @@ import { worktreeFor, worktreesOf } from './worktrees.js';
 import { idFor, idOf, uriFor, Status } from './catalog.js';
 import { tail, older } from './paging.js';
 import { memorySessions } from './sessions.js';
+import { permissionScannerRequested, permissionScanners } from './permission-scanner.js';
 import { meter } from './meter.js';
 import { namesOf, scopeFor } from './scopes.js';
 import type { ScopeAnswer } from './scopes.js';
@@ -3637,6 +3638,16 @@ export function createHost(options: HostOptions): Host {
     const session = used.create({
       uri,
       chatUri,
+      scanPermission: async (request, signal) => {
+        const currentTurn = (): unknown => {
+          if (request.chat === chatUri) return (deliveryOwner?.chatState() as { activeTurn?: { id?: unknown } } | undefined)?.activeTurn?.id;
+          const worker = subagents.get(request.chat);
+          return worker?.session === uri ? worker.turnId : undefined;
+        };
+        if (closed || currentTurn() !== request.turnId || request.toolCallId === '') return 'abstain';
+        const result = await scanners.scan(uri, { ...request, cwd: dirOf(uri) ?? workingDirectory ?? options.path }, signal);
+        return !closed && currentTurn() === request.turnId ? result : 'abstain';
+      },
       /*
        * The tools bound to this session: this host's own, and whatever the
        * clients already in it provide.
@@ -4441,6 +4452,7 @@ export function createHost(options: HostOptions): Host {
    * by the session, so one person opening twenty sessions is one entry.
    */
   const principals = new Map<string, Principal>();
+  const scanners = permissionScanners((client) => connections.has(client) && claimsId(client), ownerFor);
 
   /** The person an owner names, or nothing where this process never met them. */
   const principalFor = (owner: Owner | undefined): Principal | undefined =>
@@ -4875,6 +4887,7 @@ export function createHost(options: HostOptions): Host {
      */
     const gone = dirOf(uri);
     deliveries.forget(uri);
+    scanners.forget(uri);
     sessions.delete(uri);
     if (gone !== undefined) stopUnwatched(gone);
     /*
@@ -7340,6 +7353,7 @@ export function createHost(options: HostOptions): Host {
              * worktree five are its dev container flow.
              */
             _meta: {
+              'ahpd.permissionScanner': { version: 1 },
               'ahpd.activeClientSetReceipts': true,
               'ahpd.messageAttachments': true,
               ...(Array.from(agents.values()).some((agent) => agent.acceptsSystemInstructions === true)
@@ -7531,6 +7545,7 @@ export function createHost(options: HostOptions): Host {
          */
         subscribe: async (params) => {
           const channel = String(params.channel ?? '');
+          if (permissionScannerRequested(params._meta)) scanners.rebind(meantBy(channel), connection);
           // What it means here, and what it was called there. The snapshot is
           // taken of the channel and returned under the name the client used -
           // a client that asked about one URI and was answered about another
@@ -8558,11 +8573,13 @@ export function createHost(options: HostOptions): Host {
             // Whose this is: this connection's person, kept beside the session
             // so a scope change before the first turn is resolved against who
             // owns the work rather than against whoever sent it.
+            if (permissionScannerRequested(params._meta)) scanners.register(uri, connection);
             try {
               openSession(uri, provider, backendsOwn(config), running, undefined, tokensFor(provider), peers, undefined,
                 forWhom(ownerFor(connection), connection.principal), clientSystemInstructions);
             }
             catch (error) {
+              scanners.forget(uri);
               if (activeClient !== undefined) {
                 const here = presence.get(idOf(uri));
                 here?.delete(String(activeClient.clientId));

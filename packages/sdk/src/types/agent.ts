@@ -3,7 +3,7 @@
 import type { Turn } from '@microsoft/agent-host-protocol';
 import type { Bag } from './common.js';
 import type { WireTurn } from './wire.js';
-import type { Emit, Session, SubagentChat, SubagentRequest } from './session.js';
+import type { Emit, SessionOptions, Session, SubagentChat, SubagentRequest } from './session.js';
 import type { ToolDefinition } from '@microsoft/agent-host-protocol';
 import type { Offered } from './probe.js';
 import type { ResourceStore } from './resources.js';
@@ -139,6 +139,7 @@ export interface Listed {
 
 /** How the host asks a backend to start a session. */
 export interface Start {
+  scanPermission?: SessionOptions['scanPermission'];
   /** The session channel URI the client chose. */
   uri: string;
   /** The chat channel URI beneath it. */
