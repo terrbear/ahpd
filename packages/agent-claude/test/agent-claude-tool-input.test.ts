@@ -102,7 +102,7 @@ const settle = async (times = 30): Promise<void> => {
 async function live(frames: Record<string, unknown>[] = [{
   type: 'assistant', parent_tool_use_id: null, uuid: 'a1',
   message: { id: 'msg_1', role: 'assistant', content: calls },
-}], asking?: () => void, options: { settings?: Bag; mcpServers?: Record<string, Bag>; scanPermission?: NonNullable<SessionOptions['scanPermission']> } = {}): Promise<{ held: Map<string, Bag>; ready: Map<string, Bag>; session: ReturnType<typeof createSession>; sent: Bag[] }> {
+}], asking?: () => void, options: { settings?: Bag; mcpServers?: Record<string, Bag>; tools?: NonNullable<SessionOptions['tools']>; scanPermission?: NonNullable<SessionOptions['scanPermission']> } = {}): Promise<{ held: Map<string, Bag>; ready: Map<string, Bag>; session: ReturnType<typeof createSession>; sent: Bag[] }> {
   sdk.frames = frames;
   const sent: Bag[] = [];
   const session = createSession({
@@ -723,4 +723,60 @@ it('preserves an explicit deny rule without consulting an allowing scanner', asy
     expect(requestFor(sent, 'denied-call')).toBeUndefined();
   }
   finally { sdk.hold = Promise.resolve(); session.close(); }
+});
+
+it.each(['allow', 'ask-rule', 'settings-ask', 'blocked', 'safety', 'default-no', 'suppress', 'plan'])('scans contributed pure-help candidate only when host policy permits: %s', async (mode) => {
+  const id = `toolu_help_${mode}`;
+  const input = { code: 'return anton.help()' };
+  let scanned = 0;
+  sdk.hold = new Promise(() => {});
+  const { session, sent } = await live([{
+    type: 'assistant', parent_tool_use_id: null, uuid: 'help-a1', message: {
+      id: 'help-msg', role: 'assistant', content: [{ type: 'tool_use', id, name: 'mcp__ahp__anton_codemode', input }],
+    },
+  }], undefined, {
+    tools: [{ definition: { name: 'anton_codemode', inputSchema: { type: 'object' } }, owner: 'anton-owner' }],
+    settings: mode === 'plan' ? { permissionMode: 'plan' } : mode === 'settings-ask' ? { permissions: { ask: ['mcp__ahp__anton_codemode'] } } : {},
+    scanPermission: async (request) => { scanned++; expect(request.clientId).toBe('anton-owner'); return 'allow'; },
+  });
+  try {
+    const about = { toolUseID: id, ...(mode === 'ask-rule' ? { matchedAskRule: {} } : {}), ...(mode === 'blocked' ? { blockedPath: '/fixture' } : {}), ...(mode === 'safety' ? { decisionReasonType: 'safetyCheck' } : {}), ...(mode === 'default-no' ? { defaultToNo: true } : {}), ...(mode === 'suppress' ? { suppressAlwaysAllowRule: true } : {}) };
+    const result = sdk.canUseTool?.('mcp__ahp__anton_codemode', input, about);
+    if (mode === 'allow') {
+      expect(await result).toEqual({ behavior: 'allow', updatedInput: input });
+      expect(scanned).toBe(1);
+    } else {
+      await settle();
+      expect(scanned).toBe(0);
+      expect(requestFor(sent, id)).toBeDefined();
+      session.confirm(id, false);
+      await result;
+    }
+  } finally { sdk.hold = Promise.resolve(); session.close(); }
+});
+
+it('does not apply a delayed pure-help scan after the input changes', async () => {
+  const id = 'toolu_help_changed';
+  const input = { code: 'return anton.help()' };
+  let release: ((decision: 'allow') => void) | undefined;
+  sdk.hold = new Promise(() => {});
+  const { session, sent } = await live([{
+    type: 'assistant', parent_tool_use_id: null, uuid: 'help-change', message: {
+      id: 'help-change-msg', role: 'assistant', content: [{ type: 'tool_use', id, name: 'mcp__ahp__anton_codemode', input }],
+    },
+  }], undefined, {
+    tools: [{ definition: { name: 'anton_codemode', inputSchema: { type: 'object' } }, owner: 'anton-owner' }],
+    scanPermission: () => new Promise((resolve) => { release = resolve; }),
+  });
+  try {
+    const result = sdk.canUseTool?.('mcp__ahp__anton_codemode', input, { toolUseID: id });
+    await settle();
+    expect(release).toBeDefined();
+    input.code = 'return anton.builtin.grant({})';
+    release?.('allow');
+    await settle();
+    expect(requestFor(sent, id)).toBeDefined();
+    session.confirm(id, false);
+    await result;
+  } finally { sdk.hold = Promise.resolve(); session.close(); }
 });

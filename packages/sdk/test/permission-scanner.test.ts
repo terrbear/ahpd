@@ -105,3 +105,16 @@ it('does not transmit unsupported Bash execution flags to the scanner', async ()
   expect(await scanner.scan('session', { ...request, input: { command: 'pwd', dangerouslyDisableSandbox: true } }, new AbortController().signal)).toBe('abstain');
   expect(owner.peer.request).not.toHaveBeenCalled();
 });
+
+it('requires explicit pure-help opt-in and the registered contributing client', async () => {
+  const owner = client('anton-owner');
+  const scanner = permissionScanners(() => true, () => 'authenticated-owner');
+  const help = { ...request, toolName: 'mcp__ahp__anton_codemode', input: { code: 'return anton.help()' }, clientId: 'anton-owner' };
+  scanner.register('session', owner);
+  expect(await scanner.scan('session', help, new AbortController().signal)).toBe('abstain');
+  scanner.rebind('session', owner, true);
+  expect(await scanner.scan('session', { ...help, clientId: 'other' }, new AbortController().signal)).toBe('abstain');
+  expect(await scanner.scan('session', { ...help, input: { ...help.input, extra: true } }, new AbortController().signal)).toBe('abstain');
+  expect(await scanner.scan('session', help, new AbortController().signal)).toBe('allow');
+  expect(owner.peer.request).toHaveBeenCalledTimes(1);
+});

@@ -32,7 +32,7 @@ import { worktreeFor, worktreesOf } from './worktrees.js';
 import { idFor, idOf, uriFor, Status } from './catalog.js';
 import { tail, older } from './paging.js';
 import { memorySessions } from './sessions.js';
-import { permissionScannerRequested, permissionScanners } from './permission-scanner.js';
+import { permissionScannerRequested, pureHelpScannerRequested, permissionScanners } from './permission-scanner.js';
 import { meter } from './meter.js';
 import { namesOf, scopeFor } from './scopes.js';
 import type { ScopeAnswer } from './scopes.js';
@@ -7354,6 +7354,7 @@ export function createHost(options: HostOptions): Host {
              */
             _meta: {
               'ahpd.permissionScanner': { version: 1 },
+              'ahpd.pureHelpScanner': { version: 1 },
               'ahpd.activeClientSetReceipts': true,
               'ahpd.messageAttachments': true,
               ...(Array.from(agents.values()).some((agent) => agent.acceptsSystemInstructions === true)
@@ -7545,7 +7546,7 @@ export function createHost(options: HostOptions): Host {
          */
         subscribe: async (params) => {
           const channel = String(params.channel ?? '');
-          if (permissionScannerRequested(params._meta)) scanners.rebind(meantBy(channel), connection);
+          if (permissionScannerRequested(params._meta)) scanners.rebind(meantBy(channel), connection, pureHelpScannerRequested(params._meta));
           // What it means here, and what it was called there. The snapshot is
           // taken of the channel and returned under the name the client used -
           // a client that asked about one URI and was answered about another
@@ -8573,7 +8574,7 @@ export function createHost(options: HostOptions): Host {
             // Whose this is: this connection's person, kept beside the session
             // so a scope change before the first turn is resolved against who
             // owns the work rather than against whoever sent it.
-            if (permissionScannerRequested(params._meta)) scanners.register(uri, connection);
+            if (permissionScannerRequested(params._meta)) scanners.register(uri, connection, pureHelpScannerRequested(params._meta));
             try {
               openSession(uri, provider, backendsOwn(config), running, undefined, tokensFor(provider), peers, undefined,
                 forWhom(ownerFor(connection), connection.principal), clientSystemInstructions);
