@@ -9,7 +9,7 @@ import { lineOf, pastLineOf, summarize, toolInputOf } from './input.js';
 import { toolMetaOf } from './kinds.js';
 import { flagSettingsOf, optionDefaults, presetValues, queryOptionsOf } from './options.js';
 import type { ActiveTurn, McpServerState, StringOrMarkdown, ToolCallCompletedState, ToolCallRunningState, ToolResultContent, ToolResultTerminalContent, ToolResultTextContent } from '@microsoft/agent-host-protocol';
-import { Status, idOf, tail, scannableBashInput } from '@ahpd/sdk';
+import { Status, idOf, tail, scannableBashInput, scannablePureHelpInput } from '@ahpd/sdk';
 import { attachmentContent } from './attachments.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
@@ -2320,9 +2320,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const scanAgent = str(about.agentID);
     const scanScope = scopeOfCall(str(about.toolUseID) ?? '') ?? (scanAgent === undefined ? mainScope : byAgent.get(scanAgent));
     const scanTurn = scanScope?.turn;
+    const scanClient = providedBy(toolName);
     const scannerEligible = (): boolean => {
       const permission = bag(settings.permissions);
-      return scannableBashInput(toolName, raw) && scopeApproval === undefined && about.matchedAskRule === undefined && about.defaultToNo !== true
+      return (scannableBashInput(toolName, raw) || (scannablePureHelpInput(toolName, raw) && scanClient !== undefined && providedBy(toolName) === scanClient)) && scopeApproval === undefined && about.matchedAskRule === undefined && about.defaultToNo !== true
         && about.suppressAlwaysAllowRule !== true && about.blockedPath === undefined && about.decisionReasonType !== 'rule'
         && about.decisionReasonType !== 'safetyCheck' && !(Array.isArray(permission.ask) && permission.ask.length > 0)
         && settings.permissionMode !== 'plan' && settings.permissionMode !== 'dontAsk' && settled(toolName) !== 'deny';
@@ -2332,6 +2333,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       try {
         const result = await options.scanPermission({ chat: scanScope.chat?.uri ?? options.chatUri,
           turnId: str(scanTurn.id) ?? '', toolCallId: String(about.toolUseID), toolName, cwd: options.cwd, input: raw,
+          ...(scannablePureHelpInput(toolName, raw) && scanClient !== undefined ? { clientId: scanClient } : {}),
         }, abortSignal ?? new AbortController().signal);
         if (result === 'allow' && !abortSignal?.aborted && !closed && scanScope.turn === scanTurn && JSON.stringify(raw) === snapshot
           && scannerEligible()) {
