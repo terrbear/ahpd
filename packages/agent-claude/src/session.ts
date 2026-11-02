@@ -4170,6 +4170,50 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
     toolCallOwner: (toolCallId) => byClient.get(toolCallId)?.owner,
 
+    toolExecutionDiagnostics: (toolCallIds) => {
+      const ids = toolCallIds.slice(0, 32).filter((id) => typeof id === 'string' && Buffer.byteLength(id, 'utf8') <= 512);
+      const announcements = new Set<string>();
+      const handlers = new Set<string>();
+      let scanned = 0;
+      let scanComplete = true;
+      for (const values of unclaimed.values()) {
+        if (++scanned > 512) { scanComplete = false; break; }
+        for (const held of values) {
+          if (++scanned > 512) { scanComplete = false; break; }
+          announcements.add(held.id);
+        }
+        if (!scanComplete) break;
+      }
+      for (const values of expecting.values()) {
+        if (++scanned > 512) { scanComplete = false; break; }
+        for (const held of values) {
+          if (++scanned > 512) { scanComplete = false; break; }
+          if (held.id !== undefined) handlers.add(held.id);
+        }
+        if (!scanComplete) break;
+      }
+      return {
+        scanComplete, unidentifiedWaitingHandlers: 'unknown',
+        calls: ids.map((id) => {
+          let approvedClaim = 'none';
+          const approval = approvedClaims.get(id);
+          if (approval !== undefined) approvedClaim = approval.taken ? 'taken' : 'reserved';
+          let announcementAwaitingHandler: boolean | undefined;
+          if (announcements.has(id)) announcementAwaitingHandler = true;
+          else if (scanComplete) announcementAwaitingHandler = false;
+          let handlerAwaitingAnnouncement: boolean | undefined;
+          if (handlers.has(id)) handlerAwaitingAnnouncement = true;
+          else if (scanComplete) handlerAwaitingAnnouncement = false;
+          return {
+            toolCallId: id, announcementRegistered: registeredCalls.has(id),
+            announcementAwaitingHandler, handlerAwaitingAnnouncement,
+            awaitingApproval: awaitingApproval.has(id), approvedClaim,
+            clientRequestPublished: byClient.has(id),
+          };
+        }),
+      };
+    },
+
     /**
      * What a client says its own tool did.
      *

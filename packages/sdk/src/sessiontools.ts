@@ -192,7 +192,7 @@ const inlineInput = (input: unknown): string => {
 export const serializeContext = (
   session: Summary,
   chatId: string | undefined,
-  snapshot: { turns: Bag[]; activeTurn?: Bag; hasMoreHistory: boolean; delivery?: Bag },
+  snapshot: { turns: Bag[]; activeTurn?: Bag; hasMoreHistory: boolean; delivery?: Bag; executionDiagnostics?: Bag },
   detail: Detail,
   limit: number,
 ): Bag => {
@@ -242,6 +242,7 @@ export const serializeContext = (
     hasMoreHistory: snapshot.hasMoreHistory,
     truncated,
     ...snapshot.delivery,
+    ...(snapshot.executionDiagnostics !== undefined ? { executionDiagnostics: snapshot.executionDiagnostics } : {}),
   };
 };
 
@@ -605,6 +606,7 @@ export const sessionTools = (): HostTool[] => [
         properties: {
           session: { type: 'string', description: 'The session or chat to read: a session URI from `list_sessions`, or an `agent-host-session://` link. A link carrying a chat id targets that specific chat.' },
           detail: { type: 'string', enum: ['summary', 'digest', 'full'], description: 'How much conversation detail to return. `summary` (default): status and a short per-turn gist (the message plus a compact snippet of the reply). `digest`: adds the full assistant reply text and tool-call names. `full`: adds tool-call inputs. Higher levels return more tokens.' },
+          executionDiagnostics: { type: 'boolean', description: 'Opt in to bounded read-only broker identity/status diagnostics. Requires the exact live chat within the caller owner scope; missing execution or completion evidence remains unknown. No arguments or outputs are included in diagnostics.' },
           pendingOffset: { type: 'integer', minimum: 0, description: 'Offset into pendingMessages, independently of transcript history.' },
           transcriptLimit: { type: 'number', description: 'Maximum number of most-recent turns to include. Defaults to 10; capped at 50.' },
         },
@@ -623,12 +625,14 @@ export const sessionTools = (): HostTool[] => [
       const limit = Math.min(50, Math.floor(typeof asked === 'number' ? asked : 10));
       const pendingOffset = input.pendingOffset ?? 0;
       if (!Number.isSafeInteger(pendingOffset) || Number(pendingOffset) < 0) throw new Error('pendingOffset must be a non-negative safe integer');
-      const snapshot = await at.context(found.session.resource, found.chatId, Number(pendingOffset));
+      const diagnostics = flag(input.executionDiagnostics, 'executionDiagnostics', tool) ?? false;
+      const snapshot = await at.context(found.session.resource, found.chatId, Number(pendingOffset), diagnostics);
       if (snapshot === undefined) {
         return JSON.stringify({
           session: found.session.resource,
           openLink: openLink(found.session.resource, found.session.provider, found.chatId),
           detail, transcript: [], hasMoreHistory: false, truncated: false,
+          ...(diagnostics ? { executionDiagnostics: { state: 'unknown' } } : {}),
           deliveryState: 'unknown', reason: 'The host snapshot is unavailable; absence never authorizes retry',
         });
       }

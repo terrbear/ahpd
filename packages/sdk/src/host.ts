@@ -1,3 +1,4 @@
+import { assertDiagnosticTarget, sessionExecutionDiagnostics } from './sessiondiagnostics.js';
 /**
  * The protocol server: channels, subscriptions, requests and state actions.
  *
@@ -5675,6 +5676,21 @@ export function createHost(options: HostOptions): Host {
    * what `createSession` comes to. Nothing is reachable from here that is not
    * reachable from a client, and the reverse is nearly true.
    */
+  const diagnosticClients = (uri: string): { activeClients: Bag[]; connectedClients: Set<string>; connectionsComplete: boolean } => {
+    const activeClients: Bag[] = [];
+    for (const client of presence.get(idOf(uri))?.values() ?? []) {
+      activeClients.push(client);
+      if (activeClients.length > 512) break;
+    }
+    const connectedClients = new Set<string>();
+    let count = 0;
+    for (const connection of connections) {
+      if (++count > 512) return { activeClients, connectedClients, connectionsComplete: false };
+      if (connection.clientId !== undefined) connectedClients.add(connection.clientId);
+    }
+    return { activeClients, connectedClients, connectionsComplete: true };
+  };
+
   const toolContext = (uri: string, chatUri: string): ToolCall => ({
     session: uri,
     chat: chatUri,
@@ -5695,14 +5711,24 @@ export function createHost(options: HostOptions): Host {
     models: () => [...learned].flatMap(([provider, known]) => known.models.map((model) => ({
       id: model.id, name: model.name, provider,
     }))),
-    context: async (session, chatId, pendingOffset) => {
+    context: async (session, chatId, pendingOffset, executionDiagnostics) => {
       const held = sessions.get(heldAs(session));
       const found = held === undefined ? undefined : chatMeant(held, chatId);
       if (found === undefined) return undefined;
+      if (executionDiagnostics) assertDiagnosticTarget(
+        { session: heldAs(uri), owner: kept.owner(idOf(uri)) },
+        { session: heldAs(session), owner: kept.owner(idOf(session)), chat: found.uri, actualChat: found.chat.chatUri },
+      );
       const state = found.chat.chatState() as { turns?: unknown; activeTurn?: unknown; turnsNextCursor?: unknown };
       return {
         turns: Array.isArray(state.turns) ? state.turns as Bag[] : [],
         ...(typeof state.activeTurn === 'object' && state.activeTurn !== null ? { activeTurn: state.activeTurn as Bag } : {}),
+        ...(executionDiagnostics ? { executionDiagnostics: sessionExecutionDiagnostics({
+          session: heldAs(session), chat: found.uri, snapshot: state as Bag,
+          inputNeeded: found.chat.sessionState().inputNeeded,
+          ...diagnosticClients(heldAs(session)),
+          ...(found.chat.toolExecutionDiagnostics === undefined ? {} : { probe: (ids) => found.chat.toolExecutionDiagnostics!(ids) }),
+        }) } : {}),
         hasMoreHistory: state.turnsNextCursor !== undefined,
         delivery: deliveries.context({ resource: heldAs(session), chat: found.uri, session: found.chat }, pendingOffset),
       };

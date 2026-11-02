@@ -435,6 +435,7 @@ export interface Session {
    * call's own contributor.
    */
   toolCallOwner?(toolCallId: string): string | undefined;
+  toolExecutionDiagnostics?(toolCallIds: readonly string[]): Bag;
   /**
    * What a client says one of its own tool calls did.
    *
