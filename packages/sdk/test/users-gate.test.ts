@@ -281,7 +281,10 @@ it('scopes a capability to the URI scheme, so plain write is not a plugin\'s sch
   })).toMatchObject({ result: {} });
 });
 
-it('lets a person read their own usage pools, and refuses them another person\'s', async () => {
+it('lets a person read their own usage pools, and refuses them another person\'s', async ({ onTestFinished }) => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  onTestFinished(() => { vi.useRealTimers(); });
+  vi.setSystemTime(new Date('2026-10-07T12:00:00.000Z'));
   /*
    * Every `usage:` URI is `usage:read` at the gate, which would refuse the very
    * person the scheme serves their own pools to. The provider's own `authorize`
