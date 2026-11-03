@@ -3,6 +3,7 @@ import type { OutboundClose, OutboundCloseReason, Wire } from './types/rpc.js';
 
 export const DEFERRED_BYTE_LIMIT = 256 * 1024;
 export const OUTSTANDING_FRAME_LIMIT = 256;
+export const DEFERRED_FRAME_LIMIT = 4096;
 export const DRAIN_GRACE_MS = 5000;
 export const DRAIN_CHECK_MS = 10;
 
@@ -29,6 +30,12 @@ export function createNodeOutbound(wire: Wire, closePeer: () => void, highWater:
     started = undefined;
     oversizedBytes = null;
     oversizedPending = false;
+  };
+  const startGrace = (): void => {
+    if (started !== undefined) return;
+    started = performance.now();
+    check = setInterval(pump, DRAIN_CHECK_MS);
+    (check as unknown as { unref?(): void }).unref?.();
   };
   const overload = (reason: OutboundCloseReason): void => {
     if (stopped) return;
@@ -74,7 +81,7 @@ export function createNodeOutbound(wire: Wire, closePeer: () => void, highWater:
     pumping = true;
     try {
       // The entire FIFO is <=256 KiB. No new oversized frame can enter here.
-      while (!stopped && queue.length > 0) {
+      while (!stopped && queue.length > 0 && outstanding < OUTSTANDING_FRAME_LIMIT) {
         if (expired()) return;
         const frame = queue.shift()!;
         deferredBytes -= frame.bytes;
@@ -92,8 +99,9 @@ export function createNodeOutbound(wire: Wire, closePeer: () => void, highWater:
       if (serializing) { overload('write_error'); return; }
       pump();
       if (stopped || expired()) return;
-      if (outstanding + queue.length >= OUTSTANDING_FRAME_LIMIT) { overload('frame_count_limit'); return; }
+      if (outstanding >= OUTSTANDING_FRAME_LIMIT) startGrace();
       if (started !== undefined) {
+        if (queue.length >= DEFERRED_FRAME_LIMIT) { overload('frame_count_limit'); return; }
         const budget = DEFERRED_BYTE_LIMIT - deferredBytes;
         if (budget === 0) { overload('deferred_byte_limit'); return; }
         let frame: { text: string; bytes: number };
@@ -123,11 +131,9 @@ export function createNodeOutbound(wire: Wire, closePeer: () => void, highWater:
       const bytes = utf8Bytes(text);
       const oversized = bytes > highWater;
       if (oversized) {
-        started = performance.now();
+        startGrace();
         oversizedBytes = bytes;
         oversizedPending = true;
-        check = setInterval(pump, DRAIN_CHECK_MS);
-        (check as unknown as { unref?(): void }).unref?.();
       }
       write(text, oversized);
     },

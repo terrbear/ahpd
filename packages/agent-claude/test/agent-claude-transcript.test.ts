@@ -144,3 +144,43 @@ it('reads a compact summary as no prompt', async () => {
   expect(turns).toHaveLength(1);
   expect(turns[0]?.message).toMatchObject({ text: 'keep going' });
 });
+
+it.each([false, true])('restores cancellation provenance without relabeling actual denials (interrupted: %s)', async (interrupted) => {
+  const { rejectedToolText, interruptedToolText } = await import('../src/interruption.js');
+  const history = [
+    prompt('u1', 'prepare a table'),
+    said('a1', 'm1', [{ type: 'tool_use', id: 'call', name: 'mcp__ahp__anton_codemode', input: { code: 'return 17' } }]),
+    frame('user', 'r1', { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call', content: rejectedToolText, is_error: true }] }),
+  ];
+  if (interrupted) history.push(prompt('interrupt', '[Request interrupted by user for tool use]'));
+  history.push(prompt('u2', 'are you still running?'));
+  const turns = await read(history);
+  expect(turns).toHaveLength(2);
+  expect(turns[0]).toMatchObject({ state: interrupted ? 'cancelled' : 'complete' });
+  expect((turns[0]!.responseParts as Bag[])[0]!.toolCall).toMatchObject({
+    success: false, content: [{ text: interrupted ? interruptedToolText : rejectedToolText }],
+  });
+});
+
+it('keeps the host interruption reminder out of the restored user prompt', async () => {
+  const { interruptionNotice } = await import('../src/interruption.js');
+  const turns = await read([prompt('u1', `${interruptionNotice}\n\nare you still running?`)]);
+  expect(turns[0]).toMatchObject({ message: { text: 'are you still running?' } });
+});
+
+it('does not reinterpret an earlier denial when a different result precedes interruption', async () => {
+  const { rejectedToolText, interruptedToolText } = await import('../src/interruption.js');
+  const result = (id: string) => frame('user', `result-${id}`, { role: 'user', content: [{
+    type: 'tool_result', tool_use_id: id, content: rejectedToolText, is_error: true,
+  }] });
+  const turns = await read([
+    prompt('u1', 'run tools'),
+    said('a1', 'm1', ['denied', 'interrupted'].map((id) => ({ type: 'tool_use', id, name: 'Bash', input: {} }))),
+    result('denied'), result('interrupted'), prompt('stop', '[Request interrupted by user for tool use]'),
+  ]);
+  const calls = (turns[0]!.responseParts as Bag[]).map((part) => part.toolCall);
+  expect(calls).toMatchObject([
+    { toolCallId: 'denied', content: [{ text: rejectedToolText }] },
+    { toolCallId: 'interrupted', content: [{ text: interruptedToolText }] },
+  ]);
+});

@@ -11,6 +11,7 @@ import { flagSettingsOf, optionDefaults, presetValues, queryOptionsOf } from './
 import type { ActiveTurn, McpServerState, StringOrMarkdown, ToolCallCompletedState, ToolCallRunningState, ToolResultContent, ToolResultTerminalContent, ToolResultTextContent } from '@microsoft/agent-host-protocol';
 import { Status, idOf, tail, scannableBashInput, scannablePureHelpInput } from '@ahpd/sdk';
 import { attachmentContent } from './attachments.js';
+import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
 import { pinnedModel, pinnedModels } from './models.js';
@@ -780,6 +781,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const reservedNativeId = options.resume ?? (UUID.test(idOf(uri)) ? idOf(uri) : crypto.randomUUID());
   let hasNativePrompt = options.resume !== undefined;
   let nativePromptSent = false;
+  let interruptionPending = turns.at(-1)?.state === 'cancelled';
+  const interruptedCalls = new Map<string, string>();
   /** What the session is doing, in one line, or nothing when it is idle. */
   let activity: string | undefined;
   /**
@@ -1001,6 +1004,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const expecting = new Map<string, { id?: string; input: string; settle: (id: string | undefined) => void }[]>();
   let claimGeneration = 0;
   const clientClaimGenerations = new Map<string, number>();
+  let clientToolsRevision = 0;
+  let publishedToolsRevision = 0;
 
   // Claim registration is independent of the transcript row's status: a
   // permission callback can open that row before the canonical frame arrives.
@@ -1123,6 +1128,17 @@ export function createSession(options: ClaudeSessionOptions): Session {
       byClient.delete(id);
       held.settle({ text: why, ok: false });
     }
+  };
+
+  const clientRunner = (): typeof ranByClient => {
+    const generations = new Map(clientClaimGenerations);
+    return (tool, input) => {
+      const owner = tool.owner ?? '';
+      if ((generations.get(owner) ?? 0) !== (clientClaimGenerations.get(owner) ?? 0)) {
+        return Promise.resolve({ text: 'The tool connection closed before this call could be dispatched. This was not a permission rejection.', ok: false });
+      }
+      return ranByClient(tool, input);
+    };
   };
 
   const ranByClient = async (tool: BoundTool, input: Bag): Promise<{ text: string; ok: boolean }> => {
@@ -1453,7 +1469,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * at construction so `setMcpServers` keeps it: that call replaces the whole
    * set, and a set rebuilt without this would take the host's tools away.
    */
-  if (offering.length > 0) declared.ahp = contributed(offering, ranByClient, contributedWork) as Bag;
+  if (offering.length > 0) declared.ahp = contributed(offering, clientRunner(), contributedWork) as Bag;
 
   /** What each server that needs signing in published about itself, by name. */
   const wanted = new Map<string, Published>();
@@ -2156,7 +2172,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // Back to thinking. Leaving the last tool's name up makes a session look
       // busy with something that finished.
       if (scope === mainScope) doing('Thinking');
-      const text = resultText(block.content);
+      const interruptedTurn = id === undefined ? undefined : interruptedCalls.get(id);
+      let text = resultText(block.content);
+      if (!ok && interruptedTurn !== undefined && text === rejectedToolText) text = interruptedToolText;
       /*
        * The result, as one object, because that is the only part of the action
        * a client reads.
@@ -2232,7 +2250,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       }
       emitOn(scope, {
         type: 'chat/toolCallComplete',
-        turnId: scope.turn?.id,
+        turnId: interruptedTurn ?? scope.turn?.id,
         toolCallId: id,
         result,
         ...(progressed ? { _meta: call._meta ?? {} } : {}),
@@ -2620,7 +2638,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
           const restored = setShellInit(settings.shellInitScripts);
           if (restored !== true) throw new Error(restored);
         }
-        if (offering.length > 0) declared.ahp = contributed(offering, ranByClient, contributedWork) as Bag;
+        if (offering.length > 0) declared.ahp = contributed(offering, clientRunner(), contributedWork) as Bag;
       }
       const handle = query({
         prompt: input(signal.signal),
@@ -2935,7 +2953,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
       emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
     }
     beginning = undefined;
-    const sent = carried === undefined ? text : `${carried}\n\n${text}`;
+    let sent = carried === undefined ? text : `${carried}\n\n${text}`;
+    if (interruptionPending) {
+      sent = `${interruptionNotice}\n\n${sent}`;
+      interruptionPending = false;
+    }
     carried = undefined;
     hasNativePrompt = true;
     nativePromptSent = true;
@@ -4033,6 +4055,18 @@ export function createSession(options: ClaudeSessionOptions): Session {
     },
 
     cancel: (turnId) => {
+      const cancelling = turnId || str(active?.id);
+      if (active !== undefined) {
+        interruptionPending = true;
+        for (const scope of scopes.values()) {
+          const made = spawning.get(scope.parent)?.turn;
+          if (scope !== mainScope && made !== undefined && made !== cancelling) continue;
+          for (const [id, part] of scope.parts) {
+            const call = bag(part.toolCall);
+            if (call.status !== 'completed' && call.status !== 'cancelled') interruptedCalls.set(id, str(scope.turn?.id) ?? turnId);
+          }
+        }
+      }
       beginning = undefined;
       // A turn blocked on a person is stopped by answering no, not by leaving
       // a promise nobody will settle - the subprocess would sit there for ever.
@@ -4057,7 +4091,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
        * running and ends on its own `task_notification`. A worker whose call
        * was never seen has no turn on record and is ended with this one.
        */
-      const cancelling = turnId || str(active?.id);
       for (const scope of [...scopes.values()]) {
         if (scope.parent === '' || scope.chat === undefined) continue;
         const made = spawning.get(scope.parent)?.turn;
@@ -4156,13 +4189,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
     setTools: async (next) => {
       const before = offering.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const after = next.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
-      if (before === after) return true;
+      const revision = clientToolsRevision;
+      if (before === after && publishedToolsRevision === revision) return true;
       const requested = { ...declared };
-      if (next.length > 0) requested.ahp = contributed(next, ranByClient, contributedWork) as Bag;
+      if (next.length > 0) requested.ahp = contributed(next, clientRunner(), contributedWork) as Bag;
       else delete requested.ahp;
       try { await handle.setMcpServers(requested as never); }
       catch { return false; }
       offering = [...next];
+      publishedToolsRevision = revision;
       if (requested.ahp === undefined) delete declared.ahp;
       else declared.ahp = requested.ahp;
       return true;
@@ -4193,6 +4228,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     },
 
     clientGone: (clientId) => {
+      clientToolsRevision++;
       // A tool call whose client has gone is a turn waiting on a promise
       // nothing will settle. The agent is told it failed, which is true, and
       // is left to decide what to do about it.
