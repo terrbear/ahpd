@@ -540,16 +540,16 @@ describe('what it will not pretend', () => {
 
 
 /** A connected client with one session, subscribed to both its channels. */
-async function running() {
+async function running(scanner = false) {
   const host = serving('/home/softov');
   const p = peer();
-  const client = host.accept(p);
+  const client = host.accept(p, undefined, scanner);
   // Root included: a catalogue notification goes to the connections watching
   // the root channel and to no others, so a client that never subscribed to
   // it hears nothing - correctly.
   await client.handle(hello(['0.8.0'], { initialSubscriptions: ['ahp-root://'] }));
   const uri = 'ahp-session:/live';
-  await client.handle({ method: 'createSession', params: { channel: uri, provider: 'claude' } });
+  await client.handle({ method: 'createSession', params: { channel: uri, provider: 'claude', ...(scanner ? { _meta: { 'ahpd.permissionScanner': { version: 1 } } } : {}) } });
   // Read, not assumed. What a session calls its chat is the host's to say and
   // the client's to look up - a test that hard-codes it is testing a spelling
   // rather than the lookup every client actually does.
@@ -1049,6 +1049,37 @@ describe('driving a turn', () => {
     };
     const failure = after.snapshot.state.turns[0]?.responseParts.find((one) => one.kind === 'error');
     expect(failure?.error?.message).toContain('error_max_turns');
+  });
+
+  it('routes opted-in scanner approvals over the creating peer without a confirmation card', async () => {
+    const { client, peer: p, uri, chatUri } = await running(true);
+    const scans: { method: string; params: unknown; timeout: number | undefined }[] = [];
+    p.request = async (method, params, timeout) => { scans.push({ method, params, timeout }); return { decision: 'allow' }; };
+    client.handle({ method: 'dispatchAction', params: { channel: uri, action: { type: 'chat/turnStarted', turnId: 'scan-turn', message: { text: 'Inspect task changes' } } } });
+    await settle();
+    expect(await sdk.canUseTool?.('Bash', { command: 'git status --short' }, { toolUseID: 'scan-call' })).toEqual({ behavior: 'allow', updatedInput: { command: 'git status --short' } });
+    expect(scans).toHaveLength(1);
+    expect(scans[0]).toMatchObject({ method: 'anton/scanPermission', timeout: 1500, params: {
+      session: 'claude:/live', chat: `ahp-chat://default/${Buffer.from('claude:/live').toString('base64url')}`, turnId: 'scan-turn', toolCallId: 'scan-call', toolName: 'Bash', input: { command: 'git status --short' },
+    } });
+    expect(actions(p).some((one) => one.action.type === 'session/inputNeededSet')).toBe(false);
+  });
+
+  it('rebinds scanner delivery to an authenticated attach socket before the creation socket closes', async () => {
+    const { host, client, peer: creating, uri } = await running(true);
+    const attachedPeer = peer();
+    const attached = host.accept(attachedPeer, undefined, true);
+    await attached.handle(hello(['0.8.0']));
+    await attached.handle({ method: 'subscribe', params: { channel: uri, _meta: { 'ahpd.permissionScanner': { version: 1 } } } });
+    let originalScans = 0;
+    let attachedScans = 0;
+    creating.request = async () => { originalScans++; return { decision: 'allow' }; };
+    attachedPeer.request = async () => { attachedScans++; return { decision: 'allow' }; };
+    client.handle({ method: 'dispatchAction', params: { channel: uri, action: { type: 'chat/turnStarted', turnId: 'rebound-scan', message: { text: 'Inspect' } } } });
+    await settle();
+    expect(await sdk.canUseTool?.('Bash', { command: 'git status' }, { toolUseID: 'rebound-call' })).toEqual({ behavior: 'allow', updatedInput: { command: 'git status' } });
+    expect(originalScans).toBe(0);
+    expect(attachedScans).toBe(1);
   });
 
   it('blocks on a confirmation and runs the tool when it is approved', async () => {

@@ -72,3 +72,5 @@ export type * from './types/index.js';
 
 export { embeddedAttachments } from './attachments.js';
 export type { EmbeddedAttachment } from './attachments.js';
+
+export { scannableBashInput, scannablePureHelpInput } from './permission-scanner.js';

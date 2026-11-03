@@ -518,3 +518,49 @@ it.each(['cancel', 'disconnect'] as const)('tombstones an allowed-list reservati
   expect(session.completeToolCall?.('autoallowed-next', shellOwner, { text: 'next receipt', ok: true })).toBe(true);
   await expect(result).resolves.toMatchObject({ content: [{ text: 'next receipt' }] });
 });
+
+it('observes announced-before-handler, pending execution and completion without consuming claims', async () => {
+  const { session, tool, canonical, approve, executions } = await claimFixture();
+  const input = { command: 'SECRET-COMMAND' };
+  await approve('diagnostic-call', input);
+  await canonical('diagnostic-call', input);
+  session.queue('diagnostic-queued-1', 'retain first queued prompt');
+  session.queue('diagnostic-queued-2', 'retain second queued prompt');
+  const queuedBefore = structuredClone(session.chatState().queuedMessages);
+  const diagnostic = () => session.toolExecutionDiagnostics?.(['diagnostic-call']);
+  const before = diagnostic();
+  expect(before).toMatchObject({ scanComplete: true, calls: [{ toolCallId: 'diagnostic-call', announcementRegistered: true,
+    announcementAwaitingHandler: true, handlerAwaitingAnnouncement: false, clientRequestPublished: false, approvedClaim: 'reserved' }] });
+  expect(executions()).toHaveLength(0);
+  expect(diagnostic()).toEqual(before);
+  expect(JSON.stringify(before)).not.toContain('SECRET');
+  const result = tool.handler(input);
+  await until(() => executions().length === 1);
+  const pending = diagnostic();
+  expect(pending).toMatchObject({ calls: [{ announcementAwaitingHandler: false, clientRequestPublished: true, approvedClaim: 'taken' }] });
+  expect(session.sessionState().inputNeeded).toHaveLength(1);
+  expect(diagnostic()).toEqual(pending);
+  expect(session.completeToolCall?.('diagnostic-call', otherShellOwner, { text: 'wrong', ok: true })).toBe(false);
+  expect(session.completeToolCall?.('diagnostic-call', shellOwner, { text: 'SECRET-OUTPUT', ok: true })).toBe(true);
+  await result;
+  expect(diagnostic()).toMatchObject({ calls: [{ clientRequestPublished: false, announcementRegistered: true }] });
+  expect(JSON.stringify(diagnostic())).not.toContain('SECRET');
+  expect(session.chatState().queuedMessages).toEqual(queuedBefore);
+});
+
+it('observes handler awaiting its reserved announcement without starting or re-registering work', async () => {
+  const { session, tool, canonical, approve, executions } = await claimFixture();
+  const input = { command: 'RESERVED-SECRET' };
+  await approve('diagnostic-reserved', input);
+  const result = tool.handler(input);
+  await until(() => (session.toolExecutionDiagnostics?.(['diagnostic-reserved']).calls as Bag[])[0]?.handlerAwaitingAnnouncement === true);
+  expect(executions()).toHaveLength(0);
+  const before = session.toolExecutionDiagnostics?.(['diagnostic-reserved']);
+  expect(before).toMatchObject({ calls: [{ announcementRegistered: false, handlerAwaitingAnnouncement: true, clientRequestPublished: false }] });
+  expect(session.toolExecutionDiagnostics?.(['diagnostic-reserved'])).toEqual(before);
+  await canonical('diagnostic-reserved', input);
+  await until(() => executions().length === 1);
+  session.clientGone?.(shellOwner);
+  await result;
+  expect(session.toolExecutionDiagnostics?.(['diagnostic-reserved'])).toMatchObject({ calls: [{ clientRequestPublished: false }] });
+});

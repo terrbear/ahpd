@@ -188,3 +188,11 @@ remain attached to queued and resumed turns. PNG, JPEG, GIF, WebP, PDF, and UTF-
 text are supported, with a 5 MB image limit and a 25 MB total per message. The
 host advertises this transport as `_meta["ahpd.messageAttachments"]` during
 initialization.
+
+### Anton permission scanner
+
+Hosts advertise `_meta["ahpd.permissionScanner"]: { "version": 1 }` during initialization. An authenticated client opts a session into scanner-first permission handling with the same metadata on `createSession`. The host sends `anton/scanPermission` requests only to that creating connection, carrying the canonical session and chat URIs, live turn and tool-call IDs, tool name, trusted session working directory, and final SDK tool input. Only `{ "decision": "allow" }` approves a call. Abstention, malformed responses, errors, disconnection, cancellation, and a 1500 ms deadline all retain the ordinary approval flow.
+
+The Claude backend scans supported Bash inputs from `canUseTool`, after SDK hooks have produced their effective input. It does not install blanket Claude allow rules or return an unsafe `PreToolUse` allow: independent hooks can rewrite input after another hook's decision. Plan mode, explicit ask rules and sensitive SDK prompts, Jira confirmation gates, unknown Bash options, and existing deny rules retain their existing behavior.
+
+To reconnect within the same host process, send `subscribe` with the opt-in metadata on the session channel. Rebinding requires the original client ID and authenticated principal or host identity, replacing the previous socket even when it is still closing. Registrations are intentionally not inferred from viewers or persisted session configuration: after a daemon restart, an old session falls back to ordinary approval rather than choosing a new scanner owner.
