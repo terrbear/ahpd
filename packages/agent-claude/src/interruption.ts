@@ -1,0 +1,3 @@
+export const rejectedToolText = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+export const interruptedToolText = 'Tool execution was interrupted when the turn was stopped. This was not a permission rejection. Effects completed before interruption may remain.';
+export const interruptionNotice = '<system-reminder>The previous turn was interrupted by Stop or Send now. Its interrupted tool calls were not permission rejections. Follow the latest user message, and check for completed effects before retrying mutations.</system-reminder>';

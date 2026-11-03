@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { lineOf, pastLineOf, toolInputOf } from './input.js';
 import { toolMetaOf } from './kinds.js';
+import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
 
 /**
  * Reads a session that already happened, as turns.
@@ -204,6 +205,7 @@ function isCliEcho(content: unknown): boolean {
 function buildTurns(messages: unknown[]): WireTurn<Turn>[] {
   const built: WireTurn<Turn>[] = [];
   const calls = new Map<string, Bag>();
+  let recentRejections: Bag[] = [];
   /*
    * Each turn's usage by API message. The CLI writes one message as a frame
    * per content block, each repeating that message's usage, so a message is
@@ -217,10 +219,24 @@ function buildTurns(messages: unknown[]): WireTurn<Turn>[] {
     const message = bag(frame.message);
     const at = str(frame.timestamp) ?? new Date(0).toISOString();
 
+    if (role === 'assistant') recentRejections = [];
     if (role === 'user') {
-      const said = typeof message.content === 'string'
+      let said = typeof message.content === 'string'
         ? message.content
         : list(message.content).map((b) => str(bag(b).text)).filter(Boolean).join('\n');
+      if (said.startsWith(`${interruptionNotice}\n\n`)) said = said.slice(interruptionNotice.length + 2);
+
+      if (said === '[Request interrupted by user for tool use]' || said === '[Request interrupted by user]') {
+        for (const call of recentRejections) {
+          call.content = [{ type: 'text', text: interruptedToolText }];
+          call.error = { message: interruptedToolText };
+        }
+        recentRejections = [];
+        const turn = built.at(-1);
+        if (turn) turn.state = 'cancelled';
+        continue;
+      }
+      if (said || list(message.content).some((block) => bag(block).type === 'tool_result')) recentRejections = [];
 
       // A user frame carrying only tool results is the SDK reporting calls
       // finishing, not somebody saying something. Turning it into a turn puts
@@ -245,6 +261,7 @@ function buildTurns(messages: unknown[]): WireTurn<Turn>[] {
         // The past tense the call was built with stands: a failure is `success`.
         call.success = ok;
         const text = resultText(block.content);
+        if (!ok && text === rejectedToolText) recentRejections.push(call);
         // `type` on every block: these are MCP's content blocks and it is what
         // tells them apart. Checked, because this is an assignment onto a
         // `Bag` and so outside the literal the call was built as.

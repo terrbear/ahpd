@@ -293,7 +293,7 @@ it('lets a person read their own usage pools, and refuses them another person\'s
   const usage = fileUsage({ folder: join(root, 'usage') });
   for (const [who, pool] of [['ana', 'user:ana'], ['bob', 'user:bob']] as const) {
     await usage.record({
-      at: '2026-10-02T10:00:00.000Z',
+      at: new Date().toISOString(),
       kind: 'model',
       source: 'proxy',
       owner: `user:${who}`,
