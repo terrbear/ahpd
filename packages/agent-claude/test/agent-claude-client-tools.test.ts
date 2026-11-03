@@ -10,6 +10,7 @@ const sdk = vi.hoisted(() => {
     canUseTool: undefined as undefined | ((name: string, input: Bag, about?: Bag) => Promise<unknown>),
     server: undefined as undefined | { tools: { name: string; inputSchema: Record<string, z.ZodTypeAny>; handler: (input: Bag) => Promise<Bag> }[] },
     frames: [] as Bag[],
+    inputs: [] as Bag[],
     wake: undefined as undefined | (() => void),
     push(frame: Bag) {
       state.frames.push(frame);
@@ -29,7 +30,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
     sdk.server = given;
     return { type: 'sdk', name: 'ahp', tools: given?.tools };
   },
-  query: ({ options }: { options: Bag }) => {
+  query: ({ options, prompt }: { options: Bag; prompt: AsyncIterable<Bag> }) => {
+    void (async () => { for await (const message of prompt) sdk.inputs.push(message); })();
     sdk.canUseTool = options.canUseTool as typeof sdk.canUseTool;
     return {
       async *[Symbol.asyncIterator]() { for (;;) yield await sdk.next(); },
@@ -65,6 +67,7 @@ beforeEach(() => {
   sdk.canUseTool = undefined;
   sdk.server = undefined;
   sdk.frames = [];
+  sdk.inputs = [];
   sdk.wake = undefined;
 });
 
@@ -350,7 +353,11 @@ const claimFixture = async (definition = shellTool(shellOwner), onAction?: (acti
   };
   const executions = () => sent.filter((action) => action.type === 'session/inputNeededSet'
     && (action.request as Bag).kind === 'toolClientExecution').map((action) => action.request as Bag);
-  return { session, tool, canonical, approve, executions };
+  const reconnect = async () => {
+    expect(await session.setTools?.([definition])).toBe(true);
+    return sdk.server!.tools.find((one) => one.name === 'launch_shell')!;
+  };
+  return { session, tool, canonical, approve, executions, reconnect, sent };
 };
 
 it.each(['canonical-first', 'handler-first'] as const)('matches concurrent calls by input with reversed %s arrivals and canonical replay', async (order) => {
@@ -383,7 +390,7 @@ it.each(['canonical-first', 'handler-first'] as const)('matches concurrent calls
 
 for (const ending of ['cancel', 'disconnect', 'dispose'] as const) {
   it.each(['waiting', 'queued', 'joining'] as const)(`cleans client registrations on ${ending} while %s`, async (phase) => {
-    const { session, tool, canonical, approve, executions } = await claimFixture();
+    const { session, tool, canonical, approve, executions, reconnect } = await claimFixture();
     const input = { command: 'same-input' };
     await approve('old', input);
     if (phase !== 'waiting') await canonical('old', input);
@@ -396,8 +403,9 @@ for (const ending of ['cancel', 'disconnect', 'dispose'] as const) {
     expect(session.sessionState().inputNeeded ?? []).toEqual([]);
     if (ending === 'dispose') return;
     if (ending === 'cancel') session.begin('next-turn', 'Continue');
+    const current = ending === 'disconnect' ? await reconnect() : tool;
     await approve('next', input);
-    const next = tool.handler(input);
+    const next = current.handler(input);
     await canonical('old', input);
     await canonical('next', input);
     await until(() => executions().length === 1);
@@ -502,7 +510,7 @@ it('invalidates a permission aborted before its prompt for a later SDK-autoallow
 });
 
 it.each(['cancel', 'disconnect'] as const)('tombstones an allowed-list reservation without a transcript row on %s', async (ending) => {
-  const { session, tool, canonical, executions } = await claimFixture();
+  const { session, tool, canonical, executions, reconnect } = await claimFixture();
   const input = { command: 'identical' };
   await session.setConfig?.('permissions', { allow: ['mcp__ahp__launch_shell'], deny: [] });
   await expect(sdk.canUseTool!('mcp__ahp__launch_shell', input, { toolUseID: 'early-allow' })).resolves.toMatchObject({ behavior: 'allow' });
@@ -511,10 +519,113 @@ it.each(['cancel', 'disconnect'] as const)('tombstones an allowed-list reservati
     session.begin('next-turn', 'Continue');
   } else session.clientGone?.(shellOwner);
   await canonical('early-allow', input);
-  const result = tool.handler(input);
+  const current = ending === 'disconnect' ? await reconnect() : tool;
+  const result = current.handler(input);
   await canonical('autoallowed-next', input);
   await until(() => executions().length === 1);
   expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'autoallowed-next' });
   expect(session.completeToolCall?.('autoallowed-next', shellOwner, { text: 'next receipt', ok: true })).toBe(true);
   await expect(result).resolves.toMatchObject({ content: [{ text: 'next receipt' }] });
+});
+
+it('observes announced-before-handler, pending execution and completion without consuming claims', async () => {
+  const { session, tool, canonical, approve, executions } = await claimFixture();
+  const input = { command: 'SECRET-COMMAND' };
+  await approve('diagnostic-call', input);
+  await canonical('diagnostic-call', input);
+  session.queue('diagnostic-queued-1', 'retain first queued prompt');
+  session.queue('diagnostic-queued-2', 'retain second queued prompt');
+  const queuedBefore = structuredClone(session.chatState().queuedMessages);
+  const diagnostic = () => session.toolExecutionDiagnostics?.(['diagnostic-call']);
+  const before = diagnostic();
+  expect(before).toMatchObject({ scanComplete: true, calls: [{ toolCallId: 'diagnostic-call', announcementRegistered: true,
+    announcementAwaitingHandler: true, handlerAwaitingAnnouncement: false, clientRequestPublished: false, approvedClaim: 'reserved' }] });
+  expect(executions()).toHaveLength(0);
+  expect(diagnostic()).toEqual(before);
+  expect(JSON.stringify(before)).not.toContain('SECRET');
+  const result = tool.handler(input);
+  await until(() => executions().length === 1);
+  const pending = diagnostic();
+  expect(pending).toMatchObject({ calls: [{ announcementAwaitingHandler: false, clientRequestPublished: true, approvedClaim: 'taken' }] });
+  expect(session.sessionState().inputNeeded).toHaveLength(1);
+  expect(diagnostic()).toEqual(pending);
+  expect(session.completeToolCall?.('diagnostic-call', otherShellOwner, { text: 'wrong', ok: true })).toBe(false);
+  expect(session.completeToolCall?.('diagnostic-call', shellOwner, { text: 'SECRET-OUTPUT', ok: true })).toBe(true);
+  await result;
+  expect(diagnostic()).toMatchObject({ calls: [{ clientRequestPublished: false, announcementRegistered: true }] });
+  expect(JSON.stringify(diagnostic())).not.toContain('SECRET');
+  expect(session.chatState().queuedMessages).toEqual(queuedBefore);
+});
+
+it('observes handler awaiting its reserved announcement without starting or re-registering work', async () => {
+  const { session, tool, canonical, approve, executions } = await claimFixture();
+  const input = { command: 'RESERVED-SECRET' };
+  await approve('diagnostic-reserved', input);
+  const result = tool.handler(input);
+  await until(() => (session.toolExecutionDiagnostics?.(['diagnostic-reserved']).calls as Bag[])[0]?.handlerAwaitingAnnouncement === true);
+  expect(executions()).toHaveLength(0);
+  const before = session.toolExecutionDiagnostics?.(['diagnostic-reserved']);
+  expect(before).toMatchObject({ calls: [{ announcementRegistered: false, handlerAwaitingAnnouncement: true, clientRequestPublished: false }] });
+  expect(session.toolExecutionDiagnostics?.(['diagnostic-reserved'])).toEqual(before);
+  await canonical('diagnostic-reserved', input);
+  await until(() => executions().length === 1);
+  session.clientGone?.(shellOwner);
+  await result;
+  expect(session.toolExecutionDiagnostics?.(['diagnostic-reserved'])).toMatchObject({ calls: [{ clientRequestPublished: false }] });
+});
+
+it('fails a late handler from the disconnected client before dispatch, including after reconnect', async () => {
+  const { session, tool, canonical, executions, reconnect } = await claimFixture();
+  const input = { command: 'return 17' };
+  await canonical('disconnected-call', input);
+  session.clientGone?.(shellOwner);
+  await expect(tool.handler(input)).resolves.toMatchObject({ isError: true, content: [{ text: expect.stringContaining('connection closed') }] });
+  const current = await reconnect();
+  await expect(tool.handler(input)).resolves.toMatchObject({ isError: true });
+  expect(executions()).toHaveLength(0);
+  const next = current.handler(input);
+  await canonical('fresh-call', input);
+  await until(() => executions().length === 1);
+  expect(executions()[0]!.toolCall).toMatchObject({ toolCallId: 'fresh-call' });
+  expect(session.completeToolCall?.('fresh-call', shellOwner, { text: '17', ok: true })).toBe(true);
+  await expect(next).resolves.toMatchObject({ content: [{ text: '17' }] });
+});
+
+it.each([false, true])('keeps interruption distinct from a permission denial (stop: %s)', async (stopped) => {
+  const { rejectedToolText, interruptedToolText, interruptionNotice } = await import('../src/interruption.js');
+  const { session, canonical, sent } = await claimFixture();
+  await until(() => sdk.inputs.length === 1);
+  await canonical('interrupted-call', { command: 'return 17' });
+  if (stopped) session.cancel('claim-turn');
+  sdk.push({ type: 'user', message: { role: 'user', content: [{
+    type: 'tool_result', tool_use_id: 'interrupted-call', content: rejectedToolText, is_error: true,
+  }] } });
+  await until(() => sent.some((action) => action.type === 'chat/toolCallComplete' && action.toolCallId === 'interrupted-call'));
+  const result = sent.find((action) => action.type === 'chat/toolCallComplete' && action.toolCallId === 'interrupted-call')!;
+  expect(result).toMatchObject({ turnId: 'claim-turn', result: {
+    success: false, content: [{ text: stopped ? interruptedToolText : rejectedToolText }],
+  } });
+  if (!stopped) return;
+  session.begin('next-turn', 'are you still running?');
+  await until(() => sdk.inputs.length === 2);
+  expect(sdk.inputs[1]!.message).toMatchObject({ content: `${interruptionNotice}\n\nare you still running?` });
+  expect(session.chatState().activeTurn).toMatchObject({ message: { text: 'are you still running?' } });
+});
+
+it('preserves a real permission denial when the turn is subsequently stopped', async () => {
+  const { rejectedToolText } = await import('../src/interruption.js');
+  const { session, canonical, sent } = await claimFixture();
+  const input = { command: 'denied action' };
+  await canonical('denied-call', input);
+  const permission = sdk.canUseTool!('mcp__ahp__launch_shell', input, { toolUseID: 'denied-call' });
+  session.confirm('denied-call', false);
+  await expect(permission).resolves.toMatchObject({ behavior: 'deny' });
+  session.cancel('claim-turn');
+  sdk.push({ type: 'user', message: { role: 'user', content: [{
+    type: 'tool_result', tool_use_id: 'denied-call', content: rejectedToolText, is_error: true,
+  }] } });
+  await until(() => sent.some((action) => action.type === 'chat/toolCallComplete' && action.toolCallId === 'denied-call'));
+  expect(sent.find((action) => action.type === 'chat/toolCallComplete' && action.toolCallId === 'denied-call')).toMatchObject({
+    result: { success: false, content: [{ text: rejectedToolText }] },
+  });
 });

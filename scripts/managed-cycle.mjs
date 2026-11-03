@@ -33,7 +33,9 @@ export async function cycle({ source, current, config, previous, probation = fal
       if (!Number.isFinite(minutes) || minutes < 5) throw new Error('intervalMinutes must be at least 5');
       if (!pending && Date.now() - lastCheck >= minutes * 60_000) {
         lastCheck = Date.now();
-        pending = await build(home, current, abort.signal);
+        // The release checkout is detached. The channel is the branch of the
+        // source setup cloned, which is the install the operator can switch.
+        pending = await build(home, current, abort.signal, source);
         if (pending) log(`validated ${basename(pending)}; waiting for idle`);
       }
       if (pending && !stopping && child.connected) child.send({ type: 'managed-drain' });

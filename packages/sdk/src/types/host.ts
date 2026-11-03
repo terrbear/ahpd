@@ -431,7 +431,7 @@ export interface ToolCall {
    * on disk is opened by resuming, and a tool reading one would start an agent
    * to answer a question about the past.
    */
-  context(session: string, chatId?: string, pendingOffset?: number): Promise<{ turns: Bag[]; activeTurn?: Bag; hasMoreHistory: boolean; delivery?: Bag } | undefined>;
+  context(session: string, chatId?: string, pendingOffset?: number, executionDiagnostics?: boolean): Promise<{ turns: Bag[]; activeTurn?: Bag; hasMoreHistory: boolean; delivery?: Bag; executionDiagnostics?: Bag } | undefined>;
   /**
    * A message into another chat, as a turn of its own.
    *

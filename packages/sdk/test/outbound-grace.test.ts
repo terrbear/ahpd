@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { boundedJson, JsonBudgetExceeded } from '../src/bounded-json.js';
 import {
-  DEFERRED_BYTE_LIMIT, DRAIN_CHECK_MS, DRAIN_GRACE_MS, OUTSTANDING_FRAME_LIMIT,
+  DEFERRED_BYTE_LIMIT, DEFERRED_FRAME_LIMIT, DRAIN_CHECK_MS, DRAIN_GRACE_MS, OUTSTANDING_FRAME_LIMIT,
 } from '../src/outbound-node.js';
 import { createPeer, OUTBOUND_LIMIT, RpcClosed, RpcTimeout } from '../src/rpc.js';
 import type { OutboundClose, Peer } from '../src/types/rpc.js';
@@ -229,54 +229,65 @@ it('preserves a bounded FIFO behind a partially draining 18.8 MB write', () => {
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it('bounds deferred frames by the combined outstanding-write limit', () => {
+it('bounds deferred frames separately from writes awaiting callbacks', () => {
   const c = connection();
   c.peer.send(large);
-  for (let i = 0; i < OUTSTANDING_FRAME_LIMIT - 1; i++) c.peer.send({});
+  for (let i = 0; i < DEFERRED_FRAME_LIMIT; i++) c.peer.send({});
   expect(c.close).not.toHaveBeenCalled();
-  expect(c.writes).toHaveLength(1);
   const toJSON = vi.fn(() => 'must not serialize');
   c.peer.send({ toJSON });
   expect(toJSON).not.toHaveBeenCalled();
   expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({
-    reason: 'frame_count_limit',
-    outstandingWrites: 1,
-    deferredFrames: OUTSTANDING_FRAME_LIMIT - 1,
-    deferredBytes: 2 * (OUTSTANDING_FRAME_LIMIT - 1),
+    reason: 'frame_count_limit', outstandingWrites: 1,
+    deferredFrames: DEFERRED_FRAME_LIMIT, deferredBytes: 2 * DEFERRED_FRAME_LIMIT,
   });
 });
 
-it('caps normal outstanding writes at 256 even when local backlog reports zero', () => {
+it('drains a synchronous burst without disconnecting a healthy zero-backlog socket', () => {
   const c = connection(false);
-  for (let i = 0; i < OUTSTANDING_FRAME_LIMIT; i++) c.peer.send({});
+  const count = OUTSTANDING_FRAME_LIMIT * 4;
+  for (let i = 0; i < count; i++) c.peer.send({ i });
+  expect(c.writes).toHaveLength(OUTSTANDING_FRAME_LIMIT);
   expect(c.close).not.toHaveBeenCalled();
-  const toJSON = vi.fn(() => 'must not serialize');
-  c.peer.send({ toJSON });
-  expect(toJSON).not.toHaveBeenCalled();
-  expect(c.writes).toHaveLength(256);
-  expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({ reason: 'frame_count_limit', outstandingWrites: 256 });
+  for (let i = 0; i < count; i++) {
+    expect(c.writes.length - i).toBeLessThanOrEqual(OUTSTANDING_FRAME_LIMIT);
+    expect(JSON.parse(c.writes[i]!.text!)).toEqual({ i });
+    c.complete(i);
+  }
+  expect(c.writes).toHaveLength(count);
+  expect(c.close).not.toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(0);
 });
 
-it('counts outstanding writes and deferred entries together', () => {
+it('still closes a saturated zero-backlog socket whose callbacks never finish', () => {
   const c = connection(false);
-  for (let i = 0; i < 224; i++) c.peer.send({});
-  c.peer.send(large);
-  for (let i = 0; i < 31; i++) c.peer.send({});
+  for (let i = 0; i <= OUTSTANDING_FRAME_LIMIT; i++) c.peer.send({});
   expect(c.close).not.toHaveBeenCalled();
-  c.peer.send({});
-  expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({ reason: 'frame_count_limit', outstandingWrites: 225, deferredFrames: 31 });
+  vi.advanceTimersByTime(DRAIN_GRACE_MS);
+  expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({
+    reason: 'drain_timeout', outstandingWrites: OUTSTANDING_FRAME_LIMIT, deferredFrames: 1,
+  });
+});
+
+it('bounds burst bytes before serializing oversized deferred input', () => {
+  const c = connection(false);
+  for (let i = 0; i < OUTSTANDING_FRAME_LIMIT; i++) c.peer.send({});
+  c.peer.send({ text: 'x'.repeat(DEFERRED_BYTE_LIMIT) });
+  expect(c.writes).toHaveLength(OUTSTANDING_FRAME_LIMIT);
+  expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({ reason: 'deferred_byte_limit' });
 });
 
 it('releases outstanding admission capacity exactly once per completed write', () => {
   const c = connection(false);
-  for (let i = 0; i < OUTSTANDING_FRAME_LIMIT; i++) c.peer.send({});
+  for (let i = 0; i <= OUTSTANDING_FRAME_LIMIT; i++) c.peer.send({});
   c.complete(0);
   c.complete(0);
-  c.peer.send({});
+  expect(c.writes).toHaveLength(OUTSTANDING_FRAME_LIMIT);
+  for (let i = 1; i < OUTSTANDING_FRAME_LIMIT; i++) c.complete(i);
+  expect(c.writes).toHaveLength(OUTSTANDING_FRAME_LIMIT + 1);
+  c.complete(OUTSTANDING_FRAME_LIMIT);
   expect(c.close).not.toHaveBeenCalled();
-  expect(c.writes).toHaveLength(257);
-  c.peer.send({});
-  expect(c.diagnostics.mock.calls[0]![0]).toMatchObject({ reason: 'frame_count_limit', outstandingWrites: 256 });
+  expect(vi.getTimerCount()).toBe(0);
 });
 
 it('rejects pending questions and discards the FIFO on timeout, then reconnects cleanly', async () => {

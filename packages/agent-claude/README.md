@@ -196,3 +196,9 @@ Hosts advertise `_meta["ahpd.permissionScanner"]: { "version": 1 }` during initi
 The Claude backend scans supported Bash inputs from `canUseTool`, after SDK hooks have produced their effective input. It does not install blanket Claude allow rules or return an unsafe `PreToolUse` allow: independent hooks can rewrite input after another hook's decision. Plan mode, explicit ask rules and sensitive SDK prompts, Jira confirmation gates, unknown Bash options, and existing deny rules retain their existing behavior.
 
 To reconnect within the same host process, send `subscribe` with the opt-in metadata on the session channel. Rebinding requires the original client ID and authenticated principal or host identity, replacing the previous socket even when it is still closing. Registrations are intentionally not inferred from viewers or persisted session configuration: after a daemon restart, an old session falls back to ordinary approval rather than choosing a new scanner owner.
+
+### Interrupted client tools
+
+Client-tool handlers belong to the connection that published them. After a disconnect, late invocations fail before dispatch; reconnecting republishes fresh handlers even when the tool names are unchanged. Calls are never replayed automatically.
+
+Stopping a turn, including to send a queued message immediately, is an interruption rather than a permission rejection. Known interrupted tool results show that distinction in live and restored history. The next prompt carries an internal reminder to follow the new message and verify earlier effects before retrying mutations; the visible user prompt is unchanged. Explicit permission denials retain their original meaning.
