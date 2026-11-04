@@ -28,12 +28,16 @@ const sdk = vi.hoisted(() => {
     refuses: {} as Record<string, string>,
     /** How long each model takes to be taken, so a switch can be waited on. */
     takes: {} as Record<string, number>,
+    applications: [] as Record<string, unknown>[],
+    apply: undefined as undefined | ((settings: Record<string, unknown>) => Promise<void>),
     reset() {
       feed.held = [];
       feed.wake = undefined;
       sdk.asked = [];
       sdk.refuses = {};
       sdk.takes = {};
+      sdk.applications = [];
+      sdk.apply = undefined;
     },
     push(...frames: Record<string, unknown>[]) {
       feed.held.push(...frames);
@@ -65,7 +69,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
         const why = sdk.refuses[said];
         if (why !== undefined) throw new Error(why);
       },
-      applyFlagSettings: async () => {},
+      applyFlagSettings: async (settings: Record<string, unknown>) => {
+        sdk.applications.push(settings);
+        await sdk.apply?.(settings);
+      },
       toggleMcpServer: async () => {},
       reconnectMcpServer: async () => {},
       setMcpServers: async () => {},
@@ -162,6 +169,136 @@ it('runs on a model the CLI takes, and says which one, as before', async () => {
   expect(message('t1').model).toEqual({ id: 'opus' });
   expect(prompts).toEqual(['first']);
   expect(chat().filter((one) => one === 'chat/turnStarted' || one === 'chat/error')).toEqual(['chat/turnStarted']);
+});
+
+it('waits for an SDK effort acknowledgement before sending the first user input', async () => {
+  const lines: string[] = [];
+  const { session, prompts } = await open({ log: (line) => lines.push(line) });
+  let acknowledge!: () => void;
+  sdk.apply = () => new Promise<void>((resolve) => { acknowledge = resolve; });
+
+  session.begin('effort-turn', 'Use the requested effort', { id: 'opus', config: { thinkingLevel: 'high' } });
+  await settle();
+
+  expect(sdk.applications).toEqual([{ effortLevel: 'high' }]);
+  expect(prompts).toEqual([]);
+  const records = () => lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records().filter((one) => one.stage === 'effort_application').map((one) => [one.outcome, one.effort_level, one.turn_id])).toEqual([
+    ['start', 'high', 'effort-turn'],
+  ]);
+  expect(lines.join('\n')).not.toContain('Use the requested effort');
+
+  acknowledge();
+  await settle();
+
+  expect(prompts).toEqual(['Use the requested effort']);
+  expect(session.settings().effortLevel).toBe('high');
+  const linesAt = records();
+  const acknowledgement = linesAt.findIndex((one) => one.stage === 'effort_application' && one.outcome === 'ok');
+  const enqueue = linesAt.findIndex((one) => one.stage === 'enqueue');
+  expect(acknowledgement).toBeGreaterThanOrEqual(0);
+  expect(acknowledgement).toBeLessThan(enqueue);
+  expect(linesAt.filter((one) => one.stage === 'effort_application').map((one) => one.outcome)).toEqual(['start', 'ok']);
+  expect(records().find((one) => one.stage === 'effort_application' && one.outcome === 'ok')).toMatchObject({ session_id: expect.any(String), generation: 0, effort_level: 'high', turn_id: 'effort-turn' });
+});
+
+it('keeps effort acknowledgement timing enabled for later turns', async () => {
+  const lines: string[] = [];
+  const { session, prompts } = await open({ log: (line) => lines.push(line) });
+
+  session.begin('first-turn', 'First private prompt', { id: 'opus', config: { thinkingLevel: 'high' } });
+  await settle();
+  expect(prompts).toEqual(['First private prompt']);
+  sdk.push(ended());
+  await settle();
+
+  session.begin('second-turn', 'Second private prompt', { id: 'opus', config: { thinkingLevel: 'max' } });
+  await settle();
+
+  expect(prompts).toEqual(['First private prompt', 'Second private prompt']);
+  const records = lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records.filter((one) => one.stage === 'effort_application').map((one) => [one.outcome, one.turn_id, one.effort_level])).toEqual([
+    ['start', 'first-turn', 'high'],
+    ['ok', 'first-turn', 'high'],
+    ['start', 'second-turn', 'max'],
+    ['ok', 'second-turn', 'max'],
+  ]);
+  expect(lines.join('\n')).not.toContain('private prompt');
+});
+
+it('fails the turn and sends no user input when the SDK rejects the effort change', async () => {
+  const lines: string[] = [];
+  const { session, prompts, chat, failure } = await open({ log: (line) => lines.push(line) });
+  sdk.apply = async () => { throw new Error('effort setting rejected'); };
+
+  session.begin('effort-fail', 'Do not run at the wrong effort', { id: 'opus', config: { thinkingLevel: 'max' } });
+  await settle();
+
+  expect(prompts).toEqual([]);
+  expect(chat()).toEqual(expect.arrayContaining(['chat/turnStarted', 'chat/error']));
+  expect(failure('effort-fail')).toBe('effort setting rejected');
+  expect(lines.join('\n')).not.toContain('effort setting rejected');
+  expect(lines.join('\n')).not.toContain('Do not run at the wrong effort');
+  expect(session.settings().effortLevel).not.toBe('max');
+});
+
+it('does not send a canceled turn after its deferred effort change resolves', async () => {
+  const lines: string[] = [];
+  const { session, prompts, chat } = await open({ log: (line) => lines.push(line) });
+  let acknowledge!: () => void;
+  sdk.apply = () => new Promise<void>((resolve) => { acknowledge = resolve; });
+
+  session.begin('effort-cancel', 'Do not send after cancellation', { id: 'opus', config: { thinkingLevel: 'high' } });
+  await settle();
+  expect(prompts).toEqual([]);
+
+  session.cancel('effort-cancel');
+  acknowledge();
+  await settle();
+
+  expect(prompts).toEqual([]);
+  expect(chat()).toContain('chat/turnCancelled');
+  const records = lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records.filter((one) => one.stage === 'effort_application').map((one) => one.outcome)).toEqual(['start', 'ok']);
+  expect(records.some((one) => one.stage === 'enqueue')).toBe(false);
+});
+
+it('does not enqueue after the session closes during effort application', async () => {
+  const lines: string[] = [];
+  const { session, prompts } = await open({ log: (line) => lines.push(line) });
+  let acknowledge!: () => void;
+  sdk.apply = () => new Promise<void>((resolve) => { acknowledge = resolve; });
+
+  session.begin('effort-closed', 'Do not send after close', { id: 'opus', config: { thinkingLevel: 'high' } });
+  await settle();
+  await session.close();
+  acknowledge();
+  await settle();
+
+  expect(prompts).toEqual([]);
+  const records = lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records.filter((one) => one.stage === 'effort_application').map((one) => one.outcome)).toEqual(['start', 'ok']);
+  expect(records.some((one) => one.stage === 'enqueue')).toBe(false);
+});
+
+it('does not let a replacement turn overtake a canceled effort application', async () => {
+  const { session, prompts } = await open();
+  let acknowledge!: () => void;
+  sdk.apply = () => new Promise<void>((resolve) => { acknowledge = resolve; });
+
+  session.begin('effort-replaced', 'Stale prompt', { id: 'opus', config: { thinkingLevel: 'high' } });
+  await settle();
+  session.cancel('effort-replaced');
+  session.begin('replacement', 'Replacement prompt');
+  await settle();
+  expect(prompts).toEqual([]);
+
+  acknowledge();
+  await settle();
+
+  expect(prompts).toHaveLength(1);
+  expect(prompts[0]).toContain('Replacement prompt');
+  expect(prompts[0]).not.toContain('Stale prompt');
 });
 
 it('holds the queue behind a turn that is switching models, and sends the prompts in order', async () => {

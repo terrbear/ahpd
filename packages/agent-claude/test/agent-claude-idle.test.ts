@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ProcessFixture } from './fixtures/process.js';
+import { idleQuery } from '../src/idle.js';
 
 const sdk = vi.hoisted(() => ({ nativeId: '11111111-1111-4111-8111-111111111111', inputGatedInit: false, initialize: undefined as undefined | ((index: number) => Promise<unknown>), spawn: false, localSpawn: undefined as undefined | (() => unknown), resources: [] as { closed: boolean }[], runs: [] as {
   options: Record<string, unknown>;
@@ -77,6 +78,109 @@ afterEach(async () => {
   await Promise.all(sessions.splice(0).map((held) => held.close()));
   for (const cwd of directories.splice(0)) rmSync(cwd, { recursive: true, force: true });
   vi.useRealTimers();
+});
+
+it('records startup stages without prompt data and waits for initialization before enqueue', async () => {
+  const lines: string[] = [];
+  let release: (() => void) | undefined;
+  sdk.spawn = true;
+  sdk.localSpawn = () => {
+    const child = new ProcessFixture();
+    child.exitCode = 0;
+    return child;
+  };
+  let initializationCalls = 0;
+  sdk.initialize = () => initializationCalls++ > 0
+    ? Promise.resolve({})
+    : new Promise((resolve) => { release = () => resolve({}); });
+  const held = session({ log: (line) => lines.push(line) });
+  held.begin('first', 'private prompt sentinel', { id: 'opus' });
+  await settle();
+  const records = () => lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records().filter((one) => one.stage === 'sdk_spawn_hook').map((one) => one.outcome)).toEqual(['start', 'returned']);
+  expect(records().filter((one) => one.stage !== 'sdk_spawn_hook' && !String(one.stage).startsWith('describe')).map((one) => [one.stage, one.outcome])).toEqual([
+    ['begin_turn', 'start'],
+    ['ready', 'start'],
+    ['initialization', 'start'],
+  ]);
+  expect(lines.join('\n')).not.toContain('private prompt sentinel');
+  expect(records().every((one) => one.session_id === '11111111-1111-4111-8111-111111111111' && one.generation === 0 && typeof one.elapsed_ms === 'number' && Object.keys(one).sort().join(',') === 'elapsed_ms,generation,outcome,session_id,stage')).toBe(true);
+  release?.();
+  await settle();
+  expect(Object.fromEntries(records().filter((one) => String(one.stage).startsWith('describe')).map((one) => [one.stage, one.outcome]))).toMatchObject({
+    describe: 'ok',
+    describe_initialization: 'ok',
+    describe_mcp_server_status: 'ok',
+    describe_reload_skills: 'ok',
+    describe_reload_plugins: 'ok',
+    describe_handshake: 'ok',
+  });
+  expect(records().filter((one) => one.stage !== 'sdk_spawn_hook' && !String(one.stage).startsWith('describe')).map((one) => [one.stage, one.outcome])).toEqual([
+    ['begin_turn', 'start'],
+    ['ready', 'start'],
+    ['initialization', 'start'],
+    ['initialization', 'ok'],
+    ['prepare', 'start'],
+    ['prepare', 'ok'],
+    ['ready', 'ok'],
+    ['model_selection', 'start'],
+    ['model_selection', 'ok'],
+    ['ready', 'start'],
+    ['ready', 'ok'],
+    ['enqueue', 'start'],
+    ['enqueue', 'ok'],
+    ['sdk_user_input', 'yield'],
+  ]);
+});
+
+it('does not let timing sink errors fail startup', async () => {
+  const held = session({ log: () => { throw new Error('diagnostic sink failed'); } });
+  held.begin('first', 'Start normally');
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(1);
+});
+
+it('attributes the startup watchdog to the pending initialization stage', async () => {
+  const records: [string, string][] = [];
+  const pending = new Promise<unknown>(() => {});
+  const idle = idleQuery({
+    timeout: 0,
+    eligible: () => true,
+    create: () => ({
+      query: { initializationResult: () => pending, close: () => {}, async *[Symbol.asyncIterator]() {} },
+      signal: new AbortController(),
+      stop: async () => {},
+    }),
+    timing: (stage, outcome) => records.push([stage, outcome]),
+  });
+  const ready = idle.ready().then(() => undefined, () => undefined);
+  await settle();
+  await vi.advanceTimersByTimeAsync(30_000);
+  await ready;
+  expect(records).toEqual([['initialization', 'start'], ['initialization', 'timeout']]);
+  await idle.dispose();
+});
+
+it('attributes the startup watchdog to prepare when initialization has completed', async () => {
+  const records: [string, string][] = [];
+  const idle = idleQuery({
+    timeout: 0,
+    eligible: () => true,
+    create: () => ({
+      query: { initializationResult: async () => ({}), close: () => {}, async *[Symbol.asyncIterator]() {} },
+      signal: new AbortController(),
+      stop: async () => {},
+    }),
+    prepare: async () => new Promise<void>(() => {}),
+    timing: (stage, outcome) => records.push([stage, outcome]),
+  });
+  const ready = idle.ready().then(() => undefined, () => undefined);
+  await settle();
+  expect(records).toEqual([['initialization', 'start'], ['initialization', 'ok'], ['prepare', 'start']]);
+  await vi.advanceTimersByTimeAsync(30_000);
+  await ready;
+  expect(records).toEqual([['initialization', 'start'], ['initialization', 'ok'], ['prepare', 'start'], ['prepare', 'timeout']]);
+  await idle.dispose();
 });
 
 it('releases an idle Claude query after one hour while retaining the logical chat', async () => {

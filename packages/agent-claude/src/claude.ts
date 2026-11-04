@@ -628,6 +628,7 @@ export function claude(options: ClaudeOptions): Agent {
       // the values it runs on.
       ...(presets.length > 0 ? { presets: options.presets } : {}),
       ...(options.models === undefined ? {} : { offerModels: offer }),
+      ...(options.log === undefined ? {} : { log: options.log }),
       });
     },
   };

@@ -15,7 +15,11 @@ export function idleQuery<Q extends ManagedQuery>(options: {
   create: (generation: number) => IdleRuntime<Q>;
   prepare?: (query: Q, generation: number) => Promise<void>;
   completed?: (key: PropertyKey, args: unknown[]) => void;
+  timing?: (stage: string, outcome: string) => void;
 }) {
+  const timing = (stage: string, outcome: string): void => {
+    try { options.timing?.(stage, outcome); } catch {}
+  };
   let generation = 0;
   let runtime: IdleRuntime<Q> | undefined = options.create(generation);
   let stopping: Promise<void> | undefined;
@@ -64,11 +68,32 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     }
     const held = runtime;
     initializing ??= new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Claude initialization exceeded 30 seconds')), 30_000);
+      let pendingStage: 'initialization' | 'prepare' = 'initialization';
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        timing(pendingStage, 'timeout');
+        reject(new Error('Claude initialization exceeded 30 seconds'));
+      }, 30_000);
       timer.unref?.();
+      timing('initialization', 'start');
       void held.query.initializationResult().then(async () => {
+        if (!timedOut) timing('initialization', 'ok');
         if (closed || held.signal.signal.aborted) throw new Error('The Claude query was disposed during initialization');
-        await options.prepare?.(held.query, generation);
+        if (options.prepare) {
+          pendingStage = 'prepare';
+          timing('prepare', 'start');
+          try {
+            await options.prepare(held.query, generation);
+            if (!timedOut) timing('prepare', 'ok');
+          } catch (error: unknown) {
+            if (!timedOut) timing('prepare', 'error');
+            throw error;
+          }
+        }
+      }, (error: unknown) => {
+        if (!timedOut) timing('initialization', 'error');
+        throw error;
       }).then(resolve, reject).finally(() => clearTimeout(timer));
     });
     try { await initializing; }

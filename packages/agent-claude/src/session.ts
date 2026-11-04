@@ -1,6 +1,7 @@
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -709,6 +710,7 @@ export interface ClaudeSessionOptions extends SessionOptions {
    * offer one, and then a subagent's frames stay in the turn that spawned it.
    */
   subagent?: (toolCallId: string, request: SubagentRequest) => SubagentChat;
+  log?: (line: string) => void;
 }
 
 export function createSession(options: ClaudeSessionOptions): Session {
@@ -716,6 +718,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
     throw new Error('idleTimeoutMs must be an integer from 0 to 2147483647 milliseconds');
   }
   const { uri, chatUri, cwd, emit } = options;
+  const timingOrigin = performance.now();
+  let startupTimingEnabled = true;
+  let timingGeneration = 0;
+  const timing = (stage: string, outcome: string, metadata?: { turn_id?: string; effort_level?: typeof EFFORTS[number] }): void => {
+    if (!startupTimingEnabled && !stage.startsWith('describe') && stage !== 'effort_application') return;
+    try {
+      options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), generation: timingGeneration, stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)), ...metadata })}`);
+    } catch {}
+  };
 
   const turns: Bag[] = [...(options.seed ?? [])];
   let active: Bag | undefined;
@@ -758,6 +769,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   let failed: string | undefined;
   let gone: string | undefined;
   let startedAt = 0;
+  let effortApplication: Promise<void> | undefined;
   /**
    * The model the turn now running actually answered on, as its own frames
    * reported it.
@@ -781,6 +793,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const reservedNativeId = options.resume ?? (UUID.test(idOf(uri)) ? idOf(uri) : crypto.randomUUID());
   let hasNativePrompt = options.resume !== undefined;
   let nativePromptSent = false;
+  let firstUserInputLogged = false;
   let interruptionPending = turns.at(-1)?.state === 'cancelled';
   const interruptedCalls = new Map<string, string>();
   /** What the session is doing, in one line, or nothing when it is idle. */
@@ -1513,6 +1526,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
         if (signal.aborted) return;
         while (waiting.length > 0 && !signal.aborted) {
           const next = waiting.shift() as (typeof waiting)[number];
+          if (next.type === 'user' && !firstUserInputLogged) {
+            firstUserInputLogged = true;
+            timing('sdk_user_input', 'yield');
+            startupTimingEnabled = false;
+          }
           yield next;
           if (steering !== undefined) {
             const said = steering;
@@ -2606,6 +2624,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const disabledServers = new Set<string>();
   const idle = idleQuery<ReturnType<typeof query>>({
     timeout: options.spawn === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
+    timing,
     eligible: () => !closed && gone === undefined && !busy()
       && (nativePromptSent || options.forkAt === undefined && options.rewindAt === undefined)
       && queued.length === 0 && waiting.length === 0 && steering === undefined
@@ -2626,6 +2645,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       else disabledServers.delete(server);
     },
     create: (generation) => {
+      timingGeneration = generation;
       const signal = new AbortController();
       let childExit: ReturnType<typeof processExit> | undefined;
       let resume = options.resume;
@@ -2645,9 +2665,16 @@ export function createSession(options: ClaudeSessionOptions): Session {
         options: {
           cwd,
           spawnClaudeCodeProcess: (asked: Asked) => {
-            const child = (options.spawn ?? spawnLocal)(asked);
-            childExit = processExit(child);
-            return child;
+            timing('sdk_spawn_hook', 'start');
+            try {
+              const child = (options.spawn ?? spawnLocal)(asked);
+              childExit = processExit(child);
+              timing('sdk_spawn_hook', 'returned');
+              return child;
+            } catch (error: unknown) {
+              timing('sdk_spawn_hook', 'error');
+              throw error;
+            }
           },
           /*
            * Where the CLI runs, when it is not here.
@@ -2862,17 +2889,31 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * changed - so `chosen` stays where it was for the next turn.
    */
   const take = async (id: string): Promise<string | undefined> => {
+    timing('model_selection', 'start');
     try {
       await handle.setModel(modelId(id));
+      timing('model_selection', 'ok');
       return undefined;
     }
     catch (error: unknown) {
+      timing('model_selection', 'error');
       const why = error instanceof Error ? error.message : String(error);
       return `The harness would not take model ${id}: ${why}`;
     }
   };
+  const ready = async (): Promise<void> => {
+    timing('ready', 'start');
+    try {
+      await idle.ready();
+      timing('ready', 'ok');
+    } catch (error: unknown) {
+      timing('ready', 'error');
+      throw error;
+    }
+  };
 
   const beginTurn = async (turnId: string, text: string, model?: Chosen, queuedMessageId?: string, from?: MessageFrom): Promise<void> => {
+    timing('begin_turn', 'start');
     try { attachmentContent(text, from?.attachments); }
     catch (error) { refuseTurn(turnId, text, error instanceof Error ? error.message : String(error), queuedMessageId, from); return; }
     if (gone !== undefined) {
@@ -2884,10 +2925,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
       return;
     }
     beginning = turnId;
+    const previousEffortApplication = effortApplication;
+    if (previousEffortApplication !== undefined) {
+      try { await previousEffortApplication; } catch {}
+      if (closed || beginning !== turnId) return;
+    }
     if (model !== undefined && model.id !== chosen) {
       touch();
       let refused: string | undefined;
-      try { await idle.ready(); refused = await take(model.id); }
+      try { await ready(); refused = await take(model.id); }
       catch (error: unknown) { refused = error instanceof Error ? error.message : String(error); }
       if (closed || beginning !== turnId) return;
       if (refused !== undefined) {
@@ -2940,7 +2986,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       touch();
       startNext();
     };
-    try { await idle.ready(); }
+    try { await ready(); }
     catch (error: unknown) {
       reject(error instanceof Error ? error.message : String(error));
       return;
@@ -2948,9 +2994,26 @@ export function createSession(options: ClaudeSessionOptions): Session {
     if (closed || beginning !== turnId || str(active?.id) !== turnId) return;
     const level = EFFORTS.find((one) => one === (model?.config ?? {}).thinkingLevel);
     if (level !== undefined && level !== settings.effortLevel) {
+      const metadata = { turn_id: turnId.slice(0, 128), effort_level: level };
+      timing('effort_application', 'start', metadata);
+      let application: Promise<void> | undefined;
+      try {
+        application = handle.applyFlagSettings({ effortLevel: level });
+        effortApplication = application;
+        await application;
+      } catch (error: unknown) {
+        timing('effort_application', 'error', metadata);
+        if (!closed && beginning === turnId && str(active?.id) === turnId)
+          reject(error instanceof Error ? error.message : String(error));
+        return;
+      } finally {
+        if (application !== undefined && effortApplication === application) effortApplication = undefined;
+      }
+      timing('effort_application', 'ok', metadata);
+      if (closed) return;
       settings.effortLevel = level;
-      void handle.applyFlagSettings({ effortLevel: level }).catch(() => {});
       emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
+      if (beginning !== turnId || str(active?.id) !== turnId) return;
     }
     beginning = undefined;
     let sent = carried === undefined ? text : `${carried}\n\n${text}`;
@@ -2961,7 +3024,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
     carried = undefined;
     hasNativePrompt = true;
     nativePromptSent = true;
+    timing('enqueue', 'start');
     waiting.push({ type: 'user', message: { role: 'user', content: attachmentContent(sent, from?.attachments) }, parent_tool_use_id: null });
+    timing('enqueue', 'ok');
     wake?.();
     wake = undefined;
     touch();
@@ -3124,13 +3189,28 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const serverNamed = (id: string): string | undefined =>
     (id.startsWith('mcp:') ? id.slice(4) : undefined);
 
+  const describeRequest = <T>(stage: string, request: () => Promise<T>, fallback: () => T): Promise<T> => {
+    const name = `describe_${stage}`;
+    timing(name, 'start');
+    return request().then(
+      (value) => {
+        timing(name, 'ok');
+        return value;
+      },
+      () => {
+        timing(name, 'error');
+        return fallback();
+      },
+    );
+  };
   const describe = async (): Promise<void> => {
+    timing('describe', 'start');
     const [init, mcp, skills, plugins] = await Promise.all([
-      handle.initializationResult().then((r) => bag(r as unknown)).catch(() => ({} as Bag)),
-      handle.mcpServerStatus().then((r) => (Array.isArray(r) ? r : [])).catch(() => [] as unknown[]),
+      describeRequest('initialization', () => handle.initializationResult().then((r) => bag(r as unknown)), () => ({} as Bag)),
+      describeRequest('mcp_server_status', () => handle.mcpServerStatus().then((r) => (Array.isArray(r) ? r : [])), () => [] as unknown[]),
       // The only way to know which commands are skills. It re-reads them from
       // disk, which at the start of a session is what one wants anyway.
-      handle.reloadSkills().then((r) => list(bag(r as unknown).skills)).catch(() => [] as unknown[]),
+      describeRequest('reload_skills', () => handle.reloadSkills().then((r) => list(bag(r as unknown).skills)), () => [] as unknown[]),
       /*
        * The plugins, which `initializationResult()` does not report.
        *
@@ -3138,7 +3218,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
        * plugin list is used: it re-reads commands and agents too, and those
        * are already answered above.
        */
-      handle.reloadPlugins().then((r) => list(bag(r as unknown).plugins)).catch(() => [] as unknown[]),
+      describeRequest('reload_plugins', () => handle.reloadPlugins().then((r) => list(bag(r as unknown).plugins)), () => [] as unknown[]),
     ]);
     offered = list(init.models)
       .map((raw) => {
@@ -3167,9 +3247,16 @@ export function createSession(options: ClaudeSessionOptions): Session {
     if (customizations.length > 0) {
       emit('session', { type: 'session/customizationsChanged', customizations });
     }
-    options.onHandshake?.();
+    timing('describe_handshake', 'start');
+    try {
+      options.onHandshake?.();
+      timing('describe_handshake', 'ok');
+    } catch (error: unknown) {
+      timing('describe_handshake', 'error');
+      throw error;
+    }
   };
-  void describe().catch(() => {});
+  void describe().then(() => timing('describe', 'ok'), () => timing('describe', 'error'));
 
   void (async () => {
     try {
