@@ -28,7 +28,6 @@ const sdk = vi.hoisted(() => {
     refuses: {} as Record<string, string>,
     /** How long each model takes to be taken, so a switch can be waited on. */
     takes: {} as Record<string, number>,
-    /** Flag settings the SDK was asked to apply, and an optional deferred response. */
     applications: [] as Record<string, unknown>[],
     apply: undefined as undefined | ((settings: Record<string, unknown>) => Promise<void>),
     reset() {
@@ -203,8 +202,33 @@ it('waits for an SDK effort acknowledgement before sending the first user input'
   expect(records().find((one) => one.stage === 'effort_application' && one.outcome === 'ok')).toMatchObject({ session_id: expect.any(String), generation: 0, effort_level: 'high', turn_id: 'effort-turn' });
 });
 
+it('keeps effort acknowledgement timing enabled for later turns', async () => {
+  const lines: string[] = [];
+  const { session, prompts } = await open({ log: (line) => lines.push(line) });
+
+  session.begin('first-turn', 'First private prompt', { id: 'opus', config: { thinkingLevel: 'high' } });
+  await settle();
+  expect(prompts).toEqual(['First private prompt']);
+  sdk.push(ended());
+  await settle();
+
+  session.begin('second-turn', 'Second private prompt', { id: 'opus', config: { thinkingLevel: 'max' } });
+  await settle();
+
+  expect(prompts).toEqual(['First private prompt', 'Second private prompt']);
+  const records = lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records.filter((one) => one.stage === 'effort_application').map((one) => [one.outcome, one.turn_id, one.effort_level])).toEqual([
+    ['start', 'first-turn', 'high'],
+    ['ok', 'first-turn', 'high'],
+    ['start', 'second-turn', 'max'],
+    ['ok', 'second-turn', 'max'],
+  ]);
+  expect(lines.join('\n')).not.toContain('private prompt');
+});
+
 it('fails the turn and sends no user input when the SDK rejects the effort change', async () => {
-  const { session, prompts, chat, failure } = await open();
+  const lines: string[] = [];
+  const { session, prompts, chat, failure } = await open({ log: (line) => lines.push(line) });
   sdk.apply = async () => { throw new Error('effort setting rejected'); };
 
   session.begin('effort-fail', 'Do not run at the wrong effort', { id: 'opus', config: { thinkingLevel: 'max' } });
@@ -213,6 +237,8 @@ it('fails the turn and sends no user input when the SDK rejects the effort chang
   expect(prompts).toEqual([]);
   expect(chat()).toEqual(expect.arrayContaining(['chat/turnStarted', 'chat/error']));
   expect(failure('effort-fail')).toBe('effort setting rejected');
+  expect(lines.join('\n')).not.toContain('effort setting rejected');
+  expect(lines.join('\n')).not.toContain('Do not run at the wrong effort');
   expect(session.settings().effortLevel).not.toBe('max');
 });
 

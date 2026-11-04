@@ -722,7 +722,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   let startupTimingEnabled = true;
   let timingGeneration = 0;
   const timing = (stage: string, outcome: string, metadata?: { turn_id?: string; effort_level?: typeof EFFORTS[number] }): void => {
-    if (!startupTimingEnabled && !stage.startsWith('describe')) return;
+    if (!startupTimingEnabled && !stage.startsWith('describe') && stage !== 'effort_application') return;
     try {
       options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), generation: timingGeneration, stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)), ...metadata })}`);
     } catch {}
@@ -2925,12 +2925,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
       return;
     }
     beginning = turnId;
-    // `applyFlagSettings` cannot be canceled. A replacement must wait for the
-    // old request, or its late acknowledgement can overwrite the new turn's
-    // effort after that turn starts.
     const previousEffortApplication = effortApplication;
     if (previousEffortApplication !== undefined) {
-      try { await previousEffortApplication; } catch { /* A stale request must not fail its replacement. */ }
+      try { await previousEffortApplication; } catch {}
       if (closed || beginning !== turnId) return;
     }
     if (model !== undefined && model.id !== chosen) {
@@ -3012,8 +3009,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
       } finally {
         if (application !== undefined && effortApplication === application) effortApplication = undefined;
       }
-      // This is an SDK acknowledgement, even if the turn was canceled while
-      // it waited. Keep the session's reported setting in sync with the handle.
       timing('effort_application', 'ok', metadata);
       if (closed) return;
       settings.effortLevel = level;
