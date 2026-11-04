@@ -129,8 +129,13 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
           sdk.mcpDeclareFails--;
           throw new Error('fixture refused the MCP update');
         }
-        fake.options.mcpServers = servers;
-        sdk.mcpDeclared.push(servers);
+        const previous = fake.options.mcpServers as Record<string, { type?: string }> | undefined;
+        const installed = Object.fromEntries(Object.entries(servers).map(([name, server]) => [
+          name, previous?.[name]?.type === 'sdk' ? previous[name] : server,
+        ]));
+        fake.options.mcpServers = installed;
+        sdk.mcpDeclared.push(installed);
+        return { added: [], removed: [], errors: {} };
       },
       // The control protocol: answers without a turn having happened, which
       // is the whole reason capabilities are read from here.
