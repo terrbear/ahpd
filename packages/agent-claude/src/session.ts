@@ -720,10 +720,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const { uri, chatUri, cwd, emit } = options;
   const timingOrigin = performance.now();
   let startupTimingEnabled = true;
+  let timingGeneration = 0;
   const timing = (stage: string, outcome: string): void => {
-    if (!startupTimingEnabled) return;
+    if (!startupTimingEnabled && !stage.startsWith('describe')) return;
     try {
-      options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)) })}`);
+      options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), generation: timingGeneration, stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)) })}`);
     } catch {}
   };
 
@@ -2643,6 +2644,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       else disabledServers.delete(server);
     },
     create: (generation) => {
+      timingGeneration = generation;
       const signal = new AbortController();
       let childExit: ReturnType<typeof processExit> | undefined;
       let resume = options.resume;
@@ -3164,13 +3166,28 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const serverNamed = (id: string): string | undefined =>
     (id.startsWith('mcp:') ? id.slice(4) : undefined);
 
+  const describeRequest = <T>(stage: string, request: () => Promise<T>, fallback: () => T): Promise<T> => {
+    const name = `describe_${stage}`;
+    timing(name, 'start');
+    return request().then(
+      (value) => {
+        timing(name, 'ok');
+        return value;
+      },
+      () => {
+        timing(name, 'error');
+        return fallback();
+      },
+    );
+  };
   const describe = async (): Promise<void> => {
+    timing('describe', 'start');
     const [init, mcp, skills, plugins] = await Promise.all([
-      handle.initializationResult().then((r) => bag(r as unknown)).catch(() => ({} as Bag)),
-      handle.mcpServerStatus().then((r) => (Array.isArray(r) ? r : [])).catch(() => [] as unknown[]),
+      describeRequest('initialization', () => handle.initializationResult().then((r) => bag(r as unknown)), () => ({} as Bag)),
+      describeRequest('mcp_server_status', () => handle.mcpServerStatus().then((r) => (Array.isArray(r) ? r : [])), () => [] as unknown[]),
       // The only way to know which commands are skills. It re-reads them from
       // disk, which at the start of a session is what one wants anyway.
-      handle.reloadSkills().then((r) => list(bag(r as unknown).skills)).catch(() => [] as unknown[]),
+      describeRequest('reload_skills', () => handle.reloadSkills().then((r) => list(bag(r as unknown).skills)), () => [] as unknown[]),
       /*
        * The plugins, which `initializationResult()` does not report.
        *
@@ -3178,7 +3195,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
        * plugin list is used: it re-reads commands and agents too, and those
        * are already answered above.
        */
-      handle.reloadPlugins().then((r) => list(bag(r as unknown).plugins)).catch(() => [] as unknown[]),
+      describeRequest('reload_plugins', () => handle.reloadPlugins().then((r) => list(bag(r as unknown).plugins)), () => [] as unknown[]),
     ]);
     offered = list(init.models)
       .map((raw) => {
@@ -3207,9 +3224,16 @@ export function createSession(options: ClaudeSessionOptions): Session {
     if (customizations.length > 0) {
       emit('session', { type: 'session/customizationsChanged', customizations });
     }
-    options.onHandshake?.();
+    timing('describe_handshake', 'start');
+    try {
+      options.onHandshake?.();
+      timing('describe_handshake', 'ok');
+    } catch (error: unknown) {
+      timing('describe_handshake', 'error');
+      throw error;
+    }
   };
-  void describe().catch(() => {});
+  void describe().then(() => timing('describe', 'ok'), () => timing('describe', 'error'));
 
   void (async () => {
     try {

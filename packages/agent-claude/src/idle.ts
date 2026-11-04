@@ -17,6 +17,9 @@ export function idleQuery<Q extends ManagedQuery>(options: {
   completed?: (key: PropertyKey, args: unknown[]) => void;
   timing?: (stage: string, outcome: string) => void;
 }) {
+  const timing = (stage: string, outcome: string): void => {
+    try { options.timing?.(stage, outcome); } catch {}
+  };
   let generation = 0;
   let runtime: IdleRuntime<Q> | undefined = options.create(generation);
   let stopping: Promise<void> | undefined;
@@ -65,27 +68,31 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     }
     const held = runtime;
     initializing ??= new Promise<void>((resolve, reject) => {
+      let pendingStage: 'initialization' | 'prepare' = 'initialization';
+      let timedOut = false;
       const timer = setTimeout(() => {
-        options.timing?.('initialization', 'timeout');
+        timedOut = true;
+        timing(pendingStage, 'timeout');
         reject(new Error('Claude initialization exceeded 30 seconds'));
       }, 30_000);
       timer.unref?.();
-      options.timing?.('initialization', 'start');
+      timing('initialization', 'start');
       void held.query.initializationResult().then(async () => {
-        options.timing?.('initialization', 'ok');
+        if (!timedOut) timing('initialization', 'ok');
         if (closed || held.signal.signal.aborted) throw new Error('The Claude query was disposed during initialization');
         if (options.prepare) {
-          options.timing?.('prepare', 'start');
+          pendingStage = 'prepare';
+          timing('prepare', 'start');
           try {
             await options.prepare(held.query, generation);
-            options.timing?.('prepare', 'ok');
+            if (!timedOut) timing('prepare', 'ok');
           } catch (error: unknown) {
-            options.timing?.('prepare', 'error');
+            if (!timedOut) timing('prepare', 'error');
             throw error;
           }
         }
       }, (error: unknown) => {
-        options.timing?.('initialization', 'error');
+        if (!timedOut) timing('initialization', 'error');
         throw error;
       }).then(resolve, reject).finally(() => clearTimeout(timer));
     });
