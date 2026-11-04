@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { beforeEach, expect, it, onTestFinished, vi } from 'vitest';
 import type { Bag, BoundTool } from '@ahpd/sdk';
 
+type ToolServer = { tools: { name: string; inputSchema: Record<string, z.ZodTypeAny>; handler: (input: Bag) => Promise<Bag> }[] };
+
 const sdk = vi.hoisted(() => {
   const state = {
     canUseTool: undefined as undefined | ((name: string, input: Bag, about?: Bag) => Promise<unknown>),
@@ -27,12 +29,12 @@ const sdk = vi.hoisted(() => {
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   createSdkMcpServer: (given: typeof sdk.server) => {
-    sdk.server = given;
     return { type: 'sdk', name: 'ahp', tools: given?.tools };
   },
   query: ({ options, prompt }: { options: Bag; prompt: AsyncIterable<Bag> }) => {
     void (async () => { for await (const message of prompt) sdk.inputs.push(message); })();
     sdk.canUseTool = options.canUseTool as typeof sdk.canUseTool;
+    sdk.server = (options.mcpServers as Bag | undefined)?.ahp as typeof sdk.server;
     return {
       async *[Symbol.asyncIterator]() { for (;;) yield await sdk.next(); },
       interrupt: async () => {},
@@ -41,7 +43,11 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
       applyFlagSettings: async () => {},
       toggleMcpServer: async () => {},
       reconnectMcpServer: async () => {},
-      setMcpServers: async () => {},
+      setMcpServers: async (servers: Bag) => {
+        if (servers.ahp === undefined) sdk.server = undefined;
+        else if (sdk.server === undefined) sdk.server = servers.ahp as ToolServer;
+        return { added: [], removed: [], errors: {} };
+      },
       initializationResult: async () => ({}),
       mcpServerStatus: async () => [],
       reloadSkills: async () => ({ skills: [] }),
