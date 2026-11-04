@@ -4194,8 +4194,16 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const requested = { ...declared };
       if (next.length > 0) requested.ahp = contributed(next, clientRunner(), contributedWork) as Bag;
       else delete requested.ahp;
-      try { await handle.setMcpServers(requested as never); }
-      catch { return false; }
+      try {
+        if (declared.ahp !== undefined && requested.ahp !== undefined) {
+          const withoutClientTools = { ...requested };
+          delete withoutClientTools.ahp;
+          const removed = await handle.setMcpServers(withoutClientTools as never);
+          if (Object.keys(removed.errors).length > 0) return false;
+        }
+        const result = await handle.setMcpServers(requested as never);
+        if (Object.keys(result.errors).length > 0) return false;
+      } catch { return false; }
       offering = [...next];
       publishedToolsRevision = revision;
       if (requested.ahp === undefined) delete declared.ahp;
