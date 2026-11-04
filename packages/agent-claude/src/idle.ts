@@ -15,6 +15,7 @@ export function idleQuery<Q extends ManagedQuery>(options: {
   create: (generation: number) => IdleRuntime<Q>;
   prepare?: (query: Q, generation: number) => Promise<void>;
   completed?: (key: PropertyKey, args: unknown[]) => void;
+  timing?: (stage: string, outcome: string) => void;
 }) {
   let generation = 0;
   let runtime: IdleRuntime<Q> | undefined = options.create(generation);
@@ -64,11 +65,28 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     }
     const held = runtime;
     initializing ??= new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Claude initialization exceeded 30 seconds')), 30_000);
+      const timer = setTimeout(() => {
+        options.timing?.('initialization', 'timeout');
+        reject(new Error('Claude initialization exceeded 30 seconds'));
+      }, 30_000);
       timer.unref?.();
+      options.timing?.('initialization', 'start');
       void held.query.initializationResult().then(async () => {
+        options.timing?.('initialization', 'ok');
         if (closed || held.signal.signal.aborted) throw new Error('The Claude query was disposed during initialization');
-        await options.prepare?.(held.query, generation);
+        if (options.prepare) {
+          options.timing?.('prepare', 'start');
+          try {
+            await options.prepare(held.query, generation);
+            options.timing?.('prepare', 'ok');
+          } catch (error: unknown) {
+            options.timing?.('prepare', 'error');
+            throw error;
+          }
+        }
+      }, (error: unknown) => {
+        options.timing?.('initialization', 'error');
+        throw error;
       }).then(resolve, reject).finally(() => clearTimeout(timer));
     });
     try { await initializing; }

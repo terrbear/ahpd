@@ -79,6 +79,48 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
+it('records startup stages without prompt data and waits for initialization before enqueue', async () => {
+  const lines: string[] = [];
+  let release: (() => void) | undefined;
+  sdk.spawn = true;
+  sdk.localSpawn = () => {
+    const child = new ProcessFixture();
+    child.exitCode = 0;
+    return child;
+  };
+  sdk.initialize = () => new Promise((resolve) => { release = () => resolve({}); });
+  const held = session({ log: (line) => lines.push(line) });
+  held.begin('first', 'private prompt sentinel', { id: 'opus' });
+  await settle();
+  const records = () => lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records().filter((one) => one.stage === 'sdk_spawn_hook').map((one) => one.outcome)).toEqual(['start', 'returned']);
+  expect(records().filter((one) => one.stage !== 'sdk_spawn_hook').map((one) => [one.stage, one.outcome])).toEqual([
+    ['begin_turn', 'start'],
+    ['ready', 'start'],
+    ['initialization', 'start'],
+  ]);
+  expect(lines.join('\n')).not.toContain('private prompt sentinel');
+  expect(records().every((one) => one.session_id === '11111111-1111-4111-8111-111111111111' && typeof one.elapsed_ms === 'number' && Object.keys(one).sort().join(',') === 'elapsed_ms,outcome,session_id,stage')).toBe(true);
+  release?.();
+  await settle();
+  expect(records().filter((one) => one.stage !== 'sdk_spawn_hook').map((one) => [one.stage, one.outcome])).toEqual([
+    ['begin_turn', 'start'],
+    ['ready', 'start'],
+    ['initialization', 'start'],
+    ['initialization', 'ok'],
+    ['prepare', 'start'],
+    ['prepare', 'ok'],
+    ['ready', 'ok'],
+    ['model_selection', 'start'],
+    ['model_selection', 'ok'],
+    ['ready', 'start'],
+    ['ready', 'ok'],
+    ['enqueue', 'start'],
+    ['enqueue', 'ok'],
+    ['sdk_user_input', 'yield'],
+  ]);
+});
+
 it('releases an idle Claude query after one hour while retaining the logical chat', async () => {
   const held = session();
   await settle();

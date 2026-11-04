@@ -1,6 +1,7 @@
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -709,6 +710,7 @@ export interface ClaudeSessionOptions extends SessionOptions {
    * offer one, and then a subagent's frames stay in the turn that spawned it.
    */
   subagent?: (toolCallId: string, request: SubagentRequest) => SubagentChat;
+  log?: (line: string) => void;
 }
 
 export function createSession(options: ClaudeSessionOptions): Session {
@@ -716,6 +718,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
     throw new Error('idleTimeoutMs must be an integer from 0 to 2147483647 milliseconds');
   }
   const { uri, chatUri, cwd, emit } = options;
+  const timingOrigin = performance.now();
+  let startupTimingEnabled = true;
+  const timing = (stage: string, outcome: string): void => {
+    if (!startupTimingEnabled) return;
+    try {
+      options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)) })}`);
+    } catch {}
+  };
 
   const turns: Bag[] = [...(options.seed ?? [])];
   let active: Bag | undefined;
@@ -781,6 +791,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const reservedNativeId = options.resume ?? (UUID.test(idOf(uri)) ? idOf(uri) : crypto.randomUUID());
   let hasNativePrompt = options.resume !== undefined;
   let nativePromptSent = false;
+  let firstUserInputLogged = false;
   let interruptionPending = turns.at(-1)?.state === 'cancelled';
   const interruptedCalls = new Map<string, string>();
   /** What the session is doing, in one line, or nothing when it is idle. */
@@ -1513,6 +1524,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
         if (signal.aborted) return;
         while (waiting.length > 0 && !signal.aborted) {
           const next = waiting.shift() as (typeof waiting)[number];
+          if (next.type === 'user' && !firstUserInputLogged) {
+            firstUserInputLogged = true;
+            timing('sdk_user_input', 'yield');
+            startupTimingEnabled = false;
+          }
           yield next;
           if (steering !== undefined) {
             const said = steering;
@@ -2606,6 +2622,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const disabledServers = new Set<string>();
   const idle = idleQuery<ReturnType<typeof query>>({
     timeout: options.spawn === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
+    timing,
     eligible: () => !closed && gone === undefined && !busy()
       && (nativePromptSent || options.forkAt === undefined && options.rewindAt === undefined)
       && queued.length === 0 && waiting.length === 0 && steering === undefined
@@ -2645,9 +2662,16 @@ export function createSession(options: ClaudeSessionOptions): Session {
         options: {
           cwd,
           spawnClaudeCodeProcess: (asked: Asked) => {
-            const child = (options.spawn ?? spawnLocal)(asked);
-            childExit = processExit(child);
-            return child;
+            timing('sdk_spawn_hook', 'start');
+            try {
+              const child = (options.spawn ?? spawnLocal)(asked);
+              childExit = processExit(child);
+              timing('sdk_spawn_hook', 'returned');
+              return child;
+            } catch (error: unknown) {
+              timing('sdk_spawn_hook', 'error');
+              throw error;
+            }
           },
           /*
            * Where the CLI runs, when it is not here.
@@ -2862,17 +2886,31 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * changed - so `chosen` stays where it was for the next turn.
    */
   const take = async (id: string): Promise<string | undefined> => {
+    timing('model_selection', 'start');
     try {
       await handle.setModel(modelId(id));
+      timing('model_selection', 'ok');
       return undefined;
     }
     catch (error: unknown) {
+      timing('model_selection', 'error');
       const why = error instanceof Error ? error.message : String(error);
       return `The harness would not take model ${id}: ${why}`;
     }
   };
+  const ready = async (): Promise<void> => {
+    timing('ready', 'start');
+    try {
+      await idle.ready();
+      timing('ready', 'ok');
+    } catch (error: unknown) {
+      timing('ready', 'error');
+      throw error;
+    }
+  };
 
   const beginTurn = async (turnId: string, text: string, model?: Chosen, queuedMessageId?: string, from?: MessageFrom): Promise<void> => {
+    timing('begin_turn', 'start');
     try { attachmentContent(text, from?.attachments); }
     catch (error) { refuseTurn(turnId, text, error instanceof Error ? error.message : String(error), queuedMessageId, from); return; }
     if (gone !== undefined) {
@@ -2887,7 +2925,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     if (model !== undefined && model.id !== chosen) {
       touch();
       let refused: string | undefined;
-      try { await idle.ready(); refused = await take(model.id); }
+      try { await ready(); refused = await take(model.id); }
       catch (error: unknown) { refused = error instanceof Error ? error.message : String(error); }
       if (closed || beginning !== turnId) return;
       if (refused !== undefined) {
@@ -2940,7 +2978,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       touch();
       startNext();
     };
-    try { await idle.ready(); }
+    try { await ready(); }
     catch (error: unknown) {
       reject(error instanceof Error ? error.message : String(error));
       return;
@@ -2961,7 +2999,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
     carried = undefined;
     hasNativePrompt = true;
     nativePromptSent = true;
+    timing('enqueue', 'start');
     waiting.push({ type: 'user', message: { role: 'user', content: attachmentContent(sent, from?.attachments) }, parent_tool_use_id: null });
+    timing('enqueue', 'ok');
     wake?.();
     wake = undefined;
     touch();
