@@ -11,6 +11,7 @@ interface ManagedQuery extends AsyncIterable<unknown> {
 
 export function idleQuery<Q extends ManagedQuery>(options: {
   timeout: number;
+  admitResume?: () => () => void;
   eligible: () => boolean;
   create: (generation: number) => IdleRuntime<Q>;
   prepare?: (query: Q, generation: number) => Promise<void>;
@@ -62,7 +63,14 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     if (closed) throw new Error('The Claude session was disposed');
     if (failure) throw failure;
     if (!runtime) {
-      runtime = options.create(++generation);
+      const cancel = options.admitResume?.();
+      try {
+        runtime = options.create(generation + 1);
+        generation++;
+      } catch (error) {
+        cancel?.();
+        throw error;
+      }
       initializing = undefined;
       notify();
     }

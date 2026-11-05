@@ -160,3 +160,26 @@ For a host of a different shape, build it from `@ahpd/sdk` and skip this package
 ## License
 
 MIT © Softov
+
+## Memory admission
+
+The daemon checks memory before starting a backend for a new chat, a restored session, or a fork. The Claude backend also checks before recreating a process that idle cleanup stopped. Admission samples the daemon and its descendants, available host memory, and Linux cgroup v2 limits and usage (including tighter ancestor limits). On macOS it reads the process tree with `ps` and uses available host memory. Missing or invalid measurements pause admission.
+
+By default the process-tree budget is 60% of effective RAM, with at least 512 MiB or 10% of effective RAM left available, whichever is larger. Each accepted start reserves 384 MiB for 30 seconds so simultaneous requests cannot all consume the same measured headroom before child memory appears. A synchronous startup failure returns its reservation. Reservations are conservative and temporarily overlap measured child memory.
+
+Under pressure, new starts receive a capacity error; create-session RPC errors include `reason` and `retryAfterMs`, while action-based resumes receive a normal action rejection. Existing sessions and historical reads remain available. Admission reopens on a later request once usage falls to 80% of the budget and free headroom reaches 125% of its minimum. Pause and recovery transitions are logged. The guard does not kill processes, restart the daemon, replay requests, or promise that already-running work cannot exhaust memory. Keep existing service memory limits and idle cleanup.
+
+Optional `config.json` settings, in MiB and milliseconds:
+
+```json
+{
+  "admission": {
+    "memoryLimitMb": 8192,
+    "minimumFreeMb": 1536,
+    "startupReservationMb": 384,
+    "startupReservationMs": 30000
+  }
+}
+```
+
+These are host-specific budgets, not defaults to copy to every installation. The default budget follows the smaller of host RAM and applicable cgroup limits. Startup reservations last at most five minutes when configured. Unsupported or unreadable process/cgroup accounting is reported as unavailable capacity rather than treated as zero usage.

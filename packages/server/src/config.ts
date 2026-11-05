@@ -1,3 +1,4 @@
+import type { AdmissionSettings } from './admission.js';
 /** What this daemon was told before anybody typed a flag, and where it is. */
 
 import { mkdirSync } from 'node:fs';
@@ -52,6 +53,7 @@ export interface UsageSetting {
  * checked against.
  */
 export interface Config {
+  admission?: AdmissionSettings;
   /** TCP port to bind. 0 lets the OS choose. */
   port?: number;
   /** Address to bind. */

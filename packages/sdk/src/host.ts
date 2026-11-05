@@ -1,3 +1,4 @@
+import { admittedStart } from './admission.js';
 import { assertDiagnosticTarget, sessionExecutionDiagnostics } from './sessiondiagnostics.js';
 /**
  * The protocol server: channels, subscriptions, requests and state actions.
@@ -3636,7 +3637,8 @@ export function createHost(options: HostOptions): Host {
       ...(receivedInstructions === undefined ? [] : [receivedInstructions]),
     ];
     let deliveryOwner: Session | undefined;
-    const session = used.create({
+    const session = admittedStart(options.admitSession, () => used.create({
+      ...(options.admitSession === undefined ? {} : { admitResume: options.admitSession }),
       uri,
       chatUri,
       scanPermission: async (request, signal) => {
@@ -3919,7 +3921,7 @@ export function createHost(options: HostOptions): Host {
         if (sender !== undefined) kept.setSender(idOf(uri), transcriptId, sender);
       },
       onHandshake: () => { learnModels(uri); },
-    });
+    }));
     const held = sessions.get(uri) ?? {
       agent,
       chats: new Map<string, Session>(),
@@ -10033,7 +10035,9 @@ export function createHost(options: HostOptions): Host {
             });
             const refused = beginOrRun(session, owner.provider, String(action.turnId ?? ''), String(message.text ?? ''), modelIn(message.model), messageFrom(message), ownerFor(connection));
             if (refused !== undefined) refuse(connection.peer, channel, action, origin, refused);
-          })().finally(() => {
+          })().catch((error: unknown) => {
+            refuse(connection.peer, channel, action, origin, error instanceof Error ? error.message : String(error));
+          }).finally(() => {
             const remaining = (resumingChats.get(uri) ?? 1) - 1;
             if (remaining === 0) resumingChats.delete(uri);
             else resumingChats.set(uri, remaining);

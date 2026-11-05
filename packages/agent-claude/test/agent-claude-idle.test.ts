@@ -534,3 +534,26 @@ it('restarts an evicted query with the pinned model and its context suffix', asy
   expect(sdk.runs[1]!.options.model).toBe('claude-sonnet-5-5[1m]');
   expect(held.settings!().model).toBe('sonnet[1m]');
 });
+
+it('reports memory backpressure without spawning or replaying and resumes after recovery', async () => {
+  let blocked = true;
+  const sent: Record<string, unknown>[] = [];
+  const held = session({ idleTimeoutMs: 100, admitResume: () => {
+    if (blocked) throw new Error('Host capacity temporarily unavailable: memory pressure');
+    return () => {};
+  }, emit: (_channel, action) => { sent.push(action as Record<string, unknown>); } });
+  await settle();
+  await vi.advanceTimersByTimeAsync(100);
+  held.begin('blocked', 'Do not lose this request');
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(sdk.runs[0]!.prompts).toHaveLength(0);
+  expect(JSON.stringify(sent)).toContain('memory pressure');
+  blocked = false;
+  held.begin('retry', 'Retry explicitly');
+  await settle();
+  expect(sdk.runs).toHaveLength(2);
+  expect(sdk.runs[1]!.prompts).toHaveLength(1);
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).toContain('Retry explicitly');
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).not.toContain('Do not lose this request');
+});

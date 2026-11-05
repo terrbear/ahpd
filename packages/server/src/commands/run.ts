@@ -1,3 +1,4 @@
+import { memoryAdmission } from '../admission.js';
 /**
  * The foreground daemon, and the one command every flag is declared on.
  *
@@ -533,6 +534,8 @@ export async function runForeground(options: Options): Promise<void> {
 
   folded.resourceProviders = { ...folded.resourceProviders, 'ahpd-account': accountProvider(folded.agents), 'ahpd-cli-history': cliHistoryProvider(folded.agents) };
   if (managedProviders.some((provider) => !folded.agents.some((agent) => agent.provider === provider))) stop('A managed update is missing an installed provider.');
+  const admission = memoryAdmission(options.admission, { log: stamp });
+  folded.admitSession = admission.reserve;
   const host = createHost(folded);
   turning = () => host.turning();
   // What the host was finally built over, which is what a served `ahpd usage`
