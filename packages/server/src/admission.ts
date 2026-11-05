@@ -17,7 +17,7 @@ export function memoryAdmission(settings: AdmissionSettings = {}, dependencies: 
 } = {}) {
   const sample = dependencies.sample ?? memorySnapshot;
   const now = dependencies.now ?? Date.now;
-  const reservations = new Map<symbol, number>();
+  const reservations = new Map<symbol, { expires: number; baseline: number }>();
   const reservation = (settings.startupReservationMb ?? 384) * MB;
   const lifetime = settings.startupReservationMs ?? 30_000;
   let blocked = false;
@@ -29,7 +29,7 @@ export function memoryAdmission(settings: AdmissionSettings = {}, dependencies: 
   };
   const reserve = () => {
     const at = now();
-    for (const [id, expires] of reservations) if (expires <= at) reservations.delete(id);
+    for (const [id, held] of reservations) if (held.expires <= at) reservations.delete(id);
     let snapshot: MemorySnapshot;
     try {
       snapshot = sample();
@@ -42,8 +42,13 @@ export function memoryAdmission(settings: AdmissionSettings = {}, dependencies: 
     }
     const limit = settings.memoryLimitMb === undefined ? snapshot.total * 0.6 : settings.memoryLimitMb * MB;
     const minimumFree = settings.minimumFreeMb === undefined ? Math.max(512 * MB, snapshot.total * 0.1) : settings.minimumFreeMb * MB;
-    const reserved = reservations.size * reservation;
-    const used = snapshot.used + reserved;
+    let used = snapshot.used;
+    let remaining = reservations.size;
+    for (const held of reservations.values()) {
+      used = Math.max(used, held.baseline + remaining * reservation);
+      remaining--;
+    }
+    const reserved = used - snapshot.used;
     const available = snapshot.available - reserved;
     if (blocked && used <= limit * 0.8 && available >= minimumFree * 1.25) transition(false, 'memory headroom recovered');
     if (used + reservation > limit || available - reservation < minimumFree) {
@@ -51,7 +56,7 @@ export function memoryAdmission(settings: AdmissionSettings = {}, dependencies: 
     }
     if (blocked) throw new RpcError(-32000, 'Host capacity temporarily unavailable: memory pressure. Existing sessions remain available; retry after memory usage falls.', { reason: 'host_memory_pressure', retryAfterMs: lifetime });
     const id = Symbol();
-    reservations.set(id, at + lifetime);
+    reservations.set(id, { expires: at + lifetime, baseline: snapshot.used });
     return () => { reservations.delete(id); };
   };
   return { reserve, status: () => ({ blocked, reason, starting: reservations.size }) };
