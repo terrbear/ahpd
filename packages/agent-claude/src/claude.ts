@@ -296,6 +296,17 @@ export function claude(options: ClaudeOptions): Agent {
         default: 'default',
         sessionMutable: false,
       },
+      claudeConfigIsolation: {
+        scope: 'session',
+        type: 'string',
+        title: 'Claude Configuration',
+        description: 'Isolated excludes user, project, and local settings, plugins, and file-based MCP servers. ' +
+          'Administrator-managed policy may still apply.',
+        enum: ['default', 'isolated'],
+        enumLabels: ['Default Claude configuration', 'Isolated session configuration'],
+        default: 'default',
+        sessionMutable: false,
+      },
       shellInitScripts: {
         scope: 'session',
         type: 'array',
@@ -362,6 +373,7 @@ export function claude(options: ClaudeOptions): Agent {
     ...(perModelEffort ? {} : { effortLevel: 'high' }),
     permissions: { allow: [], deny: [] },
     builtInTools: 'default',
+    claudeConfigIsolation: 'default',
     ...(presets.length > 1 ? { preset: first } : {}),
   });
 
@@ -592,14 +604,15 @@ export function claude(options: ClaudeOptions): Agent {
       chatUri: start.chatUri,
       cwd: workingDirectory(start.workingDirectory),
       /*
-       * The MCP servers, declared by this host rather than found by the CLI.
+       * The MCP servers this host declares, or the ones found in CLI config.
        *
-       * The same files the CLI reads - `.mcp.json` beside the project and
-       * `mcpServers` in `~/.claude.json` - handed to the SDK so they are
-       * *its* servers. That is what makes a token a client signed in with
-       * applicable: `setMcpServers` re-declares only what the SDK was given.
+       * Default mode preserves its existing filesystem discovery. Isolated
+       * mode takes only explicit Start declarations, so ambient files cannot
+       * add a server while deliberate host MCP and the `ahp` bridge remain.
        */
-      mcpServers: serversFor([workingDirectory(start.workingDirectory), ...(start.additional ?? [])]),
+      mcpServers: start.settings?.claudeConfigIsolation === 'isolated'
+        ? { ...(start.mcpServers ?? {}) }
+        : serversFor([workingDirectory(start.workingDirectory), ...(start.additional ?? [])]),
       // Each one checked the way the first is: a directory this host does not
       // serve is not one an agent may be pointed at, however it arrived.
       ...(start.additional && start.additional.length > 0

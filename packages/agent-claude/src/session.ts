@@ -845,6 +845,13 @@ export function createSession(options: ClaudeSessionOptions): Session {
     throw new Error('builtInTools must be one of default, none');
   }
   const disableBuiltInTools = settings.builtInTools === 'none';
+  const configIsolation = settings.claudeConfigIsolation === undefined ? 'default' : settings.claudeConfigIsolation;
+  if (configIsolation !== 'default' && configIsolation !== 'isolated') {
+    throw new Error('claudeConfigIsolation must be one of default, isolated');
+  }
+  // Keep the resolved value in session state so an absent selector is explicit.
+  settings.claudeConfigIsolation = configIsolation;
+  const isolateClaudeConfig = configIsolation === 'isolated';
 
   /*
    * The declared Claude options this session runs on, by field.
@@ -2726,6 +2733,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
           // A per-session opt-out of the SDK's built-in tool set. MCP servers
           // remain separate, and the default leaves the SDK option untouched.
           ...(disableBuiltInTools ? { tools: [] } : {}),
+          // Settings sources, plugins, and filesystem MCP discovery are kept
+          // separate from intentional host declarations in isolated mode.
+          ...(isolateClaudeConfig ? { settingSources: [], strictMcpConfig: true, plugins: [] } : {}),
           /*
            * What the host wants said, after the CLI's own prompt.
            *
