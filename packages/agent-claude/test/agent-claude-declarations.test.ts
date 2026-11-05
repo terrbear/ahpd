@@ -107,7 +107,7 @@ it('says what an option is when nothing named one', () => {
 
 it('builds a session query from the declared values of its preset', async () => {
   const options = await queried({ sandbox: 'on', thinking: 'disabled', outputStyle: 'concise' });
-  expect(options.settings).toEqual({ sandbox: { enabled: true } });
+  expect(options.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true });
   expect(options.thinking).toEqual({ type: 'disabled' });
   // The style is not an option of the query; it waits for the handshake.
   await settle();
@@ -115,5 +115,5 @@ it('builds a session query from the declared values of its preset', async () => 
 });
 
 it('leaves the sandbox layer out when nobody asked for one', async () => {
-  expect((await queried({ sandbox: 'default' })).settings).toBeUndefined();
+  expect((await queried({ sandbox: 'default' })).settings).toEqual({ disableClaudeAiConnectors: true });
 });
