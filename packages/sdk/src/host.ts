@@ -3026,15 +3026,39 @@ export function createHost(options: HostOptions): Host {
       ...(artifacts !== undefined && artifacts.length > 0 ? { [ARTIFACTS_META]: artifacts } : {}),
     };
   };
+  /** Only the opt-in Claude manifest may pass from agent metadata to host metadata. */
+  const CLAUDE_SDK_INIT_TOOL_MANIFEST = 'ahpd.claudeSdkInitToolManifest';
+  const containsControl = (text: string): boolean => Array.from(text).some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+  const claudeSdkInitToolManifestOf = (value: unknown, uri: string): Bag | undefined => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+    const manifest = (value as Bag)[CLAUDE_SDK_INIT_TOOL_MANIFEST];
+    if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return undefined;
+    const candidate = manifest as Bag;
+    const generation = candidate.generation;
+    if (candidate.sessionUri !== uri || typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0) return undefined;
+    const nativeSessionId = candidate.nativeSessionId;
+    if (nativeSessionId !== undefined
+      && (typeof nativeSessionId !== 'string' || nativeSessionId.length === 0 || nativeSessionId.length > 256 || containsControl(nativeSessionId))) return undefined;
+    const nativeId = nativeSessionId === undefined ? {} : { nativeSessionId };
+    if (candidate.status === 'unknown') return { status: 'unknown', sessionUri: uri, generation, ...nativeId };
+    if (candidate.status !== 'observed' || !Array.isArray(candidate.toolNames) || candidate.toolNames.length > 512) return undefined;
+    const toolNames = candidate.toolNames;
+    if (!toolNames.every((name): name is string => typeof name === 'string' && name.length > 0 && name.length <= 256 && !containsControl(name))) return undefined;
+    return { status: 'observed', sessionUri: uri, generation, ...nativeId, toolNames: [...toolNames] };
+  };
   /** The session's own metadata, beside the facts this host adds. */
   const sessionMetaOf = (uri: string): Bag | undefined => {
     const host = metaOf(uri);
     const held = sessions.get(uri);
     const lead = held && leadOf(held);
     const stateMeta = lead === undefined ? undefined : (lead.sessionState() as Bag)._meta;
-    const agent = typeof stateMeta === 'object' && stateMeta !== null ? stateMeta as Bag : undefined;
-    if (host === undefined && agent === undefined) return undefined;
-    return { ...host, ...agent };
+    const manifest = claudeSdkInitToolManifestOf(stateMeta, lead?.uri ?? uri);
+    if (host === undefined) return manifest === undefined ? undefined : { [CLAUDE_SDK_INIT_TOOL_MANIFEST]: manifest };
+    if (manifest === undefined || Object.prototype.hasOwnProperty.call(host, CLAUDE_SDK_INIT_TOOL_MANIFEST)) return host;
+    return { ...host, [CLAUDE_SDK_INIT_TOOL_MANIFEST]: manifest };
   };
   /**
    * Capture a session's pull request baseline, once.
@@ -3749,11 +3773,16 @@ export function createHost(options: HostOptions): Host {
           dispatch(where, { ...action, _meta: { ...(action._meta as Bag | undefined), sender } });
         }
         else if (channel === 'session' && action.type === 'session/metaChanged') {
-          const hostMeta = describes(uri)._meta;
-          const base = typeof hostMeta === 'object' && hostMeta !== null ? hostMeta as Bag : {};
-          const added = typeof action._meta === 'object' && action._meta !== null ? action._meta as Bag : {};
-          const meta = { ...base, ...added };
-          dispatch(where, { ...action, ...(Object.keys(meta).length === 0 ? {} : { _meta: meta }) });
+          const added = action._meta;
+          const carriesClaudeManifest = typeof added === 'object' && added !== null
+            && Object.prototype.hasOwnProperty.call(added, CLAUDE_SDK_INIT_TOOL_MANIFEST);
+          if (carriesClaudeManifest) {
+            const rest = { ...action };
+            delete rest._meta;
+            const meta = sessionMetaOf(uri);
+            dispatch(where, { ...rest, ...(meta === undefined ? {} : { _meta: meta }) });
+          }
+          else dispatch(where, action);
         }
         else dispatch(where, action);
         // A tool call that finished may have written to this session's tree, so
