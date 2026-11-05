@@ -188,6 +188,37 @@ it('re-observes init tools after a resumed query generation', async () => {
   });
 });
 
+it('keeps the deny-all fence on initial, recreated, resumed, and forked queries', async () => {
+  const assertFence = (run: (typeof sdk.runs)[number] | undefined) => {
+    expect(run).toBeDefined();
+    const hooks = run!.options.hooks as { PreToolUse: { matcher?: string; hooks: unknown[] }[] };
+    expect(hooks.PreToolUse).toHaveLength(1);
+    expect(hooks.PreToolUse[0]).not.toHaveProperty('matcher');
+    expect(hooks.PreToolUse[0]!.hooks).toHaveLength(1);
+    expect(run!.options.canUseTool).toBeTypeOf('function');
+  };
+  const held = claudeSession({ settings: { toolExecutionFence: 'deny-all' } });
+  await settle();
+  assertFence(sdk.runs[0]);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(sdk.runs[0]!.closed).toBe(true);
+  held.begin('after-idle', 'Resume the session');
+  await settle();
+  assertFence(sdk.runs[1]);
+  await held.close();
+
+  const resumed = claudeSession({ resume: sdk.nativeId, settings: { toolExecutionFence: 'deny-all' } });
+  await settle();
+  expect(sdk.runs[2]!.options.resume).toBe(sdk.nativeId);
+  assertFence(sdk.runs[2]);
+  await resumed.close();
+
+  const forked = claudeSession({ resume: sdk.nativeId, forkAt: 'cut', settings: { toolExecutionFence: 'deny-all' } });
+  await settle();
+  expect(sdk.runs[3]!.options).toMatchObject({ forkSession: true, resumeSessionAt: 'cut' });
+  assertFence(sdk.runs[3]);
+});
+
 it('recaptures tools when the AHP session is recreated for native resume', async () => {
   sdk.initTools = ['Bash', 'mcp__ahp__read'];
   const original = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });

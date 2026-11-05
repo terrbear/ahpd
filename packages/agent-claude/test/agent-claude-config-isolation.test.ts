@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { claude } from '../src/claude.js';
+import { replacePreToolUseHooks } from '../src/session.js';
 
 const sdk = vi.hoisted(() => ({ options: [] as Record<string, unknown>[] }));
 
@@ -90,11 +91,19 @@ it('advertises an immutable per-session selector with the default behavior', () 
     default: 'disabled',
     sessionMutable: false,
   });
+  expect(properties.toolExecutionFence).toMatchObject({
+    scope: 'session',
+    type: 'string',
+    enum: ['off', 'deny-all'],
+    default: 'off',
+    sessionMutable: false,
+  });
   expect(agent.defaults()).toHaveProperty('claudeConfigIsolation', 'default');
   expect(agent.defaults()).toHaveProperty('captureSdkInitToolManifest', 'disabled');
+  expect(agent.defaults()).toHaveProperty('toolExecutionFence', 'off');
 });
 
-it('does not allow the selector to change on a running session', async () => {
+it('does not allow the isolation or execution fence to change on a running session', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'ahpd-config-isolation-immutable-'));
   sdk.options = [];
   const session = start(directory, { claudeConfigIsolation: 'default' });
@@ -103,12 +112,60 @@ it('does not allow the selector to change on a running session', async () => {
     expect(await session.setConfig!('claudeConfigIsolation', 'isolated')).toBe(
       'claudeConfigIsolation is not a config key this backend takes',
     );
+    expect(await session.setConfig!('toolExecutionFence', 'deny-all')).toBe(
+      'toolExecutionFence is not a config key this backend takes',
+    );
     expect(sdk.options[0]).not.toHaveProperty('settingSources');
   }
   finally {
     await session.close();
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+it('preserves ordinary tool behavior when the execution fence is off', async () => {
+  const options = await queryFor();
+  const hooks = options.hooks as { PreToolUse: { matcher?: string }[] };
+  expect(hooks.PreToolUse.map((one) => one.matcher)).toEqual(['Bash', 'mcp__.*']);
+  expect(options.canUseTool).toBeTypeOf('function');
+});
+
+it('denies every tool class through the unconditional hook and secondary callback', async () => {
+  const tools = ['Read', 'Bash', 'Grep', 'ToolSearch', 'Agent', 'Task', 'mcp__arbitrary__run', 'mcp__ahp__host_tool'];
+  const options = await queryFor({
+    toolExecutionFence: 'deny-all',
+    permissions: { allow: tools, deny: [] },
+  });
+  const hooks = options.hooks as { PreToolUse: { matcher?: string; hooks: ((...args: unknown[]) => Promise<Record<string, unknown>>)[] }[] };
+  expect(hooks.PreToolUse).toHaveLength(1);
+  expect(hooks.PreToolUse[0]).not.toHaveProperty('matcher');
+  const denyHook = hooks.PreToolUse[0]!.hooks[0]!;
+  const canUseTool = options.canUseTool as (name: string, input: Record<string, unknown>, options: { signal: AbortSignal }) => Promise<Record<string, unknown>>;
+  expect(options.allowedTools).toEqual(tools);
+  for (const [index, name] of tools.entries()) {
+    const controller = new AbortController();
+    if (name === 'Agent') controller.abort();
+    const hook = await denyHook(
+      { hook_event_name: 'PreToolUse', tool_name: name, tool_input: { fixture: index } },
+      `toolu_${index}`,
+      { signal: controller.signal },
+    );
+    expect(hook).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
+    });
+    expect(await canUseTool(name, { fixture: index }, { signal: controller.signal })).toMatchObject({ behavior: 'deny' });
+  }
+});
+
+it('replaces PreToolUse gates while preserving other lifecycle hooks', () => {
+  const sessionStart = [{ hooks: ['start'] }];
+  const stop = [{ hooks: ['stop'] }];
+  const replacement = [{ hooks: ['deny-all'] }];
+  expect(replacePreToolUseHooks({ SessionStart: sessionStart, PreToolUse: [{ matcher: 'Bash' }], Stop: stop }, replacement)).toEqual({
+    SessionStart: sessionStart,
+    PreToolUse: replacement,
+    Stop: stop,
+  });
 });
 
 it('preserves default discovery and adds no isolation options by default', async () => {
@@ -131,6 +188,18 @@ it('isolates config with SDK built-ins off while retaining declared MCP and AHP 
     ahp: { type: 'sdk', name: 'ahp', tools: [{ name: 'host_tool' }] },
   });
   expect(options.mcpServers).not.toHaveProperty('ambient');
+});
+
+it.each([null, 1, 'enabled'])('rejects invalid execution fence values before SDK query creation: %j', (value) => {
+  const directory = mkdtempSync(join(tmpdir(), 'ahpd-config-fence-invalid-'));
+  sdk.options = [];
+  try {
+    expect(() => start(directory, { toolExecutionFence: value })).toThrow('toolExecutionFence must be one of off, deny-all');
+    expect(sdk.options).toEqual([]);
+  }
+  finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 it.each([null, 1, 'unsupported'])('rejects invalid isolation values before SDK query creation: %j', (value) => {

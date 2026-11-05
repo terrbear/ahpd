@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { protectedResource, urlOf } from './mcp.js';
 import { lineOf, pastLineOf, summarize, toolInputOf } from './input.js';
 import { toolMetaOf } from './kinds.js';
@@ -69,6 +69,22 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const bag = (value: unknown): Bag => (typeof value === 'object' && value !== null ? value as Bag : {});
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+
+const DENY_ALL_TOOL_MESSAGE = 'Tool execution is disabled for this session.';
+const denyAllPreToolUse: HookCallback = async () => ({
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse',
+    permissionDecision: 'deny',
+    permissionDecisionReason: DENY_ALL_TOOL_MESSAGE,
+  },
+});
+const denyAllCanUseTool: CanUseTool = async () => ({ behavior: 'deny', message: DENY_ALL_TOOL_MESSAGE });
+
+/** Keep non-tool lifecycle hooks, but replace every prior tool gate. */
+export const replacePreToolUseHooks = (existing: unknown, preToolUse: unknown[]): Bag => ({
+  ...bag(existing),
+  PreToolUse: preToolUse,
+});
 const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
 const initToolNamesOf = (value: unknown): string[] | undefined => {
   if (!Array.isArray(value) || value.length > 512) return undefined;
@@ -848,6 +864,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * backend declared a string are narrowed where they are read.
    */
   const settings: Record<string, unknown> = { permissionMode: 'default', ...options.settings };
+  const toolExecutionFence = settings.toolExecutionFence === undefined ? 'off' : settings.toolExecutionFence;
+  if (toolExecutionFence !== 'off' && toolExecutionFence !== 'deny-all') {
+    throw new Error('toolExecutionFence must be one of off, deny-all');
+  }
+  settings.toolExecutionFence = toolExecutionFence;
+  const denyAllToolExecution = toolExecutionFence === 'deny-all';
   if (settings.builtInTools !== undefined && settings.builtInTools !== 'default' && settings.builtInTools !== 'none') {
     throw new Error('builtInTools must be one of default, none');
   }
@@ -2813,11 +2835,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
           ...(typeof settings.permissionMode === 'string' ? { permissionMode: settings.permissionMode } : {}),
           ...(chosen === undefined ? {} : { model: modelId(chosen) }),
           ...(typeof settings.effortLevel === 'string' ? { effort: settings.effortLevel } : {}),
-          // Before every shell command, while a client has a script in force.
-          hooks: { PreToolUse: [
-            { matcher: 'Bash', hooks: [sourceFirst] },
-            { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
-          ] },
+          // Replace all tool gates in deny-all mode; keep other lifecycle hooks.
+          hooks: replacePreToolUseHooks(fromPreset.hooks, denyAllToolExecution
+            ? [{ hooks: [denyAllPreToolUse] }]
+            : [
+                // Before every shell command, while a client has a script in force.
+                { matcher: 'Bash', hooks: [sourceFirst] },
+                { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
+              ]),
           /*
            * The lists, at the moment the query is built.
            *
@@ -2854,7 +2879,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
             ? { resumeSessionAt: options.rewindAt }
             : {}),
           ...(resume === undefined ? { sessionId: agentId ?? reservedNativeId } : {}),
-          canUseTool,
+          canUseTool: denyAllToolExecution ? denyAllCanUseTool : canUseTool,
         },
       } as Parameters<typeof query>[0]);
       return {
