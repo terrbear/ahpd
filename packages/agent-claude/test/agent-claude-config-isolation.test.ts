@@ -5,7 +5,21 @@ import { expect, it, vi } from 'vitest';
 import { claude } from '../src/claude.js';
 import { replacePreToolUseHooks } from '../src/session.js';
 
-const sdk = vi.hoisted(() => ({ options: [] as Record<string, unknown>[] }));
+const sdk = vi.hoisted(() => ({
+  options: [] as Record<string, unknown>[],
+  presetHooks: undefined as Record<string, unknown> | undefined,
+}));
+
+vi.mock('../src/options.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/options.js')>();
+  return {
+    ...actual,
+    queryOptionsOf: (values: Parameters<typeof actual.queryOptionsOf>[0]) => ({
+      ...actual.queryOptionsOf(values),
+      ...(sdk.presetHooks === undefined ? {} : { hooks: sdk.presetHooks }),
+    }),
+  };
+});
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   createSdkMcpServer: (given: Record<string, unknown>) => ({ type: 'sdk', name: given.name, tools: given.tools }),
@@ -120,6 +134,28 @@ it('does not allow the isolation or execution fence to change on a running sessi
   finally {
     await session.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('does not activate preset lifecycle hooks when the execution fence is off', async () => {
+  sdk.presetHooks = {
+    SessionStart: [{ hooks: [async () => ({})] }],
+    Stop: [{ hooks: [async () => ({})] }],
+  };
+  try {
+    const options = await queryFor();
+    expect(options.hooks).toMatchObject({
+      PreToolUse: [
+        { matcher: 'Bash', hooks: [expect.any(Function)] },
+        { matcher: 'mcp__.*', hooks: [expect.any(Function)], timeout: 1800 },
+      ],
+    });
+    expect(options.hooks).not.toHaveProperty('SessionStart');
+    expect(options.hooks).not.toHaveProperty('Stop');
+    expect(options.canUseTool).toBeTypeOf('function');
+  }
+  finally {
+    sdk.presetHooks = undefined;
   }
 });
 

@@ -2835,14 +2835,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
           ...(typeof settings.permissionMode === 'string' ? { permissionMode: settings.permissionMode } : {}),
           ...(chosen === undefined ? {} : { model: modelId(chosen) }),
           ...(typeof settings.effortLevel === 'string' ? { effort: settings.effortLevel } : {}),
-          // Replace all tool gates in deny-all mode; keep other lifecycle hooks.
-          hooks: replacePreToolUseHooks(fromPreset.hooks, denyAllToolExecution
-            ? [{ hooks: [denyAllPreToolUse] }]
-            : [
-                // Before every shell command, while a client has a script in force.
-                { matcher: 'Bash', hooks: [sourceFirst] },
-                { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
-              ]),
+          hooks: denyAllToolExecution
+            ? replacePreToolUseHooks(fromPreset.hooks, [{ hooks: [denyAllPreToolUse] }])
+            : {
+                PreToolUse: [
+                  // Before every shell command, while a client has a script in force.
+                  { matcher: 'Bash', hooks: [sourceFirst] },
+                  { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
+                ],
+              },
           /*
            * The lists, at the moment the query is built.
            *
