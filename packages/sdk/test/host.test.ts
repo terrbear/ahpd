@@ -2018,6 +2018,61 @@ describe('choosing a model', () => {
     expect(state.config.values.effortLevel).toBe('high');
   });
 
+  it('exposes opt-in Claude SDK init names beside host metadata', async () => {
+    const uri = 'ahp-session:/11111111-1111-4111-8111-111111111111';
+    const sessionUri = 'claude:/11111111-1111-4111-8111-111111111111';
+    const host = createHost({
+      path: '/tmp',
+      agents: [claude({ paths: ['/tmp'] })],
+      directories: { meta: () => ({ fixtureHost: 'kept' }) },
+    });
+    const p = peer();
+    const client = host.accept(p);
+    await client.handle(hello(['0.8.0']));
+    await client.handle({
+      method: 'createSession',
+      params: { channel: uri, provider: 'claude', config: { captureSdkInitToolManifest: 'enabled' } },
+    });
+    try {
+      await client.handle({ method: 'subscribe', params: { channel: uri } });
+      const initial = (await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(initial._meta).toMatchObject({
+        fixtureHost: 'kept',
+        'ahpd.claudeSdkInitToolManifest': { status: 'unknown', sessionUri, generation: 0 },
+      });
+
+      await emit({
+        type: 'system',
+        subtype: 'init',
+        session_id: '11111111-1111-4111-8111-111111111111',
+        tools: ['Bash', 'mcp__ahp__read'],
+        apiKeySource: 'must-not-be-retained',
+      });
+      const action = actions(p, uri).filter((one) => one.action.type === 'session/metaChanged').at(-1);
+      expect(action?.action._meta).toMatchObject({
+        fixtureHost: 'kept',
+        'ahpd.claudeSdkInitToolManifest': {
+          status: 'observed',
+          sessionUri,
+          generation: 0,
+          nativeSessionId: '11111111-1111-4111-8111-111111111111',
+          toolNames: ['Bash', 'mcp__ahp__read'],
+        },
+      });
+      expect(action?.action._meta).not.toHaveProperty('apiKeySource');
+      const after = (await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(after._meta).toEqual(action?.action._meta);
+    }
+    finally {
+      await client.handle({ method: 'disposeSession', params: { channel: uri } });
+      await host.close();
+    }
+  });
+
   it('changes the effort level on the running session', async () => {
     const { client, uri } = await running();
     client.handle({

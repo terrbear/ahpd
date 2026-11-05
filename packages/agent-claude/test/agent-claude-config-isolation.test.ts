@@ -83,7 +83,15 @@ it('advertises an immutable per-session selector with the default behavior', () 
   expect(properties.claudeConfigIsolation?.description).toContain('~/.claude.json');
   expect(properties.claudeConfigIsolation?.description).toContain('auto-memory');
   expect(properties.claudeConfigIsolation?.description).toContain('administrator policy');
+  expect(properties.captureSdkInitToolManifest).toMatchObject({
+    scope: 'session',
+    type: 'string',
+    enum: ['disabled', 'enabled'],
+    default: 'disabled',
+    sessionMutable: false,
+  });
   expect(agent.defaults()).toHaveProperty('claudeConfigIsolation', 'default');
+  expect(agent.defaults()).toHaveProperty('captureSdkInitToolManifest', 'disabled');
 });
 
 it('does not allow the selector to change on a running session', async () => {

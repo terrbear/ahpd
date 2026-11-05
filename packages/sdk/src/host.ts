@@ -3026,6 +3026,16 @@ export function createHost(options: HostOptions): Host {
       ...(artifacts !== undefined && artifacts.length > 0 ? { [ARTIFACTS_META]: artifacts } : {}),
     };
   };
+  /** The session's own metadata, beside the facts this host adds. */
+  const sessionMetaOf = (uri: string): Bag | undefined => {
+    const host = metaOf(uri);
+    const held = sessions.get(uri);
+    const lead = held && leadOf(held);
+    const stateMeta = lead === undefined ? undefined : (lead.sessionState() as Bag)._meta;
+    const agent = typeof stateMeta === 'object' && stateMeta !== null ? stateMeta as Bag : undefined;
+    if (host === undefined && agent === undefined) return undefined;
+    return { ...host, ...agent };
+  };
   /**
    * Capture a session's pull request baseline, once.
    *
@@ -3073,7 +3083,7 @@ export function createHost(options: HostOptions): Host {
    */
   const setArtifacts = (uri: string, list: Bag[]): void => {
     kept.setArtifacts(idOf(uri), list);
-    const meta = metaOf(uri);
+    const meta = sessionMetaOf(uri);
     dispatch(uri, { type: 'session/metaChanged', ...(meta ? { _meta: meta } : {}) });
     summaryMoved(uri);
   };
@@ -3084,7 +3094,7 @@ export function createHost(options: HostOptions): Host {
    * fields both declare belong here - see `changesetsOf` for the one that had
    * to come out.
    */
-  const describes = (uri: string): Bag => {
+  const describes = (uri: string, includeAgentMeta = false): Bag => {
     const dir = dirOf(uri);
     /*
      * Whose a session is, as a typed reference, and nothing where nobody owns
@@ -3095,7 +3105,12 @@ export function createHost(options: HostOptions): Host {
      * for a session that is somewhere.
      */
     const owner = kept.owner(idOf(uri));
-    if (dir === undefined) return owner === undefined ? {} : { _meta: { owner } };
+    if (dir === undefined) {
+      const told = includeAgentMeta ? sessionMetaOf(uri) : undefined;
+      return told === undefined && owner === undefined
+        ? {}
+        : { _meta: { ...told, ...(owner === undefined ? {} : { owner }) } };
+    }
     /*
      * The project's name is the directory's own, not its path.
      *
@@ -3108,7 +3123,7 @@ export function createHost(options: HostOptions): Host {
     const project = { uri: `file://${dir}`, displayName: dir.split('/').filter(Boolean).pop() ?? dir };
     // Anything past the path is the host's to be told, not this file's to go
     // and find - `git` is a binary, and a host may be given none.
-    const told = metaOf(uri);
+    const told = includeAgentMeta ? sessionMetaOf(uri) : metaOf(uri);
     return {
       project,
       ...(told === undefined && owner === undefined
@@ -3126,8 +3141,8 @@ export function createHost(options: HostOptions): Host {
   /** `_meta` moved: every session in the directory says so, and its row. */
   const metaMoved = (dir: string): void => {
     for (const uri of inThere(dir)) {
-      const meta = metaOf(uri);
-      dispatch(uri, { type: 'session/metaChanged', ...(meta ? { _meta: meta } : {}) });
+      const meta = describes(uri, true)._meta;
+      dispatch(uri, { type: 'session/metaChanged', ...(meta ? { _meta: meta as Bag } : {}) });
       summaryMoved(uri);
       // And the verbs, since a branch that gained a pull request offers
       // different ones from a branch that lacks it.
@@ -3732,6 +3747,13 @@ export function createHost(options: HostOptions): Host {
         if (sender !== undefined && action.type === 'chat/turnStarted') {
           kept.setSender(idOf(uri), turn, sender);
           dispatch(where, { ...action, _meta: { ...(action._meta as Bag | undefined), sender } });
+        }
+        else if (channel === 'session' && action.type === 'session/metaChanged') {
+          const hostMeta = describes(uri)._meta;
+          const base = typeof hostMeta === 'object' && hostMeta !== null ? hostMeta as Bag : {};
+          const added = typeof action._meta === 'object' && action._meta !== null ? action._meta as Bag : {};
+          const meta = { ...base, ...added };
+          dispatch(where, { ...action, ...(Object.keys(meta).length === 0 ? {} : { _meta: meta }) });
         }
         else dispatch(where, action);
         // A tool call that finished may have written to this session's tree, so
@@ -6310,7 +6332,7 @@ export function createHost(options: HostOptions): Host {
         // never reached the backend, so this is the only place they can be
         // read back from.
         ...(mine === undefined ? {} : { config: mergedConfig(channel, theirs.config, mine) }),
-        ...describes(channel),
+        ...describes(channel, true),
         ...changesetsOf(channel),
         // Required by the protocol and empty until somebody announces
         // themselves, which is a real answer: a session nobody has opened has
