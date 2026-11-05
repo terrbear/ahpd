@@ -2625,7 +2625,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       permissionDecision: approved ? 'allow' : 'deny',
       permissionDecisionReason: approved
         ? `AHP human approved this call for ${scope.keys.join(', ')}.`
-        : 'AHP human confirmation was denied.',
+        : str(answer.message) || 'AHP human confirmation was denied.',
     } };
   };
 
@@ -4237,7 +4237,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       void handle.stopTask(task).catch(() => {});
     },
 
-    confirm: (toolCallId, approved, optionId) => {
+    confirm: (toolCallId, approved, optionId, reasonMessage) => {
       // Found by id rather than assumed to be the only one. This used to
       // compare against whichever question happened to be held and return
       // silently when it did not match - which, with two tool calls open, is
@@ -4275,12 +4275,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
         turnId: scope.turn?.id,
         toolCallId,
         approved,
-        ...(approved ? { confirmed: 'user-action' } : {}),
+        ...(approved ? { confirmed: 'user-action' } : { reason: 'denied' }),
         ...(picked === undefined ? {} : { selectedOptionId: picked.id }),
+        ...(reasonMessage === undefined ? {} : { reasonMessage }),
       });
+      const reason = typeof reasonMessage === 'string' ? reasonMessage : reasonMessage?.markdown;
       settle(approved
         ? { behavior: 'allow', updatedInput: {}, ...(picked?.id === 'allow-always' && held.suggestions !== undefined ? { updatedPermissions: held.suggestions } : {}) }
-        : { behavior: 'deny', message: 'The person declined this action' });
+        : { behavior: 'deny', message: reason?.trim() ? reason : 'The person declined this action' });
       touch();
     },
 

@@ -373,7 +373,7 @@ it('links a nested worker from the call in the worker chat that spawned it', asy
 });
 
 /** What the asking fake's backend was told, in order. */
-const told: { what: 'confirm' | 'answer' | 'cancel' | 'draft' | 'stop'; id: string; value?: unknown; option?: string | undefined }[] = [];
+const told: { what: 'confirm' | 'answer' | 'cancel' | 'draft' | 'stop'; id: string; value?: unknown; option?: string | undefined; reasonMessage?: unknown }[] = [];
 
 /**
  * A backend whose worker is waiting on a person: a permission for one call and
@@ -459,7 +459,7 @@ function askingInWorker(stoppable = false): Agent {
         unqueue: () => {},
         setDraft: (draft) => { told.push({ what: 'draft', id: '', value: draft }); },
         reorder: () => {},
-        confirm: (toolCallId, approved, optionId) => { told.push({ what: 'confirm', id: toolCallId, value: approved, option: optionId }); },
+        confirm: (toolCallId, approved, optionId, reasonMessage) => { told.push({ what: 'confirm', id: toolCallId, value: approved, option: optionId, ...(reasonMessage === undefined ? {} : { reasonMessage }) }); },
         answer: (requestId, accepted) => { told.push({ what: 'answer', id: requestId, value: accepted }); },
         ...(stoppable ? { stopWorker: (toolCallId: string) => { told.push({ what: 'stop', id: toolCallId }); } } : {}),
         setCustomizationEnabled: async () => false,
@@ -518,6 +518,14 @@ it('takes the option picked on a worker chat to the session\'s backend', async (
   await send(worker, { type: 'chat/toolCallConfirmed', toolCallId: 'toolu_bash', approved: true, selectedOptionId: 'always', confirmed: 'user-action' });
   expect(refusals()).toEqual([]);
   expect(told).toEqual([{ what: 'confirm', id: 'toolu_bash', value: true, option: 'always' }]);
+});
+
+it('takes a rejection comment on a worker chat to the session backend', async () => {
+  const { worker, send, refusals } = await waiting();
+  const reasonMessage = 'rewrite as issue-worktree-only changes';
+  await send(worker, { type: 'chat/toolCallConfirmed', toolCallId: 'toolu_bash', approved: false, reason: 'denied', reasonMessage });
+  expect(refusals()).toEqual([]);
+  expect(told).toEqual([{ what: 'confirm', id: 'toolu_bash', value: false, reasonMessage }]);
 });
 
 it('takes the option picked on the lead chat to its backend, and none when none was picked', async () => {

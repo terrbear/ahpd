@@ -1185,6 +1185,24 @@ describe('driving a turn', () => {
       expect(await once.decision).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } });
     });
 
+    it.each([
+      { name: 'plain text', reasonMessage: 'rewrite as issue-worktree-only changes', message: 'rewrite as issue-worktree-only changes' },
+      { name: 'markdown', reasonMessage: { markdown: 'Only edit **the issue worktree**.' }, message: 'Only edit **the issue worktree**.' },
+      { name: 'multiline', reasonMessage: 'Do not push.\nKeep the changes local.', message: 'Do not push.\nKeep the changes local.' },
+      { name: 'missing', reasonMessage: undefined, message: 'The person declined this action' },
+      { name: 'empty', reasonMessage: '', message: 'The person declined this action' },
+      { name: 'blank', reasonMessage: ' \n ', message: 'The person declined this action' },
+    ])('delivers a rejection comment to Claude and watching clients: $name', async ({ reasonMessage, message }) => {
+      const { p, chatUri, decision, answer } = await asking(rule);
+      await answer({ approved: false, selectedOptionId: 'deny', ...(reasonMessage === undefined ? {} : { reasonMessage }) });
+      expect(await decision).toEqual({ behavior: 'deny', message });
+      const echoed = p.notes.find((n) => n.method === 'action'
+        && (n.params as { channel: string }).channel === chatUri && actionOf(n)?.type === 'chat/toolCallConfirmed');
+      expect(actionOf(echoed)).toMatchObject({ approved: false, selectedOptionId: 'deny' });
+      expect(actionOf(echoed)?.reasonMessage).toEqual(reasonMessage);
+      expect(checker().frame(echoed).map((one) => `${one.def} ${one.at} ${one.what}`)).toEqual([]);
+    });
+
     it('says what a mode suggestion does', async () => {
       const { ready } = await asking([{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]);
       const options = actionOf(ready)?.options as { id: string; label: string }[];

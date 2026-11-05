@@ -21,7 +21,7 @@ import { assertDiagnosticTarget, sessionExecutionDiagnostics } from './sessiondi
 
 import { embeddedAttachments } from './attachments.js';
 import { annotationsReducer, chatReducer, IS_CLIENT_DISPATCHABLE, SUPPORTED_PROTOCOL_VERSIONS } from '@microsoft/agent-host-protocol';
-import type { AnnotationsAction, AnnotationsState, ChangesetFile, ChatAction, ChatState, SessionInputRequestKind, TerminalInfo, ToolDefinition, Turn } from '@microsoft/agent-host-protocol';
+import type { AnnotationsAction, AnnotationsState, ChangesetFile, ChatAction, ChatState, SessionInputRequestKind, StringOrMarkdown, TerminalInfo, ToolDefinition, Turn } from '@microsoft/agent-host-protocol';
 import type { OnWire, WireTurn } from './types/wire.js';
 import { RpcError, INTERNAL_ERROR, METHOD_NOT_FOUND } from './rpc.js';
 import { notServed } from './resources.js';
@@ -10699,13 +10699,21 @@ export function createHost(options: HostOptions): Host {
               ? action.order.filter((id): id is string => typeof id === 'string')
               : []);
             break;
-          case 'chat/toolCallConfirmed':
+          case 'chat/toolCallConfirmed': {
+            let reasonMessage: StringOrMarkdown | undefined;
+            if (typeof action.reasonMessage === 'string') reasonMessage = action.reasonMessage;
+            else if (typeof action.reasonMessage === 'object' && action.reasonMessage !== null
+              && 'markdown' in action.reasonMessage && typeof action.reasonMessage.markdown === 'string') {
+              reasonMessage = { markdown: action.reasonMessage.markdown };
+            }
             session.confirm(
               String(action.toolCallId ?? ''),
               action.approved === true,
               typeof action.selectedOptionId === 'string' ? action.selectedOptionId : undefined,
+              reasonMessage,
             );
             break;
+          }
           case 'chat/inputCompleted': {
             /*
              * `response`, which is the field the action has.

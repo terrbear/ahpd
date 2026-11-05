@@ -2,7 +2,7 @@
 
 import type { Bag } from './common.js';
 import type { PermissionScanRequest } from '../permission-scanner.js';
-import type { Message } from '@microsoft/agent-host-protocol';
+import type { Message, StringOrMarkdown } from '@microsoft/agent-host-protocol';
 import type { OnWire } from './wire.js';
 import type { BoundTool } from './agent.js';
 
@@ -409,7 +409,7 @@ export interface Session {
    * this backend offered options on the call and the client sent one as
    * `selectedOptionId`; absent, the answer is a plain approve or deny.
    */
-  confirm(toolCallId: string, approved: boolean, optionId?: string): void;
+  confirm(toolCallId: string, approved: boolean, optionId?: string, reasonMessage?: StringOrMarkdown): void;
 
   /**
    * Replace the tools this session offers the model.
