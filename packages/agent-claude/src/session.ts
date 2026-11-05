@@ -2751,6 +2751,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * before this and how an automation's still does.
            */
           ...fromPreset,
+          settings: { ...(fromPreset.settings as Bag | undefined), disableClaudeAiConnectors: true },
           ...(options.env ? { env: { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env } } : {}),
           // From the settings, which is where it lives: it is a config key like
           // the others, and a second way in was a second thing to keep in step.
