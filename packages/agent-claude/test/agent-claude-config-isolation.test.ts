@@ -34,16 +34,13 @@ const settle = async () => {
   for (let i = 0; i < 8; i++) await new Promise((done) => { setTimeout(done, 0); });
 };
 
-const start = (directory: string, configIsolation?: unknown) => {
+const start = (directory: string, settings: Record<string, unknown> = {}) => {
   const agent = claude({ paths: [directory] });
   return agent.create({
     uri: 'ahp-session:/claude-config-isolation',
     chatUri: 'ahp-chat:/claude-config-isolation',
     workingDirectory: directory,
-    settings: {
-      ...agent.defaults(),
-      ...(configIsolation === undefined ? {} : { claudeConfigIsolation: configIsolation }),
-    },
+    settings: { ...agent.defaults(), ...settings },
     schema: agent.schema,
     mcpServers: { declared: { type: 'http', url: 'https://declared.example.test/mcp' } },
     tools: [{ definition: { name: 'host_tool', inputSchema: { type: 'object' } }, run: () => 'ok' } as never],
@@ -51,13 +48,13 @@ const start = (directory: string, configIsolation?: unknown) => {
   });
 };
 
-const queryFor = async (configIsolation?: unknown) => {
+const queryFor = async (settings: Record<string, unknown> = {}) => {
   const directory = mkdtempSync(join(tmpdir(), 'ahpd-config-isolation-'));
   writeFileSync(join(directory, '.mcp.json'), JSON.stringify({
     mcpServers: { ambient: { type: 'http', url: 'https://ambient.example.test/mcp' } },
   }));
   sdk.options = [];
-  const session = start(directory, configIsolation);
+  const session = start(directory, settings);
   try {
     await settle();
     const options = sdk.options.at(0);
@@ -80,13 +77,19 @@ it('advertises an immutable per-session selector with the default behavior', () 
     default: 'default',
     sessionMutable: false,
   });
+  expect(properties.claudeConfigIsolation?.description).toContain('settingSources: []');
+  expect(properties.claudeConfigIsolation?.description).toContain('strictMcpConfig: true');
+  expect(properties.claudeConfigIsolation?.description).toContain('plugins: []');
+  expect(properties.claudeConfigIsolation?.description).toContain('~/.claude.json');
+  expect(properties.claudeConfigIsolation?.description).toContain('auto-memory');
+  expect(properties.claudeConfigIsolation?.description).toContain('administrator policy');
   expect(agent.defaults()).toHaveProperty('claudeConfigIsolation', 'default');
 });
 
 it('does not allow the selector to change on a running session', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'ahpd-config-isolation-immutable-'));
   sdk.options = [];
-  const session = start(directory, 'default');
+  const session = start(directory, { claudeConfigIsolation: 'default' });
   try {
     await settle();
     expect(await session.setConfig!('claudeConfigIsolation', 'isolated')).toBe(
@@ -112,9 +115,9 @@ it('preserves default discovery and adds no isolation options by default', async
   expect(options.mcpServers).not.toHaveProperty('declared');
 });
 
-it('isolates filesystem settings and MCP while retaining host MCP and AHP tools', async () => {
-  const options = await queryFor('isolated');
-  expect(options).toMatchObject({ settingSources: [], strictMcpConfig: true, plugins: [] });
+it('isolates config with SDK built-ins off while retaining declared MCP and AHP tools', async () => {
+  const options = await queryFor({ claudeConfigIsolation: 'isolated', builtInTools: 'none' });
+  expect(options).toMatchObject({ tools: [], settingSources: [], strictMcpConfig: true, plugins: [] });
   expect(options.mcpServers).toMatchObject({
     declared: { type: 'http', url: 'https://declared.example.test/mcp' },
     ahp: { type: 'sdk', name: 'ahp', tools: [{ name: 'host_tool' }] },
@@ -126,7 +129,7 @@ it.each([null, 1, 'unsupported'])('rejects invalid isolation values before SDK q
   const directory = mkdtempSync(join(tmpdir(), 'ahpd-config-isolation-invalid-'));
   sdk.options = [];
   try {
-    expect(() => start(directory, value)).toThrow('claudeConfigIsolation must be one of default, isolated');
+    expect(() => start(directory, { claudeConfigIsolation: value })).toThrow('claudeConfigIsolation must be one of default, isolated');
     expect(sdk.options).toEqual([]);
   }
   finally {

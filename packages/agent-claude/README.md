@@ -68,10 +68,12 @@ CLI or grant account access.
 ### Session configuration isolation
 
 Set the per-session `claudeConfigIsolation` selector to `default` or `isolated`.
-`default` preserves current behavior. `isolated` disables user, project, and local
-filesystem settings and plugin/MCP discovery, while retaining host-declared MCP
-servers and AHP tools. It is separate from `builtInTools`; administrator-managed
-policy may still apply.
+`default` preserves current behavior. `isolated` passes `settingSources: []`,
+`strictMcpConfig: true`, and `plugins: []` to the SDK. It uses only host-declared
+MCP servers and keeps AHP tools. It is separate from `builtInTools`.
+
+This is not a full CLI state sandbox. It does not disable `~/.claude.json`,
+auto-memory, built-in CLI agents or plugins, or administrator-managed policy.
 
 ### Presets
 

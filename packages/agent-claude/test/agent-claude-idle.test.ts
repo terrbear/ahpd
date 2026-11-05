@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -62,6 +62,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { createSession } = await import('../src/session.js');
+const { claude } = await import('../src/claude.js');
 const directories: string[] = [];
 const sessions: ReturnType<typeof createSession>[] = [];
 const settle = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
@@ -69,6 +70,33 @@ const session = (options: Partial<Parameters<typeof createSession>[0]> = {}) => 
   const cwd = mkdtempSync(join(tmpdir(), 'ahpd-idle-'));
   directories.push(cwd);
   const held = createSession({ uri: 'ahp-session:/11111111-1111-4111-8111-111111111111', chatUri: 'ahp-chat:/idle', cwd, emit: () => {}, ...options });
+  sessions.push(held);
+  return held;
+};
+const claudeSession = (options: {
+  settings?: Record<string, unknown>;
+  mcpServers?: Record<string, unknown>;
+  resume?: string;
+  forkAt?: string;
+} = {}) => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ahpd-idle-claude-'));
+  directories.push(cwd);
+  writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({
+    mcpServers: { ambient: { type: 'http', url: 'https://ambient.example.test/mcp' } },
+  }));
+  const agent = claude({ paths: [cwd], idleTimeoutMs: 100 });
+  const held = agent.create({
+    uri: 'ahp-session:/11111111-1111-4111-8111-111111111111',
+    chatUri: 'ahp-chat:/idle',
+    workingDirectory: cwd,
+    schema: agent.schema,
+    settings: { ...agent.defaults(), ...options.settings },
+    mcpServers: options.mcpServers as never,
+    tools: [{ definition: { name: 'host_tool', inputSchema: { type: 'object' } }, run: () => 'ok' } as never],
+    emit: () => {},
+    ...(options.resume === undefined ? {} : { resume: options.resume }),
+    ...(options.forkAt === undefined ? {} : { forkAt: options.forkAt }),
+  });
   sessions.push(held);
   return held;
 };
@@ -221,8 +249,7 @@ it('keeps active and queued turns alive, then resets inactivity after the queue 
 
 it('resumes exactly the same native session with only the new prompt and retained config and history', async () => {
   const mcpServers = { fixture: { type: 'http' as const, url: 'https://fixture.example.test/mcp' } };
-  const held = session({
-    idleTimeoutMs: 100,
+  const held = claudeSession({
     resume: '11111111-1111-4111-8111-111111111111',
     forkAt: 'fork-point',
     settings: { permissionMode: 'plan', builtInTools: 'none', claudeConfigIsolation: 'isolated' },
@@ -242,12 +269,14 @@ it('resumes exactly the same native session with only the new prompt and retaine
   held.begin('next', 'Read the result');
   await settle();
   expect(sdk.runs).toHaveLength(2);
-  expect(sdk.runs[0]!.options.tools).toEqual([]);
-  expect(sdk.runs[1]!.options.tools).toEqual([]);
-  expect(sdk.runs[0]!.options.mcpServers).toMatchObject(mcpServers);
-  expect(sdk.runs[1]!.options.mcpServers).toMatchObject(mcpServers);
-  expect(sdk.runs[0]!.options).toMatchObject({ settingSources: [], strictMcpConfig: true, plugins: [] });
-  expect(sdk.runs[1]!.options).toMatchObject({ settingSources: [], strictMcpConfig: true, plugins: [] });
+  for (const run of sdk.runs) {
+    expect(run.options).toMatchObject({ tools: [], settingSources: [], strictMcpConfig: true, plugins: [] });
+    expect(run.options.mcpServers).toMatchObject({
+      ...mcpServers,
+      ahp: { type: 'sdk', name: 'ahp', tools: [{ name: 'host_tool' }] },
+    });
+    expect(run.options.mcpServers).not.toHaveProperty('ambient');
+  }
   expect(sdk.runs[1]!.options).toMatchObject({ resume: '11111111-1111-4111-8111-111111111111', model: 'chosen-model', effort: 'high', permissionMode: 'plan' });
   expect(sdk.runs[1]!.options).not.toHaveProperty('forkSession');
   expect(sdk.runs[1]!.options).not.toHaveProperty('resumeSessionAt');
@@ -257,17 +286,19 @@ it('resumes exactly the same native session with only the new prompt and retaine
 
 it('recreates an unused native session with its exact ID rather than resuming an unwritten transcript', async () => {
   const mcpServers = { fixture: { type: 'http' as const, url: 'https://fixture.example.test/mcp' } };
-  const held = session({ idleTimeoutMs: 100, settings: { builtInTools: 'none', claudeConfigIsolation: 'isolated' }, mcpServers });
+  const held = claudeSession({ settings: { builtInTools: 'none', claudeConfigIsolation: 'isolated' }, mcpServers });
   await settle();
   await vi.advanceTimersByTimeAsync(100);
   held.begin('first', 'First prompt');
   await settle();
-  expect(sdk.runs[0]!.options.tools).toEqual([]);
-  expect(sdk.runs[1]!.options.tools).toEqual([]);
-  expect(sdk.runs[0]!.options.mcpServers).toMatchObject(mcpServers);
-  expect(sdk.runs[1]!.options.mcpServers).toMatchObject(mcpServers);
-  expect(sdk.runs[0]!.options).toMatchObject({ settingSources: [], strictMcpConfig: true, plugins: [] });
-  expect(sdk.runs[1]!.options).toMatchObject({ settingSources: [], strictMcpConfig: true, plugins: [] });
+  for (const run of sdk.runs) {
+    expect(run.options).toMatchObject({ tools: [], settingSources: [], strictMcpConfig: true, plugins: [] });
+    expect(run.options.mcpServers).toMatchObject({
+      ...mcpServers,
+      ahp: { type: 'sdk', name: 'ahp', tools: [{ name: 'host_tool' }] },
+    });
+    expect(run.options.mcpServers).not.toHaveProperty('ambient');
+  }
   expect(sdk.runs[1]!.options).toMatchObject({ sessionId: '11111111-1111-4111-8111-111111111111' });
   expect(sdk.runs[1]!.options).not.toHaveProperty('resume');
   expect(sdk.runs[1]!.prompts).toHaveLength(1);

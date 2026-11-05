@@ -300,8 +300,8 @@ export function claude(options: ClaudeOptions): Agent {
         scope: 'session',
         type: 'string',
         title: 'Claude Configuration',
-        description: 'Isolated excludes user, project, and local settings, plugins, and file-based MCP servers. ' +
-          'Administrator-managed policy may still apply.',
+        description: 'Uses settingSources: [], strictMcpConfig: true, and plugins: []. Keeps host MCP and AHP tools. ' +
+          'Does not disable ~/.claude.json, auto-memory, built-in CLI agents/plugins, or administrator policy.',
         enum: ['default', 'isolated'],
         enumLabels: ['Default Claude configuration', 'Isolated session configuration'],
         default: 'default',
