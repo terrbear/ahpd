@@ -26,7 +26,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { AhpClient } from '@microsoft/agent-host-protocol/client';
 import type { AhpTransport, Subscription, TransportFrame } from '@microsoft/agent-host-protocol/client';
 import { chatReducer, PROTOCOL_VERSION, sessionReducer, SUPPORTED_PROTOCOL_VERSIONS } from '@microsoft/agent-host-protocol';
-import type { ChatAction, ChatState, SessionAction, SessionState, StateAction } from '@microsoft/agent-host-protocol';
+import type { ChatAction, ChatState, SessionAction, SessionState, StateAction, StringOrMarkdown } from '@microsoft/agent-host-protocol';
 import { ANSWER_TIMEOUT } from './rpc.js';
 import { computerId } from './computers.js';
 import type { Agent, Start } from './types/agent.js';
@@ -473,8 +473,8 @@ const nestedSession = (
       if (turn === turnId) turn = undefined;
       deliver('chat', { type: 'chat/turnCancelled', turnId });
     },
-    confirm: (toolCallId: string, approved: boolean, optionId?: string): void => {
-      deliver('chat', { type: 'chat/toolCallConfirmed', toolCallId, approved, ...(optionId === undefined ? {} : { selectedOptionId: optionId }) });
+    confirm: (toolCallId: string, approved: boolean, optionId?: string, reasonMessage?: StringOrMarkdown): void => {
+      deliver('chat', { type: 'chat/toolCallConfirmed', toolCallId, approved, ...(optionId === undefined ? {} : { selectedOptionId: optionId }), ...(reasonMessage === undefined ? {} : { reasonMessage }) });
     },
     answer: (requestId: string, accepted: boolean, answers: Bag): void => {
       deliver('chat', { type: 'chat/inputCompleted', requestId, response: accepted ? 'accept' : 'decline', answers });

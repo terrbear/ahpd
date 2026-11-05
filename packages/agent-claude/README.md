@@ -65,6 +65,16 @@ may reject these requests. The bundled SDK minimum is 0.3.293 (Claude Code
 v2.1.293); this source dependency update does not upgrade a separately installed
 CLI or grant account access.
 
+### Session configuration isolation
+
+Set the per-session `claudeConfigIsolation` selector to `default` or `isolated`.
+`default` preserves current behavior. `isolated` passes `settingSources: []`,
+`strictMcpConfig: true`, and `plugins: []` to the SDK. It uses only host-declared
+MCP servers and keeps AHP tools. It is separate from `builtInTools`.
+
+This is not a full CLI state sandbox. It does not disable `~/.claude.json`,
+auto-memory, built-in CLI agents or plugins, or administrator-managed policy.
+
 ### Presets
 
 A preset is a set of Claude options an operator writes once and sessions run on, rather than options each session offers a control for. Two of them give a session a `preset` to choose from, fixed when the session is created:

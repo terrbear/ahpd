@@ -1,3 +1,4 @@
+import { admittedStart } from './admission.js';
 import { assertDiagnosticTarget, sessionExecutionDiagnostics } from './sessiondiagnostics.js';
 /**
  * The protocol server: channels, subscriptions, requests and state actions.
@@ -20,7 +21,7 @@ import { assertDiagnosticTarget, sessionExecutionDiagnostics } from './sessiondi
 
 import { embeddedAttachments } from './attachments.js';
 import { annotationsReducer, chatReducer, IS_CLIENT_DISPATCHABLE, SUPPORTED_PROTOCOL_VERSIONS } from '@microsoft/agent-host-protocol';
-import type { AnnotationsAction, AnnotationsState, ChangesetFile, ChatAction, ChatState, SessionInputRequestKind, TerminalInfo, ToolDefinition, Turn } from '@microsoft/agent-host-protocol';
+import type { AnnotationsAction, AnnotationsState, ChangesetFile, ChatAction, ChatState, SessionInputRequestKind, StringOrMarkdown, TerminalInfo, ToolDefinition, Turn } from '@microsoft/agent-host-protocol';
 import type { OnWire, WireTurn } from './types/wire.js';
 import { RpcError, INTERNAL_ERROR, METHOD_NOT_FOUND } from './rpc.js';
 import { notServed } from './resources.js';
@@ -3636,7 +3637,8 @@ export function createHost(options: HostOptions): Host {
       ...(receivedInstructions === undefined ? [] : [receivedInstructions]),
     ];
     let deliveryOwner: Session | undefined;
-    const session = used.create({
+    const session = admittedStart(options.admitSession, () => used.create({
+      ...(options.admitSession === undefined ? {} : { admitResume: options.admitSession }),
       uri,
       chatUri,
       scanPermission: async (request, signal) => {
@@ -3919,7 +3921,7 @@ export function createHost(options: HostOptions): Host {
         if (sender !== undefined) kept.setSender(idOf(uri), transcriptId, sender);
       },
       onHandshake: () => { learnModels(uri); },
-    });
+    }));
     const held = sessions.get(uri) ?? {
       agent,
       chats: new Map<string, Session>(),
@@ -10033,7 +10035,9 @@ export function createHost(options: HostOptions): Host {
             });
             const refused = beginOrRun(session, owner.provider, String(action.turnId ?? ''), String(message.text ?? ''), modelIn(message.model), messageFrom(message), ownerFor(connection));
             if (refused !== undefined) refuse(connection.peer, channel, action, origin, refused);
-          })().finally(() => {
+          })().catch((error: unknown) => {
+            refuse(connection.peer, channel, action, origin, error instanceof Error ? error.message : String(error));
+          }).finally(() => {
             const remaining = (resumingChats.get(uri) ?? 1) - 1;
             if (remaining === 0) resumingChats.delete(uri);
             else resumingChats.set(uri, remaining);
@@ -10695,13 +10699,21 @@ export function createHost(options: HostOptions): Host {
               ? action.order.filter((id): id is string => typeof id === 'string')
               : []);
             break;
-          case 'chat/toolCallConfirmed':
+          case 'chat/toolCallConfirmed': {
+            let reasonMessage: StringOrMarkdown | undefined;
+            if (typeof action.reasonMessage === 'string') reasonMessage = action.reasonMessage;
+            else if (typeof action.reasonMessage === 'object' && action.reasonMessage !== null
+              && 'markdown' in action.reasonMessage && typeof action.reasonMessage.markdown === 'string') {
+              reasonMessage = { markdown: action.reasonMessage.markdown };
+            }
             session.confirm(
               String(action.toolCallId ?? ''),
               action.approved === true,
               typeof action.selectedOptionId === 'string' ? action.selectedOptionId : undefined,
+              reasonMessage,
             );
             break;
+          }
           case 'chat/inputCompleted': {
             /*
              * `response`, which is the field the action has.

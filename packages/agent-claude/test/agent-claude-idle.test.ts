@@ -1,8 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ProcessFixture } from './fixtures/process.js';
+import { idleQuery } from '../src/idle.js';
 
 const sdk = vi.hoisted(() => ({ nativeId: '11111111-1111-4111-8111-111111111111', inputGatedInit: false, initialize: undefined as undefined | ((index: number) => Promise<unknown>), spawn: false, localSpawn: undefined as undefined | (() => unknown), resources: [] as { closed: boolean }[], runs: [] as {
   options: Record<string, unknown>;
@@ -61,6 +62,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { createSession } = await import('../src/session.js');
+const { claude } = await import('../src/claude.js');
 const directories: string[] = [];
 const sessions: ReturnType<typeof createSession>[] = [];
 const settle = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
@@ -71,12 +73,142 @@ const session = (options: Partial<Parameters<typeof createSession>[0]> = {}) => 
   sessions.push(held);
   return held;
 };
+const claudeSession = (options: {
+  settings?: Record<string, unknown>;
+  mcpServers?: Record<string, unknown>;
+  resume?: string;
+  forkAt?: string;
+} = {}) => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ahpd-idle-claude-'));
+  directories.push(cwd);
+  writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({
+    mcpServers: { ambient: { type: 'http', url: 'https://ambient.example.test/mcp' } },
+  }));
+  const agent = claude({ paths: [cwd], idleTimeoutMs: 100 });
+  const held = agent.create({
+    uri: 'ahp-session:/11111111-1111-4111-8111-111111111111',
+    chatUri: 'ahp-chat:/idle',
+    workingDirectory: cwd,
+    schema: agent.schema,
+    settings: { ...agent.defaults(), ...options.settings },
+    mcpServers: options.mcpServers as never,
+    tools: [{ definition: { name: 'host_tool', inputSchema: { type: 'object' } }, run: () => 'ok' } as never],
+    emit: () => {},
+    ...(options.resume === undefined ? {} : { resume: options.resume }),
+    ...(options.forkAt === undefined ? {} : { forkAt: options.forkAt }),
+  });
+  sessions.push(held);
+  return held;
+};
 
 beforeEach(() => { vi.useFakeTimers(); sdk.runs.length = 0; sdk.resources.length = 0; sdk.nativeId = '11111111-1111-4111-8111-111111111111'; sdk.inputGatedInit = false; sdk.initialize = undefined; sdk.spawn = false; sdk.localSpawn = undefined; });
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map((held) => held.close()));
   for (const cwd of directories.splice(0)) rmSync(cwd, { recursive: true, force: true });
   vi.useRealTimers();
+});
+
+it('records startup stages without prompt data and waits for initialization before enqueue', async () => {
+  const lines: string[] = [];
+  let release: (() => void) | undefined;
+  sdk.spawn = true;
+  sdk.localSpawn = () => {
+    const child = new ProcessFixture();
+    child.exitCode = 0;
+    return child;
+  };
+  let initializationCalls = 0;
+  sdk.initialize = () => initializationCalls++ > 0
+    ? Promise.resolve({})
+    : new Promise((resolve) => { release = () => resolve({}); });
+  const held = session({ log: (line) => lines.push(line) });
+  held.begin('first', 'private prompt sentinel', { id: 'opus' });
+  await settle();
+  const records = () => lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records().filter((one) => one.stage === 'sdk_spawn_hook').map((one) => one.outcome)).toEqual(['start', 'returned']);
+  expect(records().filter((one) => one.stage !== 'sdk_spawn_hook' && !String(one.stage).startsWith('describe')).map((one) => [one.stage, one.outcome])).toEqual([
+    ['begin_turn', 'start'],
+    ['ready', 'start'],
+    ['initialization', 'start'],
+  ]);
+  expect(lines.join('\n')).not.toContain('private prompt sentinel');
+  expect(records().every((one) => one.session_id === '11111111-1111-4111-8111-111111111111' && one.generation === 0 && typeof one.elapsed_ms === 'number' && Object.keys(one).sort().join(',') === 'elapsed_ms,generation,outcome,session_id,stage')).toBe(true);
+  release?.();
+  await settle();
+  expect(Object.fromEntries(records().filter((one) => String(one.stage).startsWith('describe')).map((one) => [one.stage, one.outcome]))).toMatchObject({
+    describe: 'ok',
+    describe_initialization: 'ok',
+    describe_mcp_server_status: 'ok',
+    describe_reload_skills: 'ok',
+    describe_reload_plugins: 'ok',
+    describe_handshake: 'ok',
+  });
+  expect(records().filter((one) => one.stage !== 'sdk_spawn_hook' && !String(one.stage).startsWith('describe')).map((one) => [one.stage, one.outcome])).toEqual([
+    ['begin_turn', 'start'],
+    ['ready', 'start'],
+    ['initialization', 'start'],
+    ['initialization', 'ok'],
+    ['prepare', 'start'],
+    ['prepare', 'ok'],
+    ['ready', 'ok'],
+    ['model_selection', 'start'],
+    ['model_selection', 'ok'],
+    ['ready', 'start'],
+    ['ready', 'ok'],
+    ['enqueue', 'start'],
+    ['enqueue', 'ok'],
+    ['sdk_user_input', 'yield'],
+  ]);
+});
+
+it('does not let timing sink errors fail startup', async () => {
+  const held = session({ log: () => { throw new Error('diagnostic sink failed'); } });
+  held.begin('first', 'Start normally');
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(1);
+});
+
+it('attributes the startup watchdog to the pending initialization stage', async () => {
+  const records: [string, string][] = [];
+  const pending = new Promise<unknown>(() => {});
+  const idle = idleQuery({
+    timeout: 0,
+    eligible: () => true,
+    create: () => ({
+      query: { initializationResult: () => pending, close: () => {}, async *[Symbol.asyncIterator]() {} },
+      signal: new AbortController(),
+      stop: async () => {},
+    }),
+    timing: (stage, outcome) => records.push([stage, outcome]),
+  });
+  const ready = idle.ready().then(() => undefined, () => undefined);
+  await settle();
+  await vi.advanceTimersByTimeAsync(30_000);
+  await ready;
+  expect(records).toEqual([['initialization', 'start'], ['initialization', 'timeout']]);
+  await idle.dispose();
+});
+
+it('attributes the startup watchdog to prepare when initialization has completed', async () => {
+  const records: [string, string][] = [];
+  const idle = idleQuery({
+    timeout: 0,
+    eligible: () => true,
+    create: () => ({
+      query: { initializationResult: async () => ({}), close: () => {}, async *[Symbol.asyncIterator]() {} },
+      signal: new AbortController(),
+      stop: async () => {},
+    }),
+    prepare: async () => new Promise<void>(() => {}),
+    timing: (stage, outcome) => records.push([stage, outcome]),
+  });
+  const ready = idle.ready().then(() => undefined, () => undefined);
+  await settle();
+  expect(records).toEqual([['initialization', 'start'], ['initialization', 'ok'], ['prepare', 'start']]);
+  await vi.advanceTimersByTimeAsync(30_000);
+  await ready;
+  expect(records).toEqual([['initialization', 'start'], ['initialization', 'ok'], ['prepare', 'start'], ['prepare', 'timeout']]);
+  await idle.dispose();
 });
 
 it('releases an idle Claude query after one hour while retaining the logical chat', async () => {
@@ -116,7 +248,13 @@ it('keeps active and queued turns alive, then resets inactivity after the queue 
 });
 
 it('resumes exactly the same native session with only the new prompt and retained config and history', async () => {
-  const held = session({ idleTimeoutMs: 100, resume: '11111111-1111-4111-8111-111111111111', forkAt: 'fork-point', settings: { permissionMode: 'plan' } });
+  const mcpServers = { fixture: { type: 'http' as const, url: 'https://fixture.example.test/mcp' } };
+  const held = claudeSession({
+    resume: '11111111-1111-4111-8111-111111111111',
+    forkAt: 'fork-point',
+    settings: { permissionMode: 'plan', builtInTools: 'none', claudeConfigIsolation: 'isolated' },
+    mcpServers,
+  });
   held.begin('first', 'Make one change');
   await settle();
   await complete();
@@ -131,6 +269,14 @@ it('resumes exactly the same native session with only the new prompt and retaine
   held.begin('next', 'Read the result');
   await settle();
   expect(sdk.runs).toHaveLength(2);
+  for (const run of sdk.runs) {
+    expect(run.options).toMatchObject({ tools: [], settingSources: [], strictMcpConfig: true, plugins: [] });
+    expect(run.options.mcpServers).toMatchObject({
+      ...mcpServers,
+      ahp: { type: 'sdk', name: 'ahp', tools: [{ name: 'host_tool' }] },
+    });
+    expect(run.options.mcpServers).not.toHaveProperty('ambient');
+  }
   expect(sdk.runs[1]!.options).toMatchObject({ resume: '11111111-1111-4111-8111-111111111111', model: 'chosen-model', effort: 'high', permissionMode: 'plan' });
   expect(sdk.runs[1]!.options).not.toHaveProperty('forkSession');
   expect(sdk.runs[1]!.options).not.toHaveProperty('resumeSessionAt');
@@ -139,11 +285,20 @@ it('resumes exactly the same native session with only the new prompt and retaine
 });
 
 it('recreates an unused native session with its exact ID rather than resuming an unwritten transcript', async () => {
-  const held = session({ idleTimeoutMs: 100 });
+  const mcpServers = { fixture: { type: 'http' as const, url: 'https://fixture.example.test/mcp' } };
+  const held = claudeSession({ settings: { builtInTools: 'none', claudeConfigIsolation: 'isolated' }, mcpServers });
   await settle();
   await vi.advanceTimersByTimeAsync(100);
   held.begin('first', 'First prompt');
   await settle();
+  for (const run of sdk.runs) {
+    expect(run.options).toMatchObject({ tools: [], settingSources: [], strictMcpConfig: true, plugins: [] });
+    expect(run.options.mcpServers).toMatchObject({
+      ...mcpServers,
+      ahp: { type: 'sdk', name: 'ahp', tools: [{ name: 'host_tool' }] },
+    });
+    expect(run.options.mcpServers).not.toHaveProperty('ambient');
+  }
   expect(sdk.runs[1]!.options).toMatchObject({ sessionId: '11111111-1111-4111-8111-111111111111' });
   expect(sdk.runs[1]!.options).not.toHaveProperty('resume');
   expect(sdk.runs[1]!.prompts).toHaveLength(1);
@@ -429,4 +584,27 @@ it('restarts an evicted query with the pinned model and its context suffix', asy
   await settle();
   expect(sdk.runs[1]!.options.model).toBe('claude-sonnet-5-5[1m]');
   expect(held.settings!().model).toBe('sonnet[1m]');
+});
+
+it('reports memory backpressure without spawning or replaying and resumes after recovery', async () => {
+  let blocked = true;
+  const sent: Record<string, unknown>[] = [];
+  const held = session({ idleTimeoutMs: 100, admitResume: () => {
+    if (blocked) throw new Error('Host capacity temporarily unavailable: memory pressure');
+    return () => {};
+  }, emit: (_channel, action) => { sent.push(action as Record<string, unknown>); } });
+  await settle();
+  await vi.advanceTimersByTimeAsync(100);
+  held.begin('blocked', 'Do not lose this request');
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(sdk.runs[0]!.prompts).toHaveLength(0);
+  expect(JSON.stringify(sent)).toContain('memory pressure');
+  blocked = false;
+  held.begin('retry', 'Retry explicitly');
+  await settle();
+  expect(sdk.runs).toHaveLength(2);
+  expect(sdk.runs[1]!.prompts).toHaveLength(1);
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).toContain('Retry explicitly');
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).not.toContain('Do not lose this request');
 });

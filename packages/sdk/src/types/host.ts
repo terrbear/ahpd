@@ -63,6 +63,7 @@ export type { TerminalStore } from './terminals.js';
 
 /** How to construct a host. */
 export interface HostOptions {
+  admitSession?: () => () => void;
   /**
    * The directory whose sessions this host serves, on the machine it runs on.
    *

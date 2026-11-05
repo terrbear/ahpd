@@ -560,8 +560,11 @@ it('denies a human refusal and aborts timed-out confirmations without leaving or
   const payload = { issueKey: 'WOR-800', fields: { summary: 'Should not run' } };
   const denied = hook({ hook_event_name: 'PreToolUse', tool_name: jiraTool, tool_input: payload, tool_use_id: 'toolu_human_denied' }, undefined, { signal: new AbortController().signal });
   await settle();
-  session.confirm('toolu_human_denied', false);
-  expect(hookDecision(await denied)).toBe('deny');
+  session.confirm('toolu_human_denied', false, undefined, 'Keep the issue summary unchanged.');
+  expect(await denied).toMatchObject({ hookSpecificOutput: {
+    permissionDecision: 'deny',
+    permissionDecisionReason: 'Keep the issue summary unchanged.',
+  } });
 
   const alreadyAborted = new AbortController();
   alreadyAborted.abort();

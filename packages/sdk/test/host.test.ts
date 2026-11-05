@@ -129,8 +129,13 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
           sdk.mcpDeclareFails--;
           throw new Error('fixture refused the MCP update');
         }
-        fake.options.mcpServers = servers;
-        sdk.mcpDeclared.push(servers);
+        const previous = fake.options.mcpServers as Record<string, { type?: string }> | undefined;
+        const installed = Object.fromEntries(Object.entries(servers).map(([name, server]) => [
+          name, previous?.[name]?.type === 'sdk' ? previous[name] : server,
+        ]));
+        fake.options.mcpServers = installed;
+        sdk.mcpDeclared.push(installed);
+        return { added: [], removed: [], errors: {} };
       },
       // The control protocol: answers without a turn having happened, which
       // is the whole reason capabilities are read from here.
@@ -1180,6 +1185,24 @@ describe('driving a turn', () => {
       expect(await once.decision).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } });
     });
 
+    it.each([
+      { name: 'plain text', reasonMessage: 'rewrite as issue-worktree-only changes', message: 'rewrite as issue-worktree-only changes' },
+      { name: 'markdown', reasonMessage: { markdown: 'Only edit **the issue worktree**.' }, message: 'Only edit **the issue worktree**.' },
+      { name: 'multiline', reasonMessage: 'Do not push.\nKeep the changes local.', message: 'Do not push.\nKeep the changes local.' },
+      { name: 'missing', reasonMessage: undefined, message: 'The person declined this action' },
+      { name: 'empty', reasonMessage: '', message: 'The person declined this action' },
+      { name: 'blank', reasonMessage: ' \n ', message: 'The person declined this action' },
+    ])('delivers a rejection comment to Claude and watching clients: $name', async ({ reasonMessage, message }) => {
+      const { p, chatUri, decision, answer } = await asking(rule);
+      await answer({ approved: false, selectedOptionId: 'deny', ...(reasonMessage === undefined ? {} : { reasonMessage }) });
+      expect(await decision).toEqual({ behavior: 'deny', message });
+      const echoed = p.notes.find((n) => n.method === 'action'
+        && (n.params as { channel: string }).channel === chatUri && actionOf(n)?.type === 'chat/toolCallConfirmed');
+      expect(actionOf(echoed)).toMatchObject({ approved: false, selectedOptionId: 'deny' });
+      expect(actionOf(echoed)?.reasonMessage).toEqual(reasonMessage);
+      expect(checker().frame(echoed).map((one) => `${one.def} ${one.at} ${one.what}`)).toEqual([]);
+    });
+
     it('says what a mode suggestion does', async () => {
       const { ready } = await asking([{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]);
       const options = actionOf(ready)?.options as { id: string; label: string }[];
@@ -2027,11 +2050,11 @@ describe('choosing a model', () => {
     // What the operator wrote the preset down as, in the query the CLI runs.
     const onWork = await made('ahp-session:/onwork', { preset: 'work' });
     expect(onWork.thinking).toEqual({ type: 'disabled' });
-    expect(onWork.settings).toEqual({ sandbox: { enabled: true } });
-    // And a preset that says nothing is the empty one, which changes nothing.
+    expect(onWork.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true });
+    // And a preset that says nothing adds no preset-specific settings.
     const onTest = await made('ahp-session:/ontest', { preset: 'test' });
     expect(onTest.thinking).toEqual({ type: 'adaptive' });
-    expect(onTest.settings).toBeUndefined();
+    expect(onTest.settings).toEqual({ disableClaudeAiConnectors: true });
     // A stored name nothing resolves is the first preset, which is what
     // renaming or removing one leaves behind.
     const onGone = await made('ahp-session:/ongone', { preset: 'gone' });

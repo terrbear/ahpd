@@ -286,6 +286,27 @@ export function claude(options: ClaudeOptions): Agent {
        * the Python environment the window has selected for the folder. No
        * `default`, so absent stays tellable from an explicit empty list.
        */
+      builtInTools: {
+        scope: 'session',
+        type: 'string',
+        title: 'Claude Code Tools',
+        description: 'Use Claude Code built-in tools or disable them. MCP tools remain available.',
+        enum: ['default', 'none'],
+        enumLabels: ['Default built-in tools', 'No built-in tools'],
+        default: 'default',
+        sessionMutable: false,
+      },
+      claudeConfigIsolation: {
+        scope: 'session',
+        type: 'string',
+        title: 'Claude Configuration',
+        description: 'Uses settingSources: [], strictMcpConfig: true, and plugins: []. Keeps host MCP and AHP tools. ' +
+          'Does not disable ~/.claude.json, auto-memory, built-in CLI agents/plugins, or administrator policy.',
+        enum: ['default', 'isolated'],
+        enumLabels: ['Default Claude configuration', 'Isolated session configuration'],
+        default: 'default',
+        sessionMutable: false,
+      },
       shellInitScripts: {
         scope: 'session',
         type: 'array',
@@ -351,6 +372,8 @@ export function claude(options: ClaudeOptions): Agent {
     // a control a client cannot show and cannot change.
     ...(perModelEffort ? {} : { effortLevel: 'high' }),
     permissions: { allow: [], deny: [] },
+    builtInTools: 'default',
+    claudeConfigIsolation: 'default',
     ...(presets.length > 1 ? { preset: first } : {}),
   });
 
@@ -572,6 +595,7 @@ export function claude(options: ClaudeOptions): Agent {
        */
       const inside = insideOf(start);
       return createSession({
+      ...(start.admitResume === undefined ? {} : { admitResume: start.admitResume }),
       ...(inside === undefined ? {} : { spawn: inside, spawnExecutable: executable, spawnConfigDir: configDir }),
       ...(options.workerStop !== undefined ? { workerStop: options.workerStop } : {}),
       ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
@@ -580,14 +604,15 @@ export function claude(options: ClaudeOptions): Agent {
       chatUri: start.chatUri,
       cwd: workingDirectory(start.workingDirectory),
       /*
-       * The MCP servers, declared by this host rather than found by the CLI.
+       * The MCP servers this host declares, or the ones found in CLI config.
        *
-       * The same files the CLI reads - `.mcp.json` beside the project and
-       * `mcpServers` in `~/.claude.json` - handed to the SDK so they are
-       * *its* servers. That is what makes a token a client signed in with
-       * applicable: `setMcpServers` re-declares only what the SDK was given.
+       * Default mode preserves its existing filesystem discovery. Isolated
+       * mode takes only explicit Start declarations, so ambient files cannot
+       * add a server while deliberate host MCP and the `ahp` bridge remain.
        */
-      mcpServers: serversFor([workingDirectory(start.workingDirectory), ...(start.additional ?? [])]),
+      mcpServers: start.settings?.claudeConfigIsolation === 'isolated'
+        ? { ...(start.mcpServers ?? {}) }
+        : serversFor([workingDirectory(start.workingDirectory), ...(start.additional ?? [])]),
       // Each one checked the way the first is: a directory this host does not
       // serve is not one an agent may be pointed at, however it arrived.
       ...(start.additional && start.additional.length > 0
@@ -628,6 +653,7 @@ export function claude(options: ClaudeOptions): Agent {
       // the values it runs on.
       ...(presets.length > 0 ? { presets: options.presets } : {}),
       ...(options.models === undefined ? {} : { offerModels: offer }),
+      ...(options.log === undefined ? {} : { log: options.log }),
       });
     },
   };
