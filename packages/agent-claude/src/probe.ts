@@ -56,7 +56,7 @@ export async function probe(cwd: string): Promise<Offered> {
     return;
   }
 
-  const handle = query({ prompt: silence(), options: { cwd } } as Parameters<typeof query>[0]);
+  const handle = query({ prompt: silence(), options: { cwd, settings: { disableClaudeAiConnectors: true } } } as Parameters<typeof query>[0]);
   try {
     const [init, mcp, skills, plugins] = await Promise.all([
       handle.initializationResult().then((answer) => bag(answer as unknown)),
