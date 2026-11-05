@@ -220,7 +220,8 @@ it('keeps active and queued turns alive, then resets inactivity after the queue 
 });
 
 it('resumes exactly the same native session with only the new prompt and retained config and history', async () => {
-  const held = session({ idleTimeoutMs: 100, resume: '11111111-1111-4111-8111-111111111111', forkAt: 'fork-point', settings: { permissionMode: 'plan' } });
+  const mcpServers = { fixture: { type: 'http' as const, url: 'https://fixture.example.test/mcp' } };
+  const held = session({ idleTimeoutMs: 100, resume: '11111111-1111-4111-8111-111111111111', forkAt: 'fork-point', settings: { permissionMode: 'plan', builtInTools: 'none' }, mcpServers });
   held.begin('first', 'Make one change');
   await settle();
   await complete();
@@ -235,6 +236,10 @@ it('resumes exactly the same native session with only the new prompt and retaine
   held.begin('next', 'Read the result');
   await settle();
   expect(sdk.runs).toHaveLength(2);
+  expect(sdk.runs[0]!.options.tools).toEqual([]);
+  expect(sdk.runs[1]!.options.tools).toEqual([]);
+  expect(sdk.runs[0]!.options.mcpServers).toMatchObject(mcpServers);
+  expect(sdk.runs[1]!.options.mcpServers).toMatchObject(mcpServers);
   expect(sdk.runs[1]!.options).toMatchObject({ resume: '11111111-1111-4111-8111-111111111111', model: 'chosen-model', effort: 'high', permissionMode: 'plan' });
   expect(sdk.runs[1]!.options).not.toHaveProperty('forkSession');
   expect(sdk.runs[1]!.options).not.toHaveProperty('resumeSessionAt');
@@ -243,11 +248,16 @@ it('resumes exactly the same native session with only the new prompt and retaine
 });
 
 it('recreates an unused native session with its exact ID rather than resuming an unwritten transcript', async () => {
-  const held = session({ idleTimeoutMs: 100 });
+  const mcpServers = { fixture: { type: 'http' as const, url: 'https://fixture.example.test/mcp' } };
+  const held = session({ idleTimeoutMs: 100, settings: { builtInTools: 'none' }, mcpServers });
   await settle();
   await vi.advanceTimersByTimeAsync(100);
   held.begin('first', 'First prompt');
   await settle();
+  expect(sdk.runs[0]!.options.tools).toEqual([]);
+  expect(sdk.runs[1]!.options.tools).toEqual([]);
+  expect(sdk.runs[0]!.options.mcpServers).toMatchObject(mcpServers);
+  expect(sdk.runs[1]!.options.mcpServers).toMatchObject(mcpServers);
   expect(sdk.runs[1]!.options).toMatchObject({ sessionId: '11111111-1111-4111-8111-111111111111' });
   expect(sdk.runs[1]!.options).not.toHaveProperty('resume');
   expect(sdk.runs[1]!.prompts).toHaveLength(1);

@@ -286,6 +286,16 @@ export function claude(options: ClaudeOptions): Agent {
        * the Python environment the window has selected for the folder. No
        * `default`, so absent stays tellable from an explicit empty list.
        */
+      builtInTools: {
+        scope: 'session',
+        type: 'string',
+        title: 'Claude Code Tools',
+        description: 'Use Claude Code built-in tools or disable them. MCP tools remain available.',
+        enum: ['default', 'none'],
+        enumLabels: ['Default built-in tools', 'No built-in tools'],
+        default: 'default',
+        sessionMutable: false,
+      },
       shellInitScripts: {
         scope: 'session',
         type: 'array',
@@ -351,6 +361,7 @@ export function claude(options: ClaudeOptions): Agent {
     // a control a client cannot show and cannot change.
     ...(perModelEffort ? {} : { effortLevel: 'high' }),
     permissions: { allow: [], deny: [] },
+    builtInTools: 'default',
     ...(presets.length > 1 ? { preset: first } : {}),
   });
 
