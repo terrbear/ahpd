@@ -841,6 +841,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * backend declared a string are narrowed where they are read.
    */
   const settings: Record<string, unknown> = { permissionMode: 'default', ...options.settings };
+  if (settings.builtInTools !== undefined && settings.builtInTools !== 'default' && settings.builtInTools !== 'none') {
+    throw new Error('builtInTools must be one of default, none');
+  }
+  const disableBuiltInTools = settings.builtInTools === 'none';
 
   /*
    * The declared Claude options this session runs on, by field.
@@ -2719,6 +2723,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * `setMcpServers` does not touch servers that came from a settings file.
            */
           ...(Object.keys(declared).length > 0 ? { mcpServers: { ...declared } as never } : {}),
+          // A per-session opt-out of the SDK's built-in tool set. MCP servers
+          // remain separate, and the default leaves the SDK option untouched.
+          ...(disableBuiltInTools ? { tools: [] } : {}),
           /*
            * What the host wants said, after the CLI's own prompt.
            *
