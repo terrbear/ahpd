@@ -93,3 +93,82 @@ it('uses the tightest cgroup ancestor including memory consumed by siblings', ()
   const gate = memoryAdmission({}, { sample: () => sample });
   expect(() => gate.reserve()).toThrow(/memory pressure/u);
 });
+
+it('counts observed startup RSS once across sequential admissions', () => {
+  let used = 256 * MB;
+  const gate = memoryAdmission({ memoryLimitMb: 1536, minimumFreeMb: 128, startupReservationMb: 256 }, {
+    sample: () => ({ used, available: 2048 * MB - used, total: 4096 * MB }),
+  });
+  for (let index = 0; index < 5; index++) {
+    expect(() => gate.reserve()).not.toThrow();
+    used += 256 * MB;
+  }
+  expect(() => gate.reserve()).toThrow(/capacity/u);
+});
+
+it('retains the unobserved portion of a partial startup allocation', () => {
+  let used = 256 * MB;
+  const gate = memoryAdmission({ memoryLimitMb: 1024, minimumFreeMb: 128, startupReservationMb: 256 }, {
+    sample: () => ({ used, available: 4096 * MB, total: 8192 * MB }),
+  });
+  gate.reserve();
+  used += 128 * MB;
+  gate.reserve();
+  gate.reserve();
+  expect(() => gate.reserve()).toThrow(/capacity/u);
+});
+
+it('credits observed growth to host headroom as well as the process budget', () => {
+  let used = 100 * MB;
+  const gate = memoryAdmission({ memoryLimitMb: 4096, minimumFreeMb: 512, startupReservationMb: 256 }, {
+    sample: () => ({ used, available: 1280 * MB - used, total: 8192 * MB }),
+  });
+  gate.reserve();
+  used += 256 * MB;
+  expect(() => gate.reserve()).not.toThrow();
+  used += 256 * MB;
+  expect(() => gate.reserve()).toThrow(/capacity/u);
+});
+
+it('releases failed and expired reservations without releasing another start', () => {
+  let now = 0;
+  const gate = memoryAdmission({ memoryLimitMb: 1024, minimumFreeMb: 128, startupReservationMb: 256, startupReservationMs: 1000 }, {
+    now: () => now,
+    sample: () => ({ used: 256 * MB, available: 4096 * MB, total: 8192 * MB }),
+  });
+  const cancel = gate.reserve();
+  now = 500;
+  gate.reserve();
+  cancel();
+  cancel();
+  gate.reserve();
+  gate.reserve();
+  expect(() => gate.reserve()).toThrow(/capacity/u);
+  now = 1501;
+  expect(() => gate.reserve()).not.toThrow();
+});
+
+it('does not lose startup reservations when measured memory falls', () => {
+  let used = 256 * MB;
+  const gate = memoryAdmission({ memoryLimitMb: 1024, minimumFreeMb: 128, startupReservationMb: 256 }, {
+    sample: () => ({ used, available: 4096 * MB, total: 8192 * MB }),
+  });
+  gate.reserve();
+  used = 512 * MB;
+  gate.reserve();
+  used = 256 * MB;
+  gate.reserve();
+  expect(() => gate.reserve()).toThrow(/capacity/u);
+});
+
+it('admits the reported 22-session startup burst within a 24 GiB service budget', () => {
+  let used = 1024 * MB;
+  const gate = memoryAdmission({}, {
+    sample: () => ({ used, available: 24 * 1024 * MB - used, total: 24 * 1024 * MB }),
+  });
+  for (let index = 0; index < 22; index++) {
+    expect(() => gate.reserve()).not.toThrow();
+    used += 224 * MB;
+  }
+  expect(gate.status().blocked).toBe(false);
+});
