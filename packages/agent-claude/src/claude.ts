@@ -572,6 +572,7 @@ export function claude(options: ClaudeOptions): Agent {
        */
       const inside = insideOf(start);
       return createSession({
+      ...(start.admitResume === undefined ? {} : { admitResume: start.admitResume }),
       ...(inside === undefined ? {} : { spawn: inside, spawnExecutable: executable, spawnConfigDir: configDir }),
       ...(options.workerStop !== undefined ? { workerStop: options.workerStop } : {}),
       ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),

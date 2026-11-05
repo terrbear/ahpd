@@ -690,6 +690,7 @@ export interface ClaudeSessionOptions extends SessionOptions {
    */
   workerStop?: 'worker' | 'session';
   idleTimeoutMs?: number;
+  admitResume?: () => () => void;
   /**
    * The presets `claude()` was configured with, by name.
    *
@@ -2623,6 +2624,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const dependencies = new Set<string>();
   const disabledServers = new Set<string>();
   const idle = idleQuery<ReturnType<typeof query>>({
+    ...(options.admitResume === undefined ? {} : { admitResume: options.admitResume }),
     timeout: options.spawn === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
     timing,
     eligible: () => !closed && gone === undefined && !busy()

@@ -12,6 +12,32 @@ class Query {
 }
 
 const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+
+it('checks memory admission before an idle resume and permits retry after recovery', async () => {
+  let blocked = true;
+  let starts = 0;
+  const idle = idleQuery({
+    timeout: 100,
+    eligible: () => true,
+    admitResume: () => {
+      if (blocked) throw new Error('Host capacity temporarily unavailable');
+      return () => {};
+    },
+    create: () => {
+      starts++;
+      const query = new Query();
+      return { query, signal: new AbortController(), stop: async () => { query.close(); } };
+    },
+  });
+  idle.changed();
+  await vi.advanceTimersByTimeAsync(100);
+  await expect(idle.ready()).rejects.toThrow(/capacity/u);
+  expect(starts).toBe(1);
+  blocked = false;
+  await idle.ready();
+  expect(starts).toBe(2);
+  await idle.dispose();
+});
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 

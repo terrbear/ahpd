@@ -195,6 +195,12 @@ describe('the command registry', () => {
 });
 
 describe('the update check', () => {
+  it('loads validated admission budgets from the configuration', () => {
+    const admission = { memoryLimitMb: 4096, minimumFreeMb: 1024, startupReservationMb: 384, startupReservationMs: 30000 };
+    writeFileSync(config, JSON.stringify({ admission }));
+    expect(optionsFrom({ configFile: config }).admission).toEqual(admission);
+  });
+
   it('is on unless the input or the file turns it off', () => {
     expect(optionsFrom({ configFile: config, updateCheck: false }).updateCheck).toBe(false);
     expect(optionsFrom({ configFile: config, updateCheck: true }).updateCheck).toBe(true);
