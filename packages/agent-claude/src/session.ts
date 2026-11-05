@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { protectedResource, urlOf } from './mcp.js';
 import { lineOf, pastLineOf, summarize, toolInputOf } from './input.js';
 import { toolMetaOf } from './kinds.js';
@@ -69,7 +69,30 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const bag = (value: unknown): Bag => (typeof value === 'object' && value !== null ? value as Bag : {});
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+
+const DENY_ALL_TOOL_MESSAGE = 'Tool execution is disabled for this session.';
+const denyAllPreToolUse: HookCallback = async () => ({
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse',
+    permissionDecision: 'deny',
+    permissionDecisionReason: DENY_ALL_TOOL_MESSAGE,
+  },
+});
+const denyAllCanUseTool: CanUseTool = async () => ({ behavior: 'deny', message: DENY_ALL_TOOL_MESSAGE });
+
+/** Keep non-tool lifecycle hooks, but replace every prior tool gate. */
+export const replacePreToolUseHooks = (existing: unknown, preToolUse: unknown[]): Bag => ({
+  ...bag(existing),
+  PreToolUse: preToolUse,
+});
 const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
+const initToolNamesOf = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value) || value.length > 512) return undefined;
+  const names = value as unknown[];
+  if (!names.every((name): name is string => typeof name === 'string' && name.length > 0 && name.length <= 256 && !/[\x00-\x1f\x7f]/.test(name))) return undefined;
+  return names.slice();
+};
+const SDK_INIT_TOOL_MANIFEST = 'ahpd.claudeSdkInitToolManifest';
 
 /**
  * Which half of one API call's usage each streaming event reports.
@@ -781,7 +804,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * on a historic turn and to size the context window that turn used.
    */
   let ran: string | undefined;
-  let handshake: Bag | undefined;
+  let handshakeModel: string | undefined;
   /**
    * The id the agent gave this session, which is not the URI it is served at.
    *
@@ -841,6 +864,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * backend declared a string are narrowed where they are read.
    */
   const settings: Record<string, unknown> = { permissionMode: 'default', ...options.settings };
+  const toolExecutionFence = settings.toolExecutionFence === undefined ? 'off' : settings.toolExecutionFence;
+  if (toolExecutionFence !== 'off' && toolExecutionFence !== 'deny-all') {
+    throw new Error('toolExecutionFence must be one of off, deny-all');
+  }
+  settings.toolExecutionFence = toolExecutionFence;
+  const denyAllToolExecution = toolExecutionFence === 'deny-all';
   if (settings.builtInTools !== undefined && settings.builtInTools !== 'default' && settings.builtInTools !== 'none') {
     throw new Error('builtInTools must be one of default, none');
   }
@@ -852,6 +881,28 @@ export function createSession(options: ClaudeSessionOptions): Session {
   // Keep the resolved value in session state so an absent selector is explicit.
   settings.claudeConfigIsolation = configIsolation;
   const isolateClaudeConfig = configIsolation === 'isolated';
+  const manifestCapture = settings.captureSdkInitToolManifest === undefined ? 'disabled' : settings.captureSdkInitToolManifest;
+  if (manifestCapture !== 'disabled' && manifestCapture !== 'enabled') {
+    throw new Error('captureSdkInitToolManifest must be one of disabled, enabled');
+  }
+  settings.captureSdkInitToolManifest = manifestCapture;
+  const captureSdkInitToolManifest = manifestCapture === 'enabled';
+  let sdkInitToolManifest: Bag | undefined = captureSdkInitToolManifest
+    ? { status: 'unknown', sessionUri: uri, generation: 0 }
+    : undefined;
+  let manifestBoundNativeId: string | undefined = captureSdkInitToolManifest ? options.resume ?? reservedNativeId : undefined;
+  let manifestForkPending = false;
+  const sessionMeta = (): Bag | undefined => {
+    const meta: Bag = {};
+    const model = chosen ?? handshakeModel;
+    if (model !== undefined) meta.model = model;
+    if (sdkInitToolManifest !== undefined) meta[SDK_INIT_TOOL_MANIFEST] = sdkInitToolManifest;
+    return Object.keys(meta).length === 0 ? undefined : meta;
+  };
+  const publishSessionMeta = (): void => {
+    const meta = sessionMeta();
+    options.emit('session', { type: 'session/metaChanged', ...(meta === undefined ? {} : { _meta: meta }) });
+  };
 
   /*
    * The declared Claude options this session runs on, by field.
@@ -2659,10 +2710,19 @@ export function createSession(options: ClaudeSessionOptions): Session {
     },
     create: (generation) => {
       timingGeneration = generation;
+      if (captureSdkInitToolManifest) {
+        sdkInitToolManifest = { status: 'unknown', sessionUri: uri, generation };
+        publishSessionMeta();
+      }
       const signal = new AbortController();
       let childExit: ReturnType<typeof processExit> | undefined;
       let resume = options.resume;
       if (generation > 0) resume = hasNativePrompt ? agentId ?? reservedNativeId : undefined;
+      if (captureSdkInitToolManifest) {
+        manifestForkPending = generation === 0 && options.forkAt !== undefined;
+        if (manifestForkPending) manifestBoundNativeId = undefined;
+        else manifestBoundNativeId ??= resume ?? agentId ?? reservedNativeId;
+      }
       if (generation > 0) {
         paid.clear();
         backgroundSnapshot = false;
@@ -2775,11 +2835,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
           ...(typeof settings.permissionMode === 'string' ? { permissionMode: settings.permissionMode } : {}),
           ...(chosen === undefined ? {} : { model: modelId(chosen) }),
           ...(typeof settings.effortLevel === 'string' ? { effort: settings.effortLevel } : {}),
-          // Before every shell command, while a client has a script in force.
-          hooks: { PreToolUse: [
-            { matcher: 'Bash', hooks: [sourceFirst] },
-            { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
-          ] },
+          hooks: denyAllToolExecution
+            ? replacePreToolUseHooks(fromPreset.hooks, [{ hooks: [denyAllPreToolUse] }])
+            : {
+                PreToolUse: [
+                  // Before every shell command, while a client has a script in force.
+                  { matcher: 'Bash', hooks: [sourceFirst] },
+                  { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
+                ],
+              },
           /*
            * The lists, at the moment the query is built.
            *
@@ -2816,7 +2880,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
             ? { resumeSessionAt: options.rewindAt }
             : {}),
           ...(resume === undefined ? { sessionId: agentId ?? reservedNativeId } : {}),
-          canUseTool,
+          canUseTool: denyAllToolExecution ? denyAllCanUseTool : canUseTool,
         },
       } as Parameters<typeof query>[0]);
       return {
@@ -3285,8 +3349,20 @@ export function createSession(options: ClaudeSessionOptions): Session {
         const type = str(message.type);
         // Every message carries it, so this needs no particular one to arrive.
         const said = str(message.session_id);
+        const expectedNativeId = agentId ?? reservedNativeId;
+        let matchesExpectedNativeId = false;
+        if (captureSdkInitToolManifest && said !== undefined) {
+          if (manifestBoundNativeId !== undefined) matchesExpectedNativeId = said === manifestBoundNativeId;
+          else if (manifestForkPending) {
+            // A requested fork gets its own native id. Bind it once, from this
+            // query generation, then require the same id for its init frame.
+            manifestBoundNativeId = said;
+            manifestForkPending = false;
+            matchesExpectedNativeId = true;
+          }
+        }
         if (said) {
-          if (idle.generation() > 0 && (agentId ?? reservedNativeId) !== said) {
+          if (idle.generation() > 0 && expectedNativeId !== said) {
             const error = new Error('Claude resumed a different native session; refusing to continue');
             throw error;
           }
@@ -3304,8 +3380,20 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
         // The message stream's own init. Capabilities come from the control
         // protocol instead (see `describe`), because those are needed before
-        // a turn; what this adds is the model the turn actually ran on.
-        if (type === 'system' && str(message.subtype) === 'init') { handshake = message; continue; }
+        // a turn; what this adds is the model the turn actually ran on. The
+        // optional manifest keeps only the reported names, never the SDK frame.
+        if (type === 'system' && str(message.subtype) === 'init') {
+          handshakeModel = str(message.model);
+          if (captureSdkInitToolManifest) {
+            const nativeSessionId = matchesExpectedNativeId ? said : undefined;
+            const toolNames = matchesExpectedNativeId ? initToolNamesOf(message.tools) : undefined;
+            sdkInitToolManifest = toolNames === undefined
+              ? { status: 'unknown', sessionUri: uri, generation: idle.generation(), ...(nativeSessionId === undefined ? {} : { nativeSessionId }) }
+              : { status: 'observed', sessionUri: uri, generation: idle.generation(), ...(nativeSessionId === undefined ? {} : { nativeSessionId }), toolNames };
+            publishSessionMeta();
+          }
+          continue;
+        }
 
         /*
          * The harness compacted its context.
@@ -3723,9 +3811,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
        * beside `title` and `provider` reads like a declared field, which is a
        * mistake somebody has already made with this one.
        */
-      ...(chosen ?? str(bag(handshake).model)
-        ? { _meta: { model: (chosen ?? str(bag(handshake).model)) as string } }
-        : {}),
+      ...(sessionMeta() === undefined ? {} : { _meta: sessionMeta() }),
       // Set only while something is wanted. A key that is always present and
       // sometimes empty is a client that has to guess which it is.
       ...(pending.size + byClient.size > 0 ? { inputNeeded: [

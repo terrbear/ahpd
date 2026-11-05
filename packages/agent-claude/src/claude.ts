@@ -307,6 +307,26 @@ export function claude(options: ClaudeOptions): Agent {
         default: 'default',
         sessionMutable: false,
       },
+      captureSdkInitToolManifest: {
+        scope: 'session',
+        type: 'string',
+        title: 'Capture Claude SDK Tool Names',
+        description: 'When enabled, exposes only tool names from the Claude SDK system/init message in this session metadata. Disabled by default.',
+        enum: ['disabled', 'enabled'],
+        enumLabels: ['Do not capture', 'Capture tool names'],
+        default: 'disabled',
+        sessionMutable: false,
+      },
+      toolExecutionFence: {
+        scope: 'session',
+        type: 'string',
+        title: 'Tool Execution Fence',
+        description: 'Off keeps normal tool behavior. Deny all blocks every Claude tool call before execution. Fixed when the session is created.',
+        enum: ['off', 'deny-all'],
+        enumLabels: ['Off', 'Deny all tool calls'],
+        default: 'off',
+        sessionMutable: false,
+      },
       shellInitScripts: {
         scope: 'session',
         type: 'array',
@@ -374,6 +394,8 @@ export function claude(options: ClaudeOptions): Agent {
     permissions: { allow: [], deny: [] },
     builtInTools: 'default',
     claudeConfigIsolation: 'default',
+    captureSdkInitToolManifest: 'disabled',
+    toolExecutionFence: 'off',
     ...(presets.length > 1 ? { preset: first } : {}),
   });
 
