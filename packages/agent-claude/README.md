@@ -75,6 +75,15 @@ MCP servers and keeps AHP tools. It is separate from `builtInTools`.
 This is not a full CLI state sandbox. It does not disable `~/.claude.json`,
 auto-memory, built-in CLI agents or plugins, or administrator-managed policy.
 
+### Preset CLI arguments
+
+Set the per-session `extraArgsPolicy` selector to `preset` or `none`.
+`preset` is the default and keeps preset-owned `extraArgs`. `none` omits only
+those arguments from each SDK query, including idle restarts, restoration and
+forks. The selector is fixed when the session is created. Other preset options,
+provider environment and credentials, model, effort, permissions, MCP servers
+and tools stay unchanged. This does not isolate other Claude configuration.
+
 ### Presets
 
 A preset is a set of Claude options an operator writes once and sessions run on, rather than options each session offers a control for. Two of them give a session a `preset` to choose from, fixed when the session is created:

@@ -874,6 +874,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
     throw new Error('builtInTools must be one of default, none');
   }
   const disableBuiltInTools = settings.builtInTools === 'none';
+  const extraArgsPolicy = settings.extraArgsPolicy === undefined ? 'preset' : settings.extraArgsPolicy;
+  if (extraArgsPolicy !== 'preset' && extraArgsPolicy !== 'none') {
+    throw new Error('extraArgsPolicy must be one of preset, none');
+  }
+  settings.extraArgsPolicy = extraArgsPolicy;
   const configIsolation = settings.claudeConfigIsolation === undefined ? 'default' : settings.claudeConfigIsolation;
   if (configIsolation !== 'default' && configIsolation !== 'isolated') {
     throw new Error('claudeConfigIsolation must be one of default, isolated');
@@ -2733,6 +2738,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
         }
         if (offering.length > 0) declared.ahp = contributed(offering, clientRunner(), contributedWork) as Bag;
       }
+      const presetQuery = { ...fromPreset };
+      if (extraArgsPolicy === 'none') delete presetQuery.extraArgs;
       const handle = query({
         prompt: input(signal.signal),
         options: {
@@ -2827,7 +2834,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * the subprocess simply inherits, which is how every session worked
            * before this and how an automation's still does.
            */
-          ...fromPreset,
+          ...presetQuery,
           settings: { ...(fromPreset.settings as Bag | undefined), disableClaudeAiConnectors: true },
           ...(options.env ? { env: { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env } } : {}),
           // From the settings, which is where it lives: it is a config key like
