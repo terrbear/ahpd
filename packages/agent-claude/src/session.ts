@@ -17,6 +17,7 @@ import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, Session
 import { spawnFailure } from './spawn.js';
 import { pinnedModel, pinnedModels } from './models.js';
 import { idleQuery } from './idle.js';
+import { executionFenceOf } from './tool-execution-fence.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
 import type { Asked, Spawned } from './spawn.js';
 
@@ -864,12 +865,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * backend declared a string are narrowed where they are read.
    */
   const settings: Record<string, unknown> = { permissionMode: 'default', ...options.settings };
-  const toolExecutionFence = settings.toolExecutionFence === undefined ? 'off' : settings.toolExecutionFence;
-  if (toolExecutionFence !== 'off' && toolExecutionFence !== 'deny-all') {
-    throw new Error('toolExecutionFence must be one of off, deny-all');
-  }
-  settings.toolExecutionFence = toolExecutionFence;
-  const denyAllToolExecution = toolExecutionFence === 'deny-all';
+  const executionFence = executionFenceOf(settings);
+  settings.toolExecutionFence = executionFence.mode;
+  settings.toolExecutionAllowlist = executionFence.names;
+  const denyAllToolExecution = executionFence.mode === 'deny-all';
   if (settings.builtInTools !== undefined && settings.builtInTools !== 'default' && settings.builtInTools !== 'none') {
     throw new Error('builtInTools must be one of default, none');
   }
@@ -2854,9 +2853,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
             ? replacePreToolUseHooks(fromPreset.hooks, [{ hooks: [denyAllPreToolUse] }])
             : {
                 PreToolUse: [
+                  ...(executionFence.mode === 'allowlist' ? [{ hooks: [executionFence.preToolUse] }] : []),
                   // Before every shell command, while a client has a script in force.
-                  { matcher: 'Bash', hooks: [sourceFirst] },
-                  { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
+                  { matcher: 'Bash', hooks: [executionFence.wrapHook(sourceFirst)] },
+                  { matcher: 'mcp__.*', hooks: [executionFence.wrapHook(requireJiraScope)], timeout: 1800 },
                 ],
               },
           /*
@@ -2895,7 +2895,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
             ? { resumeSessionAt: options.rewindAt }
             : {}),
           ...(resume === undefined ? { sessionId: agentId ?? reservedNativeId } : {}),
-          canUseTool: denyAllToolExecution ? denyAllCanUseTool : canUseTool,
+          canUseTool: denyAllToolExecution ? denyAllCanUseTool : executionFence.wrap(canUseTool as CanUseTool),
         },
       } as Parameters<typeof query>[0]);
       return {

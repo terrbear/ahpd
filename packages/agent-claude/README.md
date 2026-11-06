@@ -121,6 +121,14 @@ A client may set the session's `shellXdgConfigHome` to the user's `XDG_CONFIG_HO
 
 This selector does not disable Claude built-in tools or external MCP servers. In isolated configuration mode, explicit host `mcpServers` still reach the SDK at initialization, before any dynamic server toggles. This setting is not a network or filesystem sandbox, and it does not prove an empty SDK tool manifest.
 
+### Tool execution fence
+
+`toolExecutionFence` is fixed at session creation. `"off"` preserves ordinary behavior and `"deny-all"` blocks every tool. `"allowlist"` requires an explicit `toolExecutionAllowlist` array: at most 512 unique exact tool names, each 1–256 ASCII letters, digits, underscores or hyphens. An empty array denies every tool; wildcards and duplicate names are rejected. A nonempty list with any other mode is rejected.
+
+Allowlist mode denies unlisted calls through both an unconditional `PreToolUse` hook and `canUseTool`, ahead of normal permission decisions, including tools already approved in ordinary permission lists. Listed calls still pass through the existing hooks and permission checks. The list is copied and frozen at creation and retained in saved settings for query recreation, restoration and forks.
+
+The fence neither hides tool declarations nor authenticates a tool's MCP transport. A fixture-only integration must separately bind its transport and source, disable unrelated declarations and built-ins, verify the SDK tool inventory and retain those constraints across lifecycle changes. This control is not a network sandbox or a correctness validator.
+
 ### A second Claude on another endpoint
 
 Load the package twice, the second time under its own `provider` and `displayName` and with one preset that points the CLI elsewhere. It is listed as a harness of its own, and the key stays in the daemon's environment:
