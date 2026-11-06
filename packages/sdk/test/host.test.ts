@@ -3,6 +3,7 @@ import type { Peer } from '../src/types/rpc.js';
 import type { Agent } from '../src/types/agent.js';
 import type { OpenedTerminal } from '../src/types/terminals.js';
 import { Status } from '../src/catalog.js';
+import { ARTIFACTS_META } from '../src/artifacttools.js';
 import { fileSessions, memorySessions } from '../src/sessions.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -2040,6 +2041,152 @@ describe('choosing a model', () => {
     expect(Object.keys(state.config.schema.properties)).toContain('permissionMode');
     expect(state.config.values.permissionMode).toBe('default');
     expect(state.config.values.effortLevel).toBe('high');
+  });
+
+  it('exposes opt-in Claude SDK init names beside host metadata', async () => {
+    const uri = 'ahp-session:/11111111-1111-4111-8111-111111111111';
+    const sessionUri = 'claude:/11111111-1111-4111-8111-111111111111';
+    const hostOwner = { id: 'host-owner' };
+    const hostGit = { branchName: 'host-branch', baseBranchName: 'main' };
+    const hostArtifacts = [{ id: 'host-artifact', label: 'host-owned' }];
+    const agentMeta = {
+      owner: { id: 'agent-owner' },
+      git: { branchName: 'agent-branch' },
+      [ARTIFACTS_META]: [{ id: 'agent-artifact', label: 'agent-owned' }],
+      apiKeySource: 'must-not-be-retained',
+    };
+    const withUntrustedAgentMetadata = (meta: Record<string, unknown>): Record<string, unknown> => {
+      const manifest = meta['ahpd.claudeSdkInitToolManifest'];
+      return {
+        ...meta,
+        ...(typeof manifest === 'object' && manifest !== null
+          ? { 'ahpd.claudeSdkInitToolManifest': { ...(manifest as Record<string, unknown>), apiKeySource: 'must-not-be-retained' } }
+          : {}),
+        ...agentMeta,
+      };
+    };
+    const backend = claude({ paths: ['/tmp'] });
+    const agent: Agent = {
+      ...backend,
+      create: (start) => {
+        const session = backend.create({
+          ...start,
+          emit: (channel, action) => {
+            if (channel === 'session' && action.type === 'session/metaChanged') {
+              const meta = typeof action._meta === 'object' && action._meta !== null ? action._meta as Record<string, unknown> : {};
+              start.emit(channel, { ...action, _meta: withUntrustedAgentMetadata(meta) });
+            }
+            else start.emit(channel, action);
+          },
+        });
+        return {
+          ...session,
+          sessionState: () => {
+            const state = session.sessionState();
+            const meta = typeof state._meta === 'object' && state._meta !== null ? state._meta as Record<string, unknown> : {};
+            return { ...state, _meta: withUntrustedAgentMetadata(meta) };
+          },
+        };
+      },
+    };
+    const host = createHost({
+      path: '/tmp',
+      agents: [agent],
+      directories: { meta: () => ({ fixtureHost: 'kept', owner: hostOwner, git: hostGit, [ARTIFACTS_META]: hostArtifacts }) },
+    });
+    const p = peer();
+    const client = host.accept(p);
+    await client.handle(hello(['0.8.0']));
+    await client.handle({
+      method: 'createSession',
+      params: { channel: uri, provider: 'claude', config: { captureSdkInitToolManifest: 'enabled' } },
+    });
+    try {
+      await client.handle({ method: 'subscribe', params: { channel: uri } });
+      const initial = (await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(initial._meta).toMatchObject({
+        fixtureHost: 'kept',
+        'ahpd.claudeSdkInitToolManifest': { status: 'unknown', sessionUri, generation: 0 },
+      });
+      expect(initial._meta?.owner).toEqual(hostOwner);
+      expect(initial._meta?.git).toEqual(hostGit);
+      expect(initial._meta?.[ARTIFACTS_META]).toEqual(hostArtifacts);
+      expect(initial._meta).not.toHaveProperty('apiKeySource');
+      expect((initial._meta?.['ahpd.claudeSdkInitToolManifest'] as Record<string, unknown> | undefined)).not.toHaveProperty('apiKeySource');
+
+      await emit({
+        type: 'system',
+        subtype: 'init',
+        session_id: '11111111-1111-4111-8111-111111111111',
+        tools: ['Bash', 'mcp__ahp__read'],
+        apiKeySource: 'must-not-be-retained',
+      });
+      const action = actions(p, uri).filter((one) => one.action.type === 'session/metaChanged').at(-1);
+      expect(action?.action._meta).toMatchObject({
+        fixtureHost: 'kept',
+        'ahpd.claudeSdkInitToolManifest': {
+          status: 'observed',
+          sessionUri,
+          generation: 0,
+          nativeSessionId: '11111111-1111-4111-8111-111111111111',
+          toolNames: ['Bash', 'mcp__ahp__read'],
+        },
+      });
+      expect(action?.action._meta).not.toHaveProperty('apiKeySource');
+      expect(action?.action._meta).not.toHaveProperty('model');
+      expect(((action?.action._meta as Record<string, unknown> | undefined)?.['ahpd.claudeSdkInitToolManifest'] as Record<string, unknown> | undefined)).not.toHaveProperty('apiKeySource');
+      expect((action?.action._meta as Record<string, unknown> | undefined)?.owner).toEqual(hostOwner);
+      expect((action?.action._meta as Record<string, unknown> | undefined)?.git).toEqual(hostGit);
+      expect((action?.action._meta as Record<string, unknown> | undefined)?.[ARTIFACTS_META]).toEqual(hostArtifacts);
+      const aliasUri = 'claude:/11111111-1111-4111-8111-111111111111';
+      const aliasSnapshot = (await client.handle({ method: 'subscribe', params: { channel: aliasUri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(aliasSnapshot._meta).toEqual(action?.action._meta);
+      expect(aliasSnapshot._meta?.['ahpd.claudeSdkInitToolManifest']).toMatchObject({
+        status: 'observed',
+        sessionUri,
+        generation: 0,
+        toolNames: ['Bash', 'mcp__ahp__read'],
+      });
+      const after = (await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(after._meta).toEqual(action?.action._meta);
+    }
+    finally {
+      await client.handle({ method: 'disposeSession', params: { channel: uri } });
+      await host.close();
+    }
+  });
+
+  it('keeps normal Claude metadata behavior when SDK init capture is disabled', async () => {
+    const uri = 'ahp-session:/22222222-2222-4222-8222-222222222222';
+    const host = createHost({ path: '/tmp', agents: [claude({ paths: ['/tmp'] })], directories: { meta: () => undefined } });
+    const client = host.accept(peer());
+    await client.handle(hello(['0.8.0']));
+    await client.handle({ method: 'createSession', params: { channel: uri, provider: 'claude' } });
+    try {
+      await client.handle({ method: 'subscribe', params: { channel: uri } });
+      await emit({
+        type: 'system',
+        subtype: 'init',
+        session_id: '22222222-2222-4222-8222-222222222222',
+        model: 'claude-test-model',
+        tools: ['Bash'],
+      });
+      const state = (await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(state._meta?.model).toBe('claude-test-model');
+      expect(state._meta).not.toHaveProperty('ahpd.claudeSdkInitToolManifest');
+    }
+    finally {
+      await client.handle({ method: 'disposeSession', params: { channel: uri } });
+      await host.close();
+    }
   });
 
   it('changes the effort level on the running session', async () => {

@@ -40,7 +40,7 @@ export function memoryAdmission(settings: AdmissionSettings = {}, dependencies: 
       transition(true, 'memory measurements are unavailable');
       throw new RpcError(-32000, 'Host capacity temporarily unavailable: memory measurements are unavailable. Retry later.', { reason: 'host_memory_unavailable', retryAfterMs: lifetime });
     }
-    const limit = settings.memoryLimitMb === undefined ? snapshot.total * 0.6 : settings.memoryLimitMb * MB;
+    const limit = settings.memoryLimitMb === undefined ? snapshot.total * 0.85 : settings.memoryLimitMb * MB;
     const minimumFree = settings.minimumFreeMb === undefined ? Math.max(512 * MB, snapshot.total * 0.1) : settings.minimumFreeMb * MB;
     let used = snapshot.used;
     let remaining = reservations.size;

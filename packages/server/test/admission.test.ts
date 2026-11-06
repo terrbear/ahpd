@@ -172,3 +172,14 @@ it('admits the reported 22-session startup burst within a 24 GiB service budget'
   }
   expect(gate.status().blocked).toBe(false);
 });
+
+it('defaults the process-tree budget to 85% of effective RAM', () => {
+  const total = 24 * 1024 * MB;
+  let used = Math.floor(total * 0.7);
+  const gate = memoryAdmission({ startupReservationMb: 1 }, {
+    sample: () => ({ used, available: total - used, total }),
+  });
+  expect(() => gate.reserve()).not.toThrow();
+  used = Math.ceil(total * 0.85);
+  expect(() => gate.reserve()).toThrow(/memory pressure/u);
+});
