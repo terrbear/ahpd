@@ -113,7 +113,7 @@ it('advertises an immutable per-session selector with the default behavior', () 
     sessionMutable: false,
   });
   expect(properties.toolExecutionAllowlist).toMatchObject({
-    scope: 'session', type: 'array', maxItems: 512, uniqueItems: true, sessionMutable: false,
+    scope: 'session', type: 'array', items: { type: 'string', title: 'Exact tool name' }, sessionMutable: false,
   });
   expect(agent.defaults()).toHaveProperty('claudeConfigIsolation', 'default');
   expect(agent.defaults()).toHaveProperty('captureSdkInitToolManifest', 'disabled');

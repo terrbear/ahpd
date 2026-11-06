@@ -351,10 +351,8 @@ export function claude(options: ClaudeOptions): Agent {
         scope: 'session',
         type: 'array',
         title: 'Tool Execution Allowlist',
-        description: 'Exact tool names permitted by the allowlist fence, still subject to ordinary permissions. Empty denies every tool. No wildcards. Fixed when the session is created.',
-        items: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,256}$' },
-        maxItems: 512,
-        uniqueItems: true,
+        description: 'At most 512 unique exact tool names, each 1-256 ASCII letters, digits, underscores or hyphens. Still subject to ordinary permissions. Empty denies every tool. Fixed when the session is created.',
+        items: { type: 'string', title: 'Exact tool name' },
         sessionMutable: false,
       },
       shellInitScripts: {
