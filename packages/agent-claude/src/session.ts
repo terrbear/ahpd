@@ -4582,7 +4582,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
          * typed it under - the tool reads the value as the answer itself.
          */
         const inner = bag(answer.value);
-        said[question] = inner.value ?? answer.value ?? value;
+        const selected = inner.value ?? answer.value ?? value;
+        const freeform = list(inner.freeformValues ?? answer.freeformValues)
+          .filter((entry): entry is string => typeof entry === 'string');
+        if (freeform.length === 0) {
+          said[question] = selected;
+          continue;
+        }
+        const selections = Array.isArray(selected) ? selected : [selected];
+        said[question] = [...selections.filter((entry): entry is string => typeof entry === 'string' && entry !== ''), ...freeform].join(', ');
       }
       held.settle({ behavior: 'allow', updatedInput: { questions: held.questions ?? [], answers: said } });
       touch();
