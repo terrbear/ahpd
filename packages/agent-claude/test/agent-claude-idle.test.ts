@@ -219,6 +219,47 @@ it('keeps the deny-all fence on initial, recreated, resumed, and forked queries'
   assertFence(sdk.runs[3]);
 });
 
+it('retains the exact allowlist across idle recreation, restore and fork without affecting another session', async () => {
+  const name = 'mcp__fixture__read';
+  const assertFence = async (index: number) => {
+    const options = sdk.runs[index]!.options;
+    const hooks = options.hooks as { PreToolUse: { hooks: ((input: unknown, id: string, context: unknown) => Promise<unknown>)[] }[] };
+    const gate = hooks.PreToolUse[0]!.hooks[0]!;
+    const callback = options.canUseTool as (name: string, input: object, options: object) => Promise<unknown>;
+    expect(await gate({ tool_name: name }, 'id', {})).toEqual({});
+    expect(await gate({ tool_name: 'mcp__late__read' }, 'id', {})).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(await callback(name, {}, { signal: new AbortController().signal })).toMatchObject({ behavior: 'allow' });
+    expect(await callback('Bash', {}, { signal: new AbortController().signal })).toMatchObject({ behavior: 'deny' });
+  };
+  const held = claudeSession({ settings: {
+    toolExecutionFence: 'allowlist', toolExecutionAllowlist: [name],
+    permissions: { allow: [name, 'Bash'] },
+  } });
+  await settle();
+  await assertFence(0);
+  const saved = JSON.parse(JSON.stringify(held.settings!()));
+  await vi.advanceTimersByTimeAsync(100);
+  held.begin('after-idle', 'Resume');
+  await settle();
+  await assertFence(1);
+  await held.close();
+  const resumed = claudeSession({ resume: sdk.nativeId, settings: saved });
+  await settle();
+  await assertFence(2);
+  await resumed.close();
+  const forked = claudeSession({ resume: sdk.nativeId, forkAt: 'cut', settings: saved });
+  await settle();
+  expect(sdk.runs[3]!.options).toMatchObject({ forkSession: true, resumeSessionAt: 'cut' });
+  await assertFence(3);
+  await forked.close();
+  const independent = claudeSession({ settings: { toolExecutionFence: 'allowlist', toolExecutionAllowlist: ['Bash'], permissions: { allow: ['Bash', name] } } });
+  await settle();
+  const callback = sdk.runs[4]!.options.canUseTool as (name: string, input: object, options: object) => Promise<unknown>;
+  expect(await callback('Bash', {}, {})).toMatchObject({ behavior: 'allow' });
+  expect(await callback(name, {}, {})).toMatchObject({ behavior: 'deny' });
+  await independent.close();
+});
+
 it('recaptures tools when the AHP session is recreated for native resume', async () => {
   sdk.initTools = ['Bash', 'mcp__ahp__read'];
   const original = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });

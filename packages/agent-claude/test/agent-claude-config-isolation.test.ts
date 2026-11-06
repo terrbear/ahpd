@@ -108,9 +108,12 @@ it('advertises an immutable per-session selector with the default behavior', () 
   expect(properties.toolExecutionFence).toMatchObject({
     scope: 'session',
     type: 'string',
-    enum: ['off', 'deny-all'],
+    enum: ['off', 'deny-all', 'allowlist'],
     default: 'off',
     sessionMutable: false,
+  });
+  expect(properties.toolExecutionAllowlist).toMatchObject({
+    scope: 'session', type: 'array', maxItems: 512, uniqueItems: true, sessionMutable: false,
   });
   expect(agent.defaults()).toHaveProperty('claudeConfigIsolation', 'default');
   expect(agent.defaults()).toHaveProperty('captureSdkInitToolManifest', 'disabled');
@@ -248,4 +251,79 @@ it.each([null, 1, 'unsupported'])('rejects invalid isolation values before SDK q
   finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+
+it('denies unlisted tools even when preapproved and leaves listed tools subject to ordinary permissions', async () => {
+  const names = ['mcp__fixture__read'];
+  const options = await queryFor({
+    toolExecutionFence: 'allowlist',
+    toolExecutionAllowlist: names,
+    permissions: { allow: ['Bash', 'mcp__other__read'], deny: names },
+  });
+  const hooks = options.hooks as { PreToolUse: { matcher?: string; hooks: ((...args: unknown[]) => Promise<Record<string, unknown>>)[] }[] };
+  expect(hooks.PreToolUse.map((one) => one.matcher)).toEqual([undefined, 'Bash', 'mcp__.*']);
+  const gate = hooks.PreToolUse[0]!.hooks[0]!;
+  const callback = options.canUseTool as (name: string, input: Record<string, unknown>, options: { signal: AbortSignal }) => Promise<Record<string, unknown>>;
+  for (const name of ['Bash', 'Read', 'Agent', 'ToolSearch', 'mcp__other__read', 'mcp__fixture__read_extra', 'MCP__fixture__read']) {
+    expect(await gate({ tool_name: name }, 'id', {})).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny' },
+    });
+    expect(await callback(name, {}, { signal: new AbortController().signal })).toMatchObject({ behavior: 'deny' });
+    for (const entry of hooks.PreToolUse.slice(1)) {
+      expect(await entry.hooks[0]!({ hook_event_name: 'PreToolUse', tool_name: name, tool_input: { command: 'ignored' } }, 'id', {})).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    }
+  }
+  expect(await gate({ tool_name: names[0] }, 'id', {})).toEqual({});
+  expect(await callback(names[0]!, {}, { signal: new AbortController().signal })).toMatchObject({ behavior: 'deny' });
+});
+
+it('allows an exact listed and preapproved tool without widening the fence through caller mutations', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ahpd-allowlist-immutable-'));
+  const names = ['mcp__fixture__read'];
+  const session = start(directory, {
+    toolExecutionFence: 'allowlist', toolExecutionAllowlist: names,
+    permissions: { allow: ['mcp__fixture__read', 'Bash'] },
+  });
+  try {
+    names.push('Bash');
+    await settle();
+    const snapshot = session.settings!();
+    expect(snapshot.toolExecutionAllowlist).toEqual(['mcp__fixture__read']);
+    expect(() => (snapshot.toolExecutionAllowlist as string[]).push('Read')).toThrow();
+    expect(await session.setConfig!('toolExecutionAllowlist', ['Bash'])).toBe('toolExecutionAllowlist is not a config key this backend takes');
+    expect(await session.setConfig!('toolExecutionFence', 'off')).toBe('toolExecutionFence is not a config key this backend takes');
+    const callback = sdk.options.at(-1)!.canUseTool as (name: string, input: Record<string, unknown>, options: { signal: AbortSignal }) => Promise<Record<string, unknown>>;
+    expect(await callback('mcp__fixture__read', {}, { signal: new AbortController().signal })).toMatchObject({ behavior: 'allow' });
+    expect(await callback('Bash', {}, { signal: new AbortController().signal })).toMatchObject({ behavior: 'deny' });
+  } finally {
+    await session.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it.each([undefined, null, 'Bash', [1], [''], ['Bash*'], ['Bash', 'Bash'], ['a'.repeat(257)], Array.from({ length: 513 }, (_, i) => `tool_${i}`)])('rejects malformed allowlists before creating a query: %j', (names) => {
+  const directory = mkdtempSync(join(tmpdir(), 'ahpd-allowlist-invalid-'));
+  sdk.options = [];
+  try {
+    expect(() => start(directory, { toolExecutionFence: 'allowlist', toolExecutionAllowlist: names })).toThrow(/toolExecutionAllowlist/);
+    expect(sdk.options).toEqual([]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it.each(['off', 'deny-all'])('rejects a nonempty allowlist paired with %s', (mode) => {
+  const directory = mkdtempSync(join(tmpdir(), 'ahpd-allowlist-mode-'));
+  try {
+    expect(() => start(directory, { toolExecutionFence: mode, toolExecutionAllowlist: ['Bash'] })).toThrow(/toolExecutionAllowlist/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('treats an empty allowlist as denying every tool', async () => {
+  const options = await queryFor({ toolExecutionFence: 'allowlist', toolExecutionAllowlist: [] });
+  const callback = options.canUseTool as (name: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  expect(await callback('mcp__fixture__read', {})).toMatchObject({ behavior: 'deny' });
 });
