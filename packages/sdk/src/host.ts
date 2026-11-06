@@ -336,7 +336,7 @@ const dispatchNeeds = (channel: string, kind: ChannelKind, action?: Record<strin
  * not on any other: whoever connected last decided everybody's shell. So these
  * live on the `Connection`, and a connection reads its own back.
  */
-const PER_CONNECTION = new Set(['defaultShell', 'shellXdgConfigHome']);
+const PER_CONNECTION = new Set(['defaultShell', 'shellXdgConfigHome', 'shellPath']);
 
 /** The kinds of channel a family of client action can belong on. */
 type Home = 'session' | 'terminal' | 'automations' | 'root' | 'watch';

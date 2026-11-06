@@ -971,7 +971,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const xdg = typeof settings.shellXdgConfigHome === 'string'
       ? settings.shellXdgConfigHome
       : process.env.AHPD_SHELL_XDG_CONFIG_HOME;
+    const shellPath = typeof settings.shellPath === 'string' ? settings.shellPath : undefined;
     const prefix = [
+      ...(shellPath ? [`export PATH='${shellPath.replaceAll("'", "'\\''")}'${'${PATH:+:$PATH}'}`] : []),
       ...(typeof xdg === 'string'
         ? [xdg === '' ? 'unset XDG_CONFIG_HOME' : `export XDG_CONFIG_HOME='${xdg.replaceAll("'", "'\\''")}'`]
         : []),

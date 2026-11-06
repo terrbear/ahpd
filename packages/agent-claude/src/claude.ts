@@ -372,6 +372,14 @@ export function claude(options: ClaudeOptions): Agent {
         readOnly: true,
         sessionMutable: true,
       },
+      shellPath: {
+        scope: 'session',
+        type: 'string',
+        title: 'Shell PATH',
+        description: 'The client PATH for shell commands. An empty value keeps the daemon PATH.',
+        readOnly: true,
+        sessionMutable: true,
+      },
       /*
        * Per-tool allow and deny, which is the slope the mode above is a cliff.
        *
