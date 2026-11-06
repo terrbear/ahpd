@@ -874,6 +874,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
     throw new Error('builtInTools must be one of default, none');
   }
   const disableBuiltInTools = settings.builtInTools === 'none';
+  const contributedTools = settings.contributedTools === undefined ? 'default' : settings.contributedTools;
+  if (contributedTools !== 'default' && contributedTools !== 'none') {
+    throw new Error('contributedTools must be one of default, none');
+  }
+  settings.contributedTools = contributedTools;
+  const disableContributedTools = contributedTools === 'none';
   const extraArgsPolicy = settings.extraArgsPolicy === undefined ? 'preset' : settings.extraArgsPolicy;
   if (extraArgsPolicy !== 'preset' && extraArgsPolicy !== 'none') {
     throw new Error('extraArgsPolicy must be one of preset, none');
@@ -1050,7 +1056,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * than read from `options` once, and `setTools` re-declares the server the
    * model reaches them through.
    */
-  let offering: BoundTool[] = [...(options.tools ?? [])];
+  let offering: BoundTool[] = disableContributedTools ? [] : [...(options.tools ?? [])];
   let contributedCalls = 0;
   const contributedWork = (running: boolean): void => {
     contributedCalls += running ? 1 : -1;
@@ -4389,6 +4395,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * built.
      */
     setTools: async (next) => {
+      if (disableContributedTools) return true;
       const before = offering.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const after = next.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const revision = clientToolsRevision;

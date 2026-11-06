@@ -115,6 +115,12 @@ With one preset there is nothing to choose and every session runs on it; with no
 
 A client may set the session's `shellXdgConfigHome` to the user's `XDG_CONFIG_HOME`. An empty string unsets it for Claude's Bash tool, letting tools use `HOME/.config`. Host-managed terminals accept the same setting per connection through `root/configChanged`. An operator can set `AHPD_SHELL_XDG_CONFIG_HOME` in the daemon environment as the fallback for both kinds of shell; an explicitly empty value unsets XDG in shells. The client setting wins over the operator setting. These settings change only shell commands; the daemon and Claude CLI keep their own environment, including any private XDG directory from the launcher or provider preset. With neither setting, shells keep their inherited XDG value.
 
+### Contributed tools per session
+
+`contributedTools` is fixed when a session is created. Its default, `"default"`, offers host and active-client tools through the AHP MCP bridge. `"none"` omits those contributions before SDK query creation and ignores later contribution updates. The selection stays in saved settings and applies to recreated queries, restored sessions, forks, and new chats in the session.
+
+This selector does not disable Claude built-in tools or external MCP servers. In isolated configuration mode, explicit host `mcpServers` still reach the SDK at initialization, before any dynamic server toggles. This setting is not a network or filesystem sandbox, and it does not prove an empty SDK tool manifest.
+
 ### A second Claude on another endpoint
 
 Load the package twice, the second time under its own `provider` and `displayName` and with one preset that points the CLI elsewhere. It is listed as a harness of its own, and the key stays in the daemon's environment:
