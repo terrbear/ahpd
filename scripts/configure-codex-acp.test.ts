@@ -11,7 +11,7 @@ let adapter: string;
 let config: string;
 let service: string;
 const script = new URL('./configure-codex-acp.mjs', import.meta.url);
-const revision = '0bf05f7c8d2e02a700f57f023dce2c074d079f8e';
+const revision = '51c77be57c7ed5bf1b5f0cf959bb697213bc04ca';
 
 beforeEach(() => {
   root = mkdtempSync(join(process.cwd(), '.ahpd-config-test-'));

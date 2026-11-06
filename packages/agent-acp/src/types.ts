@@ -164,6 +164,7 @@ export interface AcpConnection {
   setSessionConfigOption(request: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse>;
   /** Send one prompt and wait for the turn to stop. */
   prompt(sessionId: string, text: string, attachments?: ContentBlock[]): Promise<PromptResponse>;
+  steer(sessionId: string, text: string): Promise<{ outcome: string }>;
   /** The ACP cancel notification, which asks the server to stop a running prompt. */
   cancel(sessionId: string): Promise<void>;
   /**
@@ -257,6 +258,7 @@ export interface WatchedTurn {
  * is.
  */
 export interface WatchedSession {
+  steering?: import('./steering.js').SteeringReceipt[];
   /** Version 2 stores materialized response parts instead of raw tool updates. */
   formatVersion?: 2;
   /** The provider id this bridge registered, which keys the catalogue. */
