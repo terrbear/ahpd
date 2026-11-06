@@ -1256,6 +1256,30 @@ describe('driving a turn', () => {
     });
   });
 
+  it.each([
+    { name: 'free text', kind: 'selected', value: '', free: ["there's no way to attach anything to a github issue?"], expected: "there's no way to attach anything to a github issue?" },
+    { name: 'choice and free text', kind: 'selected', value: 'SQLite', free: ['Use a temporary database'], expected: 'SQLite, Use a temporary database' },
+    { name: 'multiple choices and free text', kind: 'selected-many', value: ['SQLite', 'Postgres'], free: ['Use isolated fixtures'], expected: 'SQLite, Postgres, Use isolated fixtures' },
+  ])('delivers $name from a submitted question instead of an empty answer', async ({ kind, value, free, expected }) => {
+    for (const synced of [false, true]) {
+      const { client, peer: p, uri } = await running();
+      client.handle({ method: 'dispatchAction', params: { channel: uri, action: { type: 'chat/turnStarted', turnId: 'free-text-turn', message: { text: 'Ask a question' } } } });
+      await settle();
+      const questions = [{ question: 'Which database?', options: [{ label: 'Postgres' }, { label: 'SQLite' }], multiSelect: kind === 'selected-many' }];
+      const decision = sdk.canUseTool?.('AskUserQuestion', { questions });
+      await settle();
+      const request = actions(p).find((e) => e.action.type === 'chat/inputRequested')?.action.request as { id: string };
+      const answer = { state: 'submitted', value: { kind, value, freeformValues: free } };
+      if (synced) {
+        client.handle({ method: 'dispatchAction', params: { channel: uri, action: { type: 'chat/inputAnswerChanged', requestId: request.id, questionId: 'q1', answer } } });
+        await settle();
+      }
+      client.handle({ method: 'dispatchAction', params: { channel: uri, action: { type: 'chat/inputCompleted', requestId: request.id, response: 'accept', ...(synced ? {} : { answers: { q1: answer } }) } } });
+      expect(await decision).toEqual({ behavior: 'allow', updatedInput: { questions, answers: { 'Which database?': expected } } });
+      expect(actions(p).some((e) => e.action.type === 'session/inputNeededRemoved' && e.action.id === request.id)).toBe(true);
+    }
+  });
+
   it('syncs a half-typed answer, and completes with what was typed', async () => {
     const { client, peer: p, uri } = await running();
     client.handle({
