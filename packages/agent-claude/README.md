@@ -117,7 +117,7 @@ A client may set the session's `shellXdgConfigHome` to the user's `XDG_CONFIG_HO
 
 ### Contributed tools per session
 
-`contributedTools` is fixed when a session is created. Its default, `"default"`, offers host and active-client tools through the AHP MCP bridge. `"none"` omits those contributions before SDK query creation and ignores later contribution updates. The selection stays in saved settings and applies to recreated queries, restored sessions, forks, and new chats in the session.
+`contributedTools` is fixed when a session is created. Its default, `"default"`, offers host and active-client tools through the AHP MCP bridge. `"none"` omits those contributions before SDK query creation and ignores later contribution updates. `"artifacts"` offers only the three artifact host tools (`add_artifact_or_reference`, `list_artifacts_and_references`, `remove_artifact_or_reference`) plus active-client tools; the other host tools (session, workspace, terminal and resource tools) are left out, including from later updates. The artifact instruction and ToolSearch for deferred artifact tools stay. Clients can detect support by finding `artifacts` in the `contributedTools` enum of the session config schema. The selection stays in saved settings and applies to recreated queries, restored sessions, forks, and new chats in the session.
 
 This selector does not disable Claude built-in tools or external MCP servers. In isolated configuration mode, explicit host `mcpServers` still reach the SDK at initialization, before any dynamic server toggles. This setting is not a network or filesystem sandbox, and it does not prove an empty SDK tool manifest.
 

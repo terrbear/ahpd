@@ -875,11 +875,18 @@ export function createSession(options: ClaudeSessionOptions): Session {
   }
   const disableBuiltInTools = settings.builtInTools === 'none';
   const contributedTools = settings.contributedTools === undefined ? 'default' : settings.contributedTools;
-  if (contributedTools !== 'default' && contributedTools !== 'none') {
-    throw new Error('contributedTools must be one of default, none');
+  if (contributedTools !== 'default' && contributedTools !== 'none' && contributedTools !== 'artifacts') {
+    throw new Error('contributedTools must be one of default, none, artifacts');
   }
   settings.contributedTools = contributedTools;
   const disableContributedTools = contributedTools === 'none';
+  /** `artifacts` keeps client tools and only the three artifact host tools. */
+  const artifactHostTools: ReadonlySet<string> = new Set([
+    'add_artifact_or_reference', 'list_artifacts_and_references', 'remove_artifact_or_reference',
+  ]);
+  const allowedContribution = (tools: readonly BoundTool[]): BoundTool[] => contributedTools === 'artifacts'
+    ? tools.filter((one) => one.owner !== undefined || artifactHostTools.has(one.definition.name))
+    : [...tools];
   const extraArgsPolicy = settings.extraArgsPolicy === undefined ? 'preset' : settings.extraArgsPolicy;
   if (extraArgsPolicy !== 'preset' && extraArgsPolicy !== 'none') {
     throw new Error('extraArgsPolicy must be one of preset, none');
@@ -1058,7 +1065,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * than read from `options` once, and `setTools` re-declares the server the
    * model reaches them through.
    */
-  let offering: BoundTool[] = disableContributedTools ? [] : [...(options.tools ?? [])];
+  let offering: BoundTool[] = disableContributedTools ? [] : allowedContribution(options.tools ?? []);
   let contributedCalls = 0;
   const contributedWork = (running: boolean): void => {
     contributedCalls += running ? 1 : -1;
@@ -4406,6 +4413,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      */
     setTools: async (next) => {
       if (disableContributedTools) return true;
+      next = allowedContribution(next);
       const before = offering.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const after = next.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const revision = clientToolsRevision;

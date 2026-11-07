@@ -113,7 +113,7 @@ it('advertises an immutable session selector and resolves the omitted default', 
   const agent = claude({ paths: ['/tmp/ahpd-contributed-tools-schema'] });
   const properties = agent.schema().properties as Record<string, Record<string, unknown>>;
   expect(properties.contributedTools).toMatchObject({
-    scope: 'session', type: 'string', enum: ['default', 'none'], default: 'default', sessionMutable: false,
+    scope: 'session', type: 'string', enum: ['default', 'none', 'artifacts'], default: 'default', sessionMutable: false,
   });
   expect(agent.defaults()).toHaveProperty('contributedTools', 'default');
   const held = start();
@@ -121,6 +121,53 @@ it('advertises an immutable session selector and resolves the omitted default', 
   expect(valuesOf(held).contributedTools).toBe('default');
   expect(held.settings!().contributedTools).toBe('default');
   expect(sdk.runs[0]!.options.env).toBeUndefined();
+});
+
+const artifactInventory: BoundTool[] = [
+  { definition: { name: 'add_artifact_or_reference', inputSchema: { type: 'object' } }, deferLoading: false, run: () => 'ok' },
+  { definition: { name: 'list_artifacts_and_references', inputSchema: { type: 'object' } }, deferLoading: true, run: () => 'ok' },
+  { definition: { name: 'remove_artifact_or_reference', inputSchema: { type: 'object' } }, deferLoading: true, run: () => 'ok' },
+  { definition: { name: 'list_sessions', inputSchema: { type: 'object' } }, deferLoading: true, run: () => 'ok' },
+  { definition: { name: 'set_workspace', inputSchema: { type: 'object' } }, run: () => 'ok' },
+  { definition: { name: 'ahp_terminals', inputSchema: { type: 'object' } }, deferLoading: true, run: () => 'ok' },
+  { definition: { name: 'anton_codemode', inputSchema: { type: 'object' } }, owner: 'client' },
+];
+const artifactNames = ['add_artifact_or_reference', 'list_artifacts_and_references', 'remove_artifact_or_reference'];
+const offered = (index: number) => (sdk.runs[index]!.options.mcpServers as { ahp: { tools: { name: string }[] } }).ahp.tools.map((one) => one.name);
+
+it('offers only the artifact host tools and client tools for artifacts', async () => {
+  const held = start({ contributedTools: 'artifacts', builtInTools: 'none' }, undefined, undefined, artifactInventory);
+  await settle();
+  expect(offered(0)).toEqual([...artifactNames, 'anton_codemode']);
+  expect(sdk.runs[0]!.options.tools).toEqual(['ToolSearch']);
+  expect(valuesOf(held).contributedTools).toBe('artifacts');
+  expect(held.settings!().contributedTools).toBe('artifacts');
+  // late inventories are filtered the same way
+  const late = [...artifactInventory, { definition: { name: 'create_session' }, run: () => 'ok' }, { definition: { name: 'late_client' }, owner: 'client2' }];
+  expect(await held.setTools!(late)).toBe(true);
+  expect((sdk.updates.at(-1) as { ahp: { tools: { name: string }[] } }).ahp.tools.map((one) => one.name))
+    .toEqual([...artifactNames, 'anton_codemode', 'late_client']);
+});
+
+it('keeps client tools and the host instruction for artifacts, and leaves default and none alone', async () => {
+  start({ contributedTools: 'default' }, undefined, undefined, artifactInventory);
+  start({ contributedTools: 'none' }, undefined, undefined, artifactInventory);
+  await settle();
+  expect(offered(0)).toHaveLength(artifactInventory.length);
+  expect(sdk.runs[1]!.options.mcpServers).toEqual({ ambient: { type: 'http', url: 'https://ambient.example.test/mcp' } });
+});
+
+it('enables ToolSearch for artifacts when artifact tools are deferred', async () => {
+  const moved: { env?: Record<string, string> }[] = [];
+  const computers: ComputerPort = {
+    how: async (_id, options) => { moved.push({ ...(options.env === undefined ? {} : { env: options.env }) }); return undefined; },
+  };
+  start({ computer: 'computer://fixture', contributedTools: 'artifacts' }, undefined, undefined, artifactInventory, computers);
+  await settle();
+  const spawn = sdk.runs[0]!.options.spawnClaudeCodeProcess as (asked: { command: string; args: string[]; env: Record<string, string | undefined> }) => unknown;
+  spawn({ command: 'claude', args: [], env: {} });
+  await settle();
+  expect(moved[0]!.env).toEqual({ ENABLE_TOOL_SEARCH: 'true' });
 });
 
 it('does not construct or declare host or active-client tools when opted out', async () => {
@@ -188,7 +235,7 @@ it('preserves default publication, later replacement, discovery and session inde
   expect(sdk.servers).toHaveLength(3);
 });
 
-it.each(['default', 'none'])('rejects mutation of %s without changing settings or declarations', async (contributedTools) => {
+it.each(['default', 'none', 'artifacts'])('rejects mutation of %s without changing settings or declarations', async (contributedTools) => {
   const held = start({ contributedTools });
   await settle();
   const before = sdk.runs[0]!.options.mcpServers;
@@ -199,8 +246,8 @@ it.each(['default', 'none'])('rejects mutation of %s without changing settings o
   expect(sdk.runs[0]!.options.mcpServers).toBe(before);
 });
 
-it.each([null, 1, true, {}, [], '', 'isolated', 'off'])('rejects invalid policy %j before constructing servers or SDK queries', (contributedTools) => {
-  expect(() => start({ contributedTools })).toThrow('contributedTools must be one of default, none');
+it.each([null, 1, true, {}, [], '', 'isolated', 'off', 'Artifacts'])('rejects invalid policy %j before constructing servers or SDK queries', (contributedTools) => {
+  expect(() => start({ contributedTools })).toThrow('contributedTools must be one of default, none, artifacts');
   expect(sdk.servers).toEqual([]);
   expect(sdk.runs).toEqual([]);
 });
