@@ -88,16 +88,15 @@ it('marks host tools for discovery and keeps client-published tools eager', asyn
 
   const tools = (sessionQueries().at(-1)?.options.mcpServers as Record<string, { tools: { name: string; _meta?: Record<string, unknown> }[] }>).ahp?.tools ?? [];
   const byName = new Map(tools.map((one) => [one.name, one]));
-  const eager = ['add_artifact_or_reference'];
+  const eager: string[] = [];
   const deferred = [
-    'remove_artifact_or_reference', 'list_artifacts_and_references',
+    'add_artifact_or_reference',    'remove_artifact_or_reference', 'list_artifacts_and_references',
     'list_sessions', 'get_current_session', 'set_workspace', 'create_session', 'create_chat',
     'rename_chat', 'send_message', 'interrupt_session', 'get_session_context', 'delete_session',
     'ahp_resource', 'ahp_terminals',
   ];
   expect([...byName.keys()].sort()).toEqual([...eager, ...deferred, 'probe__client_tool'].sort());
-  expect(eager).toHaveLength(1);
-  expect(deferred).toHaveLength(14);
+  expect(deferred).toHaveLength(15);
   for (const name of eager) expect(byName.get(name)?._meta).toEqual({ 'anthropic/alwaysLoad': true });
   for (const name of deferred) expect(byName.get(name)?._meta).toEqual({ 'anthropic/alwaysLoad': false });
   expect(byName.get('probe__client_tool')?._meta).toEqual({ 'anthropic/alwaysLoad': true });
