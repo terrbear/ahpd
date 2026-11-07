@@ -184,7 +184,7 @@ const entrySchema = {
  * these tools are offered, so the model knows when to call them. Here it
  * goes into the agent's instructions, which is the same thing said once.
  */
-const ARTIFACT_TOOLS_INSTRUCTION = `Registration is optional, not an inventory; default to none, and record only user-requested deliverables or standalone results the user is likely to reopen, download, or reuse as artifacts, or existing resources they will likely want to view as references; issues or pull requests you create or attempt to fix, change, or unblock are artifacts, while inspection or review alone makes them references. Batch related entries with \`${ADD}\` so they appear beside the chat input; location alone does not qualify, do not register routine, scratch, cache, log, intermediate, or configuration files, incidental resources, commits you create unless asked, or sessions and chats, and never create, copy, or relocate a file only to register it.`;
+const ARTIFACT_TOOLS_INSTRUCTION = `Optionally pin notable deliverables, pull requests and issues beside the chat with \`${ADD}\` (load it through ToolSearch); its description has the rules.`;
 
 /*
  * The compact wording, copied from the reference host's `getDefinitions`.
@@ -220,11 +220,11 @@ export const artifactTools = (): HostTool[] => [
       instruction: COMPACT_ARTIFACT_TOOLS_INSTRUCTION,
     },
     /*
-     * The reference's rule: the add tool the instruction names is never
-     * deferred, and remove and list are, since the model reaches them through
-     * the discovery the instruction points at.
+     * Deferred like the rest: the one-line instruction points at ToolSearch,
+     * and the classification rules load with this description when it is
+     * searched, so neither costs tokens on a request that never records one.
      */
-    deferLoading: false,
+    deferLoading: true,
     run: (input, at) => {
       const wanted = parseArtifacts(input, ADD);
       for (const one of wanted) {

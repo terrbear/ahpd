@@ -8093,8 +8093,9 @@ describe('what a session recorded', () => {
     expect(prompt?.type).toBe('preset');
     expect(prompt?.preset).toBe('claude_code');
     expect(prompt?.snapshot).toBe(true);
-    expect(prompt?.append).toContain('Registration is optional, not an inventory; default to none');
     expect(prompt?.append).toContain('`add_artifact_or_reference`');
+    expect(prompt?.append).toContain('ToolSearch');
+    expect(prompt?.append).not.toContain('not an inventory');
   });
 
   it('tells the model the short wording when the client asks for it, and offers every tool the same', async () => {
