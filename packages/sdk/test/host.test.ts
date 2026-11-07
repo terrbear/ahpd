@@ -234,6 +234,12 @@ describe('the handshake', () => {
     expect(result.protocolVersion).toBe('0.8.0');
   });
 
+  it('advertises human steering for Claude and Codex', async () => {
+    const client = open();
+    const result = await client.handle(hello(['0.9.0'])) as { _meta?: Record<string, unknown> };
+    expect(result._meta?.['ahpd.humanSteering']).toEqual({ version: 1, providers: ['codex', 'claude'] });
+  });
+
   it('takes the client\'s order of preference, not its own', async () => {
     const client = open();
     const result = await client.handle(hello(['0.7.0', '0.8.0'])) as { protocolVersion: string };

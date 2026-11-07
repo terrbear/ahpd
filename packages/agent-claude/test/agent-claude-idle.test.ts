@@ -119,6 +119,21 @@ const sdkManifestOf = (held: ReturnType<typeof createSession>): Record<string, u
     : undefined;
 };
 
+it('delivers steering to an active Claude query', async () => {
+  const held = claudeSession();
+  const initial = { type: 'user', message: { role: 'user', content: 'Start working' }, parent_tool_use_id: null };
+  held.begin('first', 'Start working');
+  await settle();
+  expect(sdk.runs[0]!.prompts).toEqual([initial]);
+  expect(held.steer).toBeDefined();
+  expect(held.steer?.('steer-1', 'Check the edge case')).toBe(true);
+  await settle();
+  expect(sdk.runs[0]!.prompts).toEqual([
+    initial,
+    { type: 'user', message: { role: 'user', content: 'Check the edge case' }, parent_tool_use_id: null },
+  ]);
+});
+
 it('captures only observed SDK init tool names when the per-session opt-in is enabled', async () => {
   sdk.initTools = ['Bash', 'mcp__ahp__read'];
   const held = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });

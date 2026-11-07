@@ -7436,7 +7436,7 @@ export function createHost(options: HostOptions): Host {
               'ahpd.pureHelpScanner': { version: 1 },
               'ahpd.activeClientSetReceipts': true,
               'ahpd.messageAttachments': true,
-              'ahpd.humanSteering': { version: 1, providers: ['codex'] },
+              'ahpd.humanSteering': { version: 1, providers: ['codex', 'claude'] },
               ...(Array.from(agents.values()).some((agent) => agent.acceptsSystemInstructions === true)
                 ? { [CLIENT_SYSTEM_INSTRUCTIONS]: Array.from(agents.values())
                   .filter((agent) => agent.acceptsSystemInstructions === true)
