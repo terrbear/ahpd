@@ -128,6 +128,8 @@ describe('the three tools', () => {
     // what to call.
     expect(add.compact?.instruction).toContain('add_artifact_or_reference');
     expect(add.compact?.definition?.description).toContain('add_artifact_or_reference');
+    expect(add.instruction).toContain('add_artifact_or_reference');
+    expect(add.instruction?.match(/[.!?](?:\s|$)/g)).toHaveLength(2);
     // And only the add tool carries one.
     const others = artifactTools().filter((one) => one.definition.name !== 'add_artifact_or_reference');
     expect(others.every((one) => one.compact === undefined)).toBe(true);

@@ -33,6 +33,7 @@ export const hostTools = (): HostTool[] => [
       inputSchema: { type: 'object', properties: { uri: { type: 'string' } }, required: ['uri'] },
       annotations: { title: 'Read a resource this host serves', readOnlyHint: true },
     },
+    deferLoading: true,
     run: async (input, at) => await at.read(String(input.uri ?? '')),
   },
   {
@@ -44,6 +45,7 @@ export const hostTools = (): HostTool[] => [
       inputSchema: { type: 'object', properties: {} },
       annotations: { title: 'Terminals on this host', readOnlyHint: true, openWorldHint: false },
     },
+    deferLoading: true,
     run: (_input, at) => {
       const open = at.terminals();
       if (open.length === 0) return 'This host has no terminal open.';

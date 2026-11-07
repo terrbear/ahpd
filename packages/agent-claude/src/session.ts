@@ -651,12 +651,13 @@ const contributed = (
       description: one.definition.description ?? one.definition.title ?? name,
       inputSchema: inputShape(one.definition.inputSchema),
       /*
-       * A raw SDK definition, not the SDK's `tool()` helper, so the eager flag
-       * rides `_meta`. Passed only when the host defined it: `false` is the
-       * SDK's own default, and an undefined one must pass nothing so every
-       * other host and client tool keeps that default.
+       * A raw SDK definition, not the SDK's `tool()` helper, so the load policy
+       * rides `_meta`. Keep client-published tools eager. Host tools use the
+       * host's deferLoading hint; an absent host hint keeps the SDK default.
        */
-      ...(one.deferLoading !== undefined ? { _meta: { 'anthropic/alwaysLoad': !one.deferLoading } } : {}),
+      ...(one.owner !== undefined || one.deferLoading !== undefined
+        ? { _meta: { 'anthropic/alwaysLoad': one.owner !== undefined || !one.deferLoading } }
+        : {}),
       ...(one.definition.annotations ? { annotations: one.definition.annotations } : {}),
       handler: async (input: Record<string, unknown>) => {
         working(true);
@@ -2754,7 +2755,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
           spawnClaudeCodeProcess: (asked: Asked) => {
             timing('sdk_spawn_hook', 'start');
             try {
-              const child = (options.spawn ?? spawnLocal)(asked);
+              // ToolSearch is required for deferred host tools; leave opted-out sessions unchanged.
+              const processAsked = disableContributedTools
+                ? asked
+                : { ...asked, env: { ...asked.env, ENABLE_TOOL_SEARCH: 'true' } };
+              const child = (options.spawn ?? spawnLocal)(processAsked);
               childExit = processExit(child);
               timing('sdk_spawn_hook', 'returned');
               return child;

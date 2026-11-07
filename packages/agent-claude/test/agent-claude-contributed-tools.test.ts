@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createHost } from '../../sdk/src/host.js';
-import type { BoundTool, Start } from '@ahpd/sdk';
+import type { BoundTool, ComputerPort, Start } from '@ahpd/sdk';
 import { claude } from '../src/claude.js';
 
 const sdk = vi.hoisted(() => ({
@@ -61,7 +61,7 @@ const external = { declared: { type: 'http' as const, url: 'https://declared.exa
 const directories: string[] = [];
 const sessions: ReturnType<ReturnType<typeof claude>['create']>[] = [];
 const settle = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
-const start = (settings: Record<string, unknown> = {}, resume?: string, forkAt?: string, inventory = tools) => {
+const start = (settings: Record<string, unknown> = {}, resume?: string, forkAt?: string, inventory = tools, computers?: ComputerPort) => {
   const directory = mkdtempSync(join(tmpdir(), 'ahpd-contributed-tools-'));
   directories.push(directory);
   writeFileSync(join(directory, '.mcp.json'), JSON.stringify({
@@ -74,6 +74,7 @@ const start = (settings: Record<string, unknown> = {}, resume?: string, forkAt?:
     workingDirectory: directory,
     schema: agent.schema,
     settings,
+    ...(computers === undefined ? {} : { computers }),
     mcpServers: external,
     tools: inventory,
     emit: () => {},
@@ -92,6 +93,22 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
+it('defers marked host tools while keeping other host and client tools eager', async () => {
+  const inventory: BoundTool[] = [
+    { definition: { name: 'deferred_host_tool', inputSchema: { type: 'object' } }, deferLoading: true, run: () => 'ok' },
+    { definition: { name: 'eager_host_tool', inputSchema: { type: 'object' } }, deferLoading: false, run: () => 'ok' },
+    { definition: { name: 'client_tool', inputSchema: { type: 'object' } }, owner: 'client' },
+  ];
+  start({}, undefined, undefined, inventory);
+  await settle();
+  const server = sdk.servers[0] as { tools: { name: string; _meta?: Record<string, unknown> }[] } | undefined;
+  expect(server?.tools.map(({ name, _meta }) => [name, _meta])).toEqual([
+    ['deferred_host_tool', { 'anthropic/alwaysLoad': false }],
+    ['eager_host_tool', { 'anthropic/alwaysLoad': true }],
+    ['client_tool', { 'anthropic/alwaysLoad': true }],
+  ]);
+});
+
 it('advertises an immutable session selector and resolves the omitted default', async () => {
   const agent = claude({ paths: ['/tmp/ahpd-contributed-tools-schema'] });
   const properties = agent.schema().properties as Record<string, Record<string, unknown>>;
@@ -103,6 +120,7 @@ it('advertises an immutable session selector and resolves the omitted default', 
   await settle();
   expect(valuesOf(held).contributedTools).toBe('default');
   expect(held.settings!().contributedTools).toBe('default');
+  expect(sdk.runs[0]!.options.env).toBeUndefined();
 });
 
 it('does not construct or declare host or active-client tools when opted out', async () => {
@@ -111,7 +129,31 @@ it('does not construct or declare host or active-client tools when opted out', a
   expect(sdk.servers).toEqual([]);
   expect(sdk.runs[0]!.options).toMatchObject({ tools: [], settingSources: [], strictMcpConfig: true, plugins: [] });
   expect(sdk.runs[0]!.options.mcpServers).toEqual(external);
+  expect((sdk.runs[0]!.options.env as Record<string, unknown> | undefined)?.ENABLE_TOOL_SEARCH).toBeUndefined();
   expect(valuesOf(held).contributedTools).toBe('none');
+});
+
+it.each([
+  { contributedTools: 'default', enabled: true },
+  { contributedTools: 'none', enabled: false },
+])('enables ToolSearch for remote sessions only when contributions are enabled: $contributedTools', async ({ contributedTools, enabled }) => {
+  const moved: { id: string; env?: Record<string, string> }[] = [];
+  const computers: ComputerPort = {
+    how: async (id, options) => { moved.push({ id, ...(options.env === undefined ? {} : { env: options.env }) }); return undefined; },
+  };
+  start({ computer: 'computer://fixture', contributedTools }, undefined, undefined, tools, computers);
+  await settle();
+  const spawn = sdk.runs[0]!.options.spawnClaudeCodeProcess as (asked: {
+    command: string; args: string[]; env: Record<string, string | undefined>;
+  }) => unknown;
+  spawn({ command: 'claude', args: [], env: { ANTHROPIC_API_KEY: 'fixture', HOME: '/host/home' } });
+  await settle();
+  expect(moved).toHaveLength(1);
+  expect(moved[0]!.id).toBe('fixture');
+  expect(moved[0]!.env).toEqual({
+    ANTHROPIC_API_KEY: 'fixture', HOME: '/host/home',
+    ...(enabled ? { ENABLE_TOOL_SEARCH: 'true' } : {}),
+  });
 });
 
 it.each([true, false])('suppresses late host and active-client inventories with initial inventory=%s', async (initial) => {
