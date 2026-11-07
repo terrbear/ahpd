@@ -8081,13 +8081,14 @@ describe('what a session recorded', () => {
     expect(prompt?.append).toContain('Follow the Anton system instructions.');
   });
 
-  it('tells the model when to record one, in the reference host\'s words, through the system prompt', async () => {
+  it('tells the model when to record one, concisely, through the system prompt', async () => {
     await withTools();
     const prompt = sessionQueries().at(-1)?.options.systemPrompt as { type: string; preset: string; append: string; snapshot: boolean } | undefined;
     expect(prompt?.type).toBe('preset');
     expect(prompt?.preset).toBe('claude_code');
     expect(prompt?.snapshot).toBe(true);
-    expect(prompt?.append).toContain('Record notable artifacts and references with `add_artifact_or_reference`');
+    expect(prompt?.append).toContain('Registration is optional, not an inventory; default to none');
+    expect(prompt?.append).toContain('`add_artifact_or_reference`');
   });
 
   it('tells the model the short wording when the client asks for it, and offers every tool the same', async () => {
