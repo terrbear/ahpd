@@ -95,7 +95,7 @@ it.each([null, 1, 'unsupported'])('rejects unsupported built-in tool config %j b
   }
 });
 
-it('keeps configured MCP servers and host tools when built-in tools are disabled', async () => {
+it('keeps deferred host tools searchable when built-in tools are disabled', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'ahpd-built-in-tools-mcp-'));
   sdk.options = [];
   const session = createSession({
@@ -104,17 +104,43 @@ it('keeps configured MCP servers and host tools when built-in tools are disabled
     cwd: directory,
     settings: { builtInTools: 'none' },
     mcpServers: { fixture: { type: 'http', url: 'https://fixture.example.test/mcp' } },
-    tools: [{ definition: { name: 'host_tool', inputSchema: { type: 'object' } }, run: () => 'ok' } as never],
+    tools: [{ definition: { name: 'host_tool', inputSchema: { type: 'object' } }, deferLoading: true, run: () => 'ok' } as never],
     emit: () => {},
   });
   try {
     for (let i = 0; i < 8; i++) await new Promise((done) => { setTimeout(done, 0); });
     const options = sdk.options.at(0);
-    expect(options?.tools).toEqual([]);
+    expect(options?.tools).toEqual(['ToolSearch']);
     expect(options?.mcpServers).toMatchObject({
       fixture: { type: 'http', url: 'https://fixture.example.test/mcp' },
       ahp: { type: 'sdk', name: 'ahp' },
     });
+    const ahp = options?.mcpServers as { ahp?: { tools?: { name: string; _meta?: Record<string, unknown> }[] } };
+    expect(ahp.ahp?.tools?.[0]).toMatchObject({
+      name: 'host_tool',
+      _meta: { 'anthropic/alwaysLoad': false },
+    });
+  }
+  finally {
+    await session.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('does not enable ToolSearch for eager host tools when built-in tools are disabled', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ahpd-built-in-tools-eager-'));
+  sdk.options = [];
+  const session = createSession({
+    uri: 'ahp-session:/built-in-tools-eager',
+    chatUri: 'ahp-chat:/built-in-tools-eager',
+    cwd: directory,
+    settings: { builtInTools: 'none' },
+    tools: [{ definition: { name: 'eager_tool', inputSchema: { type: 'object' } }, run: () => 'ok' } as never],
+    emit: () => {},
+  });
+  try {
+    for (let i = 0; i < 8; i++) await new Promise((done) => { setTimeout(done, 0); });
+    expect(sdk.options.at(0)?.tools).toEqual([]);
   }
   finally {
     await session.close();

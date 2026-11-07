@@ -2810,8 +2810,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
            */
           ...(Object.keys(declared).length > 0 ? { mcpServers: { ...declared } as never } : {}),
           // A per-session opt-out of the SDK's built-in tool set. MCP servers
-          // remain separate, and the default leaves the SDK option untouched.
-          ...(disableBuiltInTools ? { tools: [] } : {}),
+          // remain separate. Deferred host tools still need ToolSearch, which
+          // does not enable any of Claude's other built-in tools.
+          ...(disableBuiltInTools
+            ? { tools: offering.some((one) => one.owner === undefined && one.deferLoading === true) ? ['ToolSearch'] : [] }
+            : {}),
           // Settings sources, plugins, and filesystem MCP discovery are kept
           // separate from intentional host declarations in isolated mode.
           ...(isolateClaudeConfig ? { settingSources: [], strictMcpConfig: true, plugins: [] } : {}),
