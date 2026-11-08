@@ -40,6 +40,24 @@ Every flag is the same as the published `ahpd`, and the examples in the README a
 To record what a client and this host say to each other, start it with `--wire <file>` or set `wire` in the configuration file: every frame in both directions is appended as one JSON line, `{ at, from, peer, frame }`.
 [`scripts/tee.mjs`](scripts/tee.mjs) is the same recording as a proxy, for a host that cannot be restarted with the flag.
 
+## Claude startup timeouts
+
+Each Claude initialization, resume preparation, model selection, and effort
+application stage has a 30-second deadline. Runtime shutdown has a separate
+10-second deadline. A timed-out model or effort request fails its turn without
+sending the prompt, shuts down that query, and allows the next turn to recreate
+the backend with the saved native conversation. A failed shutdown blocks
+replacement instead of starting a second process against the same conversation.
+Initialization failures remain explicit session errors.
+
+`[claude-startup]` JSON logs stay enabled after the first prompt. Timeout records
+identify `stage`, `session_id`, `generation`, `timeout_ms`, and `duration_ms`, plus
+`turn_id` when associated with a turn. `elapsed_ms` measures time since logical
+session creation. `timeout_recovery` records the cleanup outcome; a cleanup
+deadline also emits `runtime_shutdown` with `outcome: "timeout"`. Logs omit
+prompt text, tool arguments, and raw backend errors. On deathtrap the service
+appends these records to `~/.a3/ahpd/ahpd.log`.
+
 ## The checks
 
 Every check below runs in CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) and again in the release workflow.

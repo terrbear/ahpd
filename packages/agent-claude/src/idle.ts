@@ -1,3 +1,5 @@
+import { StartupTimeout, withDeadline, initializeQuery } from './deadline.js';
+
 export interface IdleRuntime<Q> {
   query: Q;
   signal: AbortController;
@@ -16,10 +18,11 @@ export function idleQuery<Q extends ManagedQuery>(options: {
   create: (generation: number) => IdleRuntime<Q>;
   prepare?: (query: Q, generation: number) => Promise<void>;
   completed?: (key: PropertyKey, args: unknown[]) => void;
-  timing?: (stage: string, outcome: string) => void;
+  context?: () => { turn_id?: string };
+  timing?: (stage: string, outcome: string, metadata?: { timeout_ms: number; duration_ms: number; turn_id?: string }) => void;
 }) {
-  const timing = (stage: string, outcome: string): void => {
-    try { options.timing?.(stage, outcome); } catch {}
+  const timing = (stage: string, outcome: string, metadata?: { timeout_ms: number; duration_ms: number; turn_id?: string }): void => {
+    try { options.timing?.(stage, outcome, metadata); } catch {}
   };
   let generation = 0;
   let runtime: IdleRuntime<Q> | undefined = options.create(generation);
@@ -38,6 +41,32 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     clearTimeout(timer);
     timer = undefined;
   };
+  const stop = async (held: IdleRuntime<Q>): Promise<void> => {
+    const started = Date.now();
+    try { await withDeadline('runtime_shutdown', held.stop, 10_000); }
+    catch (error: unknown) {
+      if (error instanceof StartupTimeout) {
+        timing(error.stage, 'timeout', { timeout_ms: error.timeoutMs, duration_ms: Date.now() - started });
+      }
+      throw error;
+    }
+  };
+  const recycle = (held: IdleRuntime<Q>): Promise<void> => {
+    if (stopping) return stopping;
+    if (closed || runtime !== held) return Promise.resolve();
+    invalidate();
+    held.signal.abort();
+    timing('timeout_recovery', 'start');
+    stopping = stop(held).then(() => {
+      if (runtime === held) runtime = undefined;
+      initializing = undefined;
+      timing('timeout_recovery', 'ok');
+    }).catch((error: unknown) => {
+      failure = new Error(`Claude startup timeout recovery failed; a replacement process was not started: ${error instanceof Error ? error.message : String(error)}`);
+      timing('timeout_recovery', error instanceof StartupTimeout ? 'timeout' : 'error');
+    }).finally(() => { stopping = undefined; notify(); });
+    return stopping;
+  };
   const changed = () => {
     invalidate();
     if (closed || failure || stopping || !runtime || leases > 0 || options.timeout === 0 || !options.eligible()) return;
@@ -46,7 +75,7 @@ export function idleQuery<Q extends ManagedQuery>(options: {
       if (ticket !== timerGeneration || closed || leases > 0 || !runtime || !options.eligible()) return;
       const held = runtime;
       held.signal.abort();
-      stopping = held.stop().then(() => {
+      stopping = stop(held).then(() => {
         if (runtime === held) runtime = undefined;
         initializing = undefined;
       }).catch((error: unknown) => {
@@ -75,40 +104,19 @@ export function idleQuery<Q extends ManagedQuery>(options: {
       notify();
     }
     const held = runtime;
-    initializing ??= new Promise<void>((resolve, reject) => {
-      let pendingStage: 'initialization' | 'prepare' = 'initialization';
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        timing(pendingStage, 'timeout');
-        reject(new Error('Claude initialization exceeded 30 seconds'));
-      }, 30_000);
-      timer.unref?.();
-      timing('initialization', 'start');
-      void held.query.initializationResult().then(async () => {
-        if (!timedOut) timing('initialization', 'ok');
+    initializing ??= initializeQuery(
+      () => held.query.initializationResult(),
+      async () => {
         if (closed || held.signal.signal.aborted) throw new Error('The Claude query was disposed during initialization');
-        if (options.prepare) {
-          pendingStage = 'prepare';
-          timing('prepare', 'start');
-          try {
-            await options.prepare(held.query, generation);
-            if (!timedOut) timing('prepare', 'ok');
-          } catch (error: unknown) {
-            if (!timedOut) timing('prepare', 'error');
-            throw error;
-          }
-        }
-      }, (error: unknown) => {
-        if (!timedOut) timing('initialization', 'error');
-        throw error;
-      }).then(resolve, reject).finally(() => clearTimeout(timer));
-    });
+        await options.prepare?.(held.query, generation);
+      },
+      timing,
+    );
     try { await initializing; }
     catch (error: unknown) {
       failure = new Error(`Claude session could not resume: ${error instanceof Error ? error.message : String(error)}`);
       held.signal.abort();
-      stopping ??= held.stop().then(() => { if (runtime === held) runtime = undefined; }).catch((error: unknown) => {
+      stopping ??= stop(held).then(() => { if (runtime === held) runtime = undefined; }).catch((error: unknown) => {
         failure = new Error(`${failure!.message}; shutdown also failed: ${error instanceof Error ? error.message : String(error)}`);
       }).finally(() => { stopping = undefined; notify(); });
       await stopping;
@@ -130,7 +138,7 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     const held = runtime;
     if (!held) return;
     held.signal.abort();
-    await held.stop();
+    await stop(held);
     runtime = undefined;
     notify();
   };
@@ -169,7 +177,22 @@ export function idleQuery<Q extends ManagedQuery>(options: {
         invalidate();
         const invoke = (query: Q) => {
           const method = Reflect.get(query, key) as (...given: unknown[]) => unknown;
-          return Promise.resolve(method.apply(query, args)).then((result) => {
+          const held = runtime;
+          let stage: string | undefined;
+          if (key === 'setModel') stage = 'model_selection';
+          if (key === 'applyFlagSettings') stage = 'effort_application';
+          const started = Date.now();
+          const context = options.context?.();
+          const run = () => Promise.resolve(method.apply(query, args));
+          const operation = stage === undefined ? run() : withDeadline(stage, run);
+          return operation.catch(async (error: unknown) => {
+            if (error instanceof StartupTimeout && held !== undefined) {
+              timing(error.stage, 'timeout', { timeout_ms: error.timeoutMs, duration_ms: Date.now() - started, ...context });
+              await recycle(held);
+              if (failure) throw failure;
+            }
+            throw error;
+          }).then((result) => {
             options.completed?.(key, args);
             return result;
           });
