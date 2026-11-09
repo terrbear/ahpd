@@ -336,7 +336,7 @@ const dispatchNeeds = (channel: string, kind: ChannelKind, action?: Record<strin
  * not on any other: whoever connected last decided everybody's shell. So these
  * live on the `Connection`, and a connection reads its own back.
  */
-const PER_CONNECTION = new Set(['defaultShell', 'shellXdgConfigHome']);
+const PER_CONNECTION = new Set(['defaultShell', 'shellXdgConfigHome', 'shellPath']);
 
 /** The kinds of channel a family of client action can belong on. */
 type Home = 'session' | 'terminal' | 'automations' | 'root' | 'watch';
@@ -3026,6 +3026,40 @@ export function createHost(options: HostOptions): Host {
       ...(artifacts !== undefined && artifacts.length > 0 ? { [ARTIFACTS_META]: artifacts } : {}),
     };
   };
+  /** Only the opt-in Claude manifest may pass from agent metadata to host metadata. */
+  const CLAUDE_SDK_INIT_TOOL_MANIFEST = 'ahpd.claudeSdkInitToolManifest';
+  const containsControl = (text: string): boolean => Array.from(text).some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+  const claudeSdkInitToolManifestOf = (value: unknown, uri: string): Bag | undefined => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+    const manifest = (value as Bag)[CLAUDE_SDK_INIT_TOOL_MANIFEST];
+    if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return undefined;
+    const candidate = manifest as Bag;
+    const generation = candidate.generation;
+    if (candidate.sessionUri !== uri || typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0) return undefined;
+    const nativeSessionId = candidate.nativeSessionId;
+    if (nativeSessionId !== undefined
+      && (typeof nativeSessionId !== 'string' || nativeSessionId.length === 0 || nativeSessionId.length > 256 || containsControl(nativeSessionId))) return undefined;
+    const nativeId = nativeSessionId === undefined ? {} : { nativeSessionId };
+    if (candidate.status === 'unknown') return { status: 'unknown', sessionUri: uri, generation, ...nativeId };
+    if (candidate.status !== 'observed' || !Array.isArray(candidate.toolNames) || candidate.toolNames.length > 512) return undefined;
+    const toolNames = candidate.toolNames;
+    if (!toolNames.every((name): name is string => typeof name === 'string' && name.length > 0 && name.length <= 256 && !containsControl(name))) return undefined;
+    return { status: 'observed', sessionUri: uri, generation, ...nativeId, toolNames: [...toolNames] };
+  };
+  /** The session's own metadata, beside the facts this host adds. */
+  const sessionMetaOf = (uri: string): Bag | undefined => {
+    const host = metaOf(uri);
+    const held = sessions.get(uri);
+    const lead = held && leadOf(held);
+    const stateMeta = lead === undefined ? undefined : (lead.sessionState() as Bag)._meta;
+    const manifest = claudeSdkInitToolManifestOf(stateMeta, lead?.uri ?? uri);
+    if (host === undefined) return manifest === undefined ? undefined : { [CLAUDE_SDK_INIT_TOOL_MANIFEST]: manifest };
+    if (manifest === undefined || Object.prototype.hasOwnProperty.call(host, CLAUDE_SDK_INIT_TOOL_MANIFEST)) return host;
+    return { ...host, [CLAUDE_SDK_INIT_TOOL_MANIFEST]: manifest };
+  };
   /**
    * Capture a session's pull request baseline, once.
    *
@@ -3073,7 +3107,7 @@ export function createHost(options: HostOptions): Host {
    */
   const setArtifacts = (uri: string, list: Bag[]): void => {
     kept.setArtifacts(idOf(uri), list);
-    const meta = metaOf(uri);
+    const meta = sessionMetaOf(uri);
     dispatch(uri, { type: 'session/metaChanged', ...(meta ? { _meta: meta } : {}) });
     summaryMoved(uri);
   };
@@ -3084,7 +3118,7 @@ export function createHost(options: HostOptions): Host {
    * fields both declare belong here - see `changesetsOf` for the one that had
    * to come out.
    */
-  const describes = (uri: string): Bag => {
+  const describes = (uri: string, includeAgentMeta = false): Bag => {
     const dir = dirOf(uri);
     /*
      * Whose a session is, as a typed reference, and nothing where nobody owns
@@ -3095,7 +3129,12 @@ export function createHost(options: HostOptions): Host {
      * for a session that is somewhere.
      */
     const owner = kept.owner(idOf(uri));
-    if (dir === undefined) return owner === undefined ? {} : { _meta: { owner } };
+    if (dir === undefined) {
+      const told = includeAgentMeta ? sessionMetaOf(uri) : undefined;
+      return told === undefined && owner === undefined
+        ? {}
+        : { _meta: { ...told, ...(owner === undefined ? {} : { owner }) } };
+    }
     /*
      * The project's name is the directory's own, not its path.
      *
@@ -3108,7 +3147,7 @@ export function createHost(options: HostOptions): Host {
     const project = { uri: `file://${dir}`, displayName: dir.split('/').filter(Boolean).pop() ?? dir };
     // Anything past the path is the host's to be told, not this file's to go
     // and find - `git` is a binary, and a host may be given none.
-    const told = metaOf(uri);
+    const told = includeAgentMeta ? sessionMetaOf(uri) : metaOf(uri);
     return {
       project,
       ...(told === undefined && owner === undefined
@@ -3126,8 +3165,8 @@ export function createHost(options: HostOptions): Host {
   /** `_meta` moved: every session in the directory says so, and its row. */
   const metaMoved = (dir: string): void => {
     for (const uri of inThere(dir)) {
-      const meta = metaOf(uri);
-      dispatch(uri, { type: 'session/metaChanged', ...(meta ? { _meta: meta } : {}) });
+      const meta = describes(uri, true)._meta;
+      dispatch(uri, { type: 'session/metaChanged', ...(meta ? { _meta: meta as Bag } : {}) });
       summaryMoved(uri);
       // And the verbs, since a branch that gained a pull request offers
       // different ones from a branch that lacks it.
@@ -3732,6 +3771,18 @@ export function createHost(options: HostOptions): Host {
         if (sender !== undefined && action.type === 'chat/turnStarted') {
           kept.setSender(idOf(uri), turn, sender);
           dispatch(where, { ...action, _meta: { ...(action._meta as Bag | undefined), sender } });
+        }
+        else if (channel === 'session' && action.type === 'session/metaChanged') {
+          const added = action._meta;
+          const carriesClaudeManifest = typeof added === 'object' && added !== null
+            && Object.prototype.hasOwnProperty.call(added, CLAUDE_SDK_INIT_TOOL_MANIFEST);
+          if (carriesClaudeManifest) {
+            const rest = { ...action };
+            delete rest._meta;
+            const meta = sessionMetaOf(uri);
+            dispatch(where, { ...rest, ...(meta === undefined ? {} : { _meta: meta }) });
+          }
+          else dispatch(where, action);
         }
         else dispatch(where, action);
         // A tool call that finished may have written to this session's tree, so
@@ -6310,7 +6361,7 @@ export function createHost(options: HostOptions): Host {
         // never reached the backend, so this is the only place they can be
         // read back from.
         ...(mine === undefined ? {} : { config: mergedConfig(channel, theirs.config, mine) }),
-        ...describes(channel),
+        ...describes(channel, true),
         ...changesetsOf(channel),
         // Required by the protocol and empty until somebody announces
         // themselves, which is a real answer: a session nobody has opened has
@@ -7385,6 +7436,7 @@ export function createHost(options: HostOptions): Host {
               'ahpd.pureHelpScanner': { version: 1 },
               'ahpd.activeClientSetReceipts': true,
               'ahpd.messageAttachments': true,
+              'ahpd.humanSteering': { version: 1, providers: ['codex', 'claude'] },
               ...(Array.from(agents.values()).some((agent) => agent.acceptsSystemInstructions === true)
                 ? { [CLIENT_SYSTEM_INSTRUCTIONS]: Array.from(agents.values())
                   .filter((agent) => agent.acceptsSystemInstructions === true)

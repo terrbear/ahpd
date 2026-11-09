@@ -68,9 +68,8 @@ function peer(): Peer {
   return { send: () => {}, notify: () => {}, request: async () => ({}), answered: () => {}, close: () => {} };
 }
 
-it('marks the tool the instruction names eager, defers remove and list, and leaves the rest alone', async () => {
-  // The whole set, so a tool with no policy is in the sample beside the three
-  // that carry one.
+it('marks host tools for discovery and keeps client-published tools eager', async () => {
+  // Include the full inventory so new host tools must get an explicit load policy.
   const host = createHost({
     path: '/home/softov',
     agents: [claude({ paths: ['/home/softov'] })],
@@ -78,15 +77,27 @@ it('marks the tool the instruction names eager, defers remove and list, and leav
   });
   const client = host.accept(peer());
   await client.handle({ method: 'initialize', params: { clientId: 'probe', protocolVersions: ['0.9.0'] } });
-  await client.handle({ method: 'createSession', params: { channel: 'ahp-session:/policy', provider: 'claude' } });
+  await client.handle({
+    method: 'createSession',
+    params: {
+      channel: 'ahp-session:/policy', provider: 'claude',
+      activeClient: { clientId: 'probe', tools: [{ name: 'client_tool', description: 'A fixture client tool.', inputSchema: { type: 'object' } }] },
+    },
+  });
   await settle();
 
   const tools = (sessionQueries().at(-1)?.options.mcpServers as Record<string, { tools: { name: string; _meta?: Record<string, unknown> }[] }>).ahp?.tools ?? [];
   const byName = new Map(tools.map((one) => [one.name, one]));
-  expect(byName.get('add_artifact_or_reference')?._meta).toEqual({ 'anthropic/alwaysLoad': true });
-  expect(byName.get('remove_artifact_or_reference')?._meta).toEqual({ 'anthropic/alwaysLoad': false });
-  expect(byName.get('list_artifacts_and_references')?._meta).toEqual({ 'anthropic/alwaysLoad': false });
-  // A host tool that defined no policy passes no `_meta`, which is the SDK's
-  // own default rather than a deferred tool being forced either way.
-  expect(byName.get('ahp_resource')?._meta).toBeUndefined();
+  const eager: string[] = [];
+  const deferred = [
+    'add_artifact_or_reference',    'remove_artifact_or_reference', 'list_artifacts_and_references',
+    'list_sessions', 'get_current_session', 'set_workspace', 'create_session', 'create_chat',
+    'rename_chat', 'send_message', 'interrupt_session', 'get_session_context', 'delete_session',
+    'ahp_resource', 'ahp_terminals',
+  ];
+  expect([...byName.keys()].sort()).toEqual([...eager, ...deferred, 'probe__client_tool'].sort());
+  expect(deferred).toHaveLength(15);
+  for (const name of eager) expect(byName.get(name)?._meta).toEqual({ 'anthropic/alwaysLoad': true });
+  for (const name of deferred) expect(byName.get(name)?._meta).toEqual({ 'anthropic/alwaysLoad': false });
+  expect(byName.get('probe__client_tool')?._meta).toEqual({ 'anthropic/alwaysLoad': true });
 });

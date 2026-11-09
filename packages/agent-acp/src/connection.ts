@@ -208,6 +208,9 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
       sessionId,
       prompt: [...(text ? [{ type: 'text' as const, text }] : []), ...attachments],
     })),
+    steer: (sessionId: string, text: string): Promise<{ outcome: string }> => heard(() => connection.agent.request('_session/steering', {
+      sessionId, prompt: [{ type: 'text', text }], activeOnly: true,
+    })),
     cancel: (sessionId: string): Promise<void> => heard(() => connection.agent.notify('session/cancel', { sessionId })),
     ended,
     close: (graceMs = 3000): Promise<void> => {

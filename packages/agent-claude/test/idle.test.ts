@@ -219,3 +219,51 @@ it('bounds the initial SDK handshake instead of leaving its lease alive forever'
   expect(query.closed).toBe(true);
   await idle.dispose();
 });
+
+it('bounds timeout cleanup, reports its stage, and refuses an unsafe replacement', async () => {
+  const records: { stage: string; outcome: string; metadata: unknown }[] = [];
+  let starts = 0;
+  const idle = idleQuery({
+    timeout: 0,
+    eligible: () => true,
+    timing: (stage, outcome, metadata) => records.push({ stage, outcome, metadata }),
+    create: () => {
+      starts++;
+      return {
+        query: Object.assign(new Query(), { setModel: () => new Promise<void>(() => {}) }),
+        signal: new AbortController(),
+        stop: () => new Promise<void>(() => {}),
+      };
+    },
+  });
+  const result = idle.handle.setModel().catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(40_000);
+  expect(await result).toEqual(expect.objectContaining({ message: expect.stringContaining('runtime_shutdown exceeded 10 seconds') }));
+  await expect(idle.ready()).rejects.toThrow('replacement process was not started');
+  expect(starts).toBe(1);
+  expect(records).toContainEqual({ stage: 'runtime_shutdown', outcome: 'timeout', metadata: { timeout_ms: 10_000, duration_ms: 10_000 } });
+  const disposed = idle.dispose().catch(() => {});
+  await vi.advanceTimersByTimeAsync(10_000);
+  await disposed;
+});
+
+it('leaves another runtime available while a model request times out', async () => {
+  const create = (stalled: boolean) => idleQuery({
+    timeout: 0,
+    eligible: () => true,
+    create: () => ({
+      query: Object.assign(new Query(), { setModel: () => stalled ? new Promise<void>(() => {}) : Promise.resolve() }),
+      signal: new AbortController(),
+      stop: async () => {},
+    }),
+  });
+  const stalled = create(true);
+  const healthy = create(false);
+  const result = stalled.handle.setModel().catch((error: unknown) => error);
+  await healthy.handle.setModel();
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(await result).toEqual(expect.objectContaining({ stage: 'model_selection' }));
+  await healthy.handle.setModel();
+  expect(healthy.generation()).toBe(0);
+  await Promise.all([stalled.dispose(), healthy.dispose()]);
+});
