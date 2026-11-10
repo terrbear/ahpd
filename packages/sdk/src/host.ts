@@ -3676,8 +3676,12 @@ export function createHost(options: HostOptions): Host {
       ...(receivedInstructions === undefined ? [] : [receivedInstructions]),
     ];
     let deliveryOwner: Session | undefined;
-    const session = admittedStart(options.admitSession, () => used.create({
-      ...(options.admitSession === undefined ? {} : { admitResume: options.admitSession }),
+    // Read the live count on each call, including a later idle-process resume.
+    // Side chats share one AHP session; saved catalogue rows are not loaded sessions.
+    const admitSession = options.admitSession === undefined ? undefined
+      : () => options.admitSession!({ activeSessions: sessions.size });
+    const session = admittedStart(admitSession, () => used.create({
+      ...(admitSession === undefined ? {} : { admitResume: admitSession }),
       uri,
       chatUri,
       scanPermission: async (request, signal) => {

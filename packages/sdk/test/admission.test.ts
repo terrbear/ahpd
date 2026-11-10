@@ -66,3 +66,31 @@ it('gates restored sessions after restart while historical reads remain availabl
     expect(create.mock.calls[0]![0].resume).toBe('restored');
   } finally { host.close(); }
 });
+
+it('reports current loaded sessions for starts, side chats, and idle resumes', async () => {
+  const backend = echo({ path: '/tmp', pace: 0 });
+  const create = vi.fn(backend.create);
+  const admit = vi.fn(() => () => {});
+  const host = createHost({ path: '/tmp', agents: [{ ...backend, create }], admitSession: admit });
+  try {
+    const peer: Peer = { send: () => {}, notify: () => {}, request: async () => ({}), answered: () => {}, close: () => {} };
+    const client = host.accept(peer);
+    await client.handle({ method: 'initialize', params: { clientId: 'session-count', protocolVersions: ['0.9.0'] } });
+    for (let index = 0; index < 3; index++) {
+      await client.handle({ method: 'createSession', params: { channel: `echo:/count-${index}`, provider: 'echo' } });
+      expect(admit).toHaveBeenLastCalledWith({ activeSessions: index });
+    }
+    const resume = create.mock.calls[0]![0].admitResume!;
+    resume();
+    expect(admit).toHaveBeenLastCalledWith({ activeSessions: 3 });
+    const callsBeforeSideChat = admit.mock.calls.length;
+    await client.handle({ method: 'createChat', params: { channel: 'echo:/count-0', chat: 'ahp-chat:/extra-count' } });
+    expect(admit).toHaveBeenCalledTimes(callsBeforeSideChat + 1);
+    expect(admit).toHaveBeenLastCalledWith({ activeSessions: 3 });
+    await client.handle({ method: 'disposeSession', params: { channel: 'echo:/count-2' } });
+    resume();
+    expect(admit).toHaveBeenLastCalledWith({ activeSessions: 2 });
+    await client.handle({ method: 'createSession', params: { channel: 'echo:/replacement', provider: 'echo' } });
+    expect(admit).toHaveBeenLastCalledWith({ activeSessions: 2 });
+  } finally { host.close(); }
+});
