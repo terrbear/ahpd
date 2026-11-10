@@ -82,6 +82,41 @@ it('keeps serving when a build fails and does not retry on each idle poll', asyn
   await expect(result).rejects.toThrow('exited unexpectedly');
 });
 
+it('keeps the current host when the candidate adapter cannot be installed', async () => {
+  const f = fixture();
+  const prepareAdapter = vi.fn().mockResolvedValueOnce({}).mockRejectedValue(new Error('adapter unavailable'));
+  const result = cycle(f.options, { ...f.dependencies, prepareAdapter });
+  await until(() => f.dependencies.start.mock.calls.length > 0);
+  f.child.emit('message', { type: 'managed-ready' });
+  await until(() => prepareAdapter.mock.calls.length > 1);
+  expect(f.child.send).not.toHaveBeenCalled();
+  expect(f.child.kill).not.toHaveBeenCalled();
+  f.child.emit('exit', 1);
+  await expect(result).rejects.toThrow('exited unexpectedly');
+});
+
+it('rolls back before launching when an activated candidate adapter fails validation', async () => {
+  const f = fixture();
+  const prepareAdapter = vi.fn().mockRejectedValue(new Error('adapter unavailable'));
+  const result = await cycle({ ...f.options, current: '/bad', previous: '/source', probation: true }, { ...f.dependencies, prepareAdapter });
+  expect(result).toMatchObject({ current: '/source', config: f.options.config });
+  expect(f.dependencies.start).not.toHaveBeenCalled();
+  expect(JSON.parse(readFileSync(join(f.root, 'managed-update-state.json'), 'utf8'))).toEqual({ current: '/source', failed: 'bad' });
+});
+
+it('binds the validated adapter to the child without changing the saved configuration', async () => {
+  const f = fixture();
+  const prepareAdapter = vi.fn().mockResolvedValue({ '/old/adapter': '/new/adapter' });
+  const result = cycle(f.options, { ...f.dependencies, prepareAdapter });
+  await until(() => f.dependencies.start.mock.calls.length > 0);
+  expect(f.dependencies.start).toHaveBeenCalledWith(expect.any(String), expect.any(Array), expect.objectContaining({
+    env: expect.objectContaining({ AHPD_MANAGED_CODEX_COMMANDS: JSON.stringify({ '/old/adapter': '/new/adapter' }) }),
+  }));
+  expect(JSON.parse(readFileSync(f.options.config, 'utf8')).connectionTokenFile).toBe('token');
+  f.child.emit('exit', 1);
+  await expect(result).rejects.toThrow('exited unexpectedly');
+});
+
 it('times out a candidate that never becomes ready and falls back', async () => {
   const f = fixture();
   const result = cycle({ ...f.options, current: '/bad', previous: '/source', probation: true }, { ...f.dependencies, readyTimeoutMs: 20 });
