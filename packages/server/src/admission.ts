@@ -2,6 +2,7 @@ import { RpcError } from '@ahpd/sdk';
 import { memorySnapshot, type MemorySnapshot } from './memory-snapshot.js';
 
 export interface AdmissionSettings {
+  enabled?: boolean;
   memoryLimitMb?: number;
   minimumFreeMb?: number;
   startupReservationMb?: number;
@@ -28,6 +29,7 @@ export function memoryAdmission(settings: AdmissionSettings = {}, dependencies: 
     reason = message;
   };
   const reserve = ({ activeSessions }: { activeSessions: number }) => {
+    if (settings.enabled !== true) return () => {};
     const at = now();
     for (const [id, held] of reservations) if (held.expires <= at) reservations.delete(id);
     const hold = (baseline: number | undefined) => {
