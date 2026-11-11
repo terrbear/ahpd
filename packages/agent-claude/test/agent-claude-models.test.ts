@@ -55,6 +55,11 @@ it('replaces the CLI list, adds to it with keepCliModels, and is the CLI list wi
   expect(offeredModels(CLI, own, true)).toEqual([...CLI, { id: 'stealth/space-bunny-alpha', name: 'Space Bunny' }]);
 });
 
+it('leaves an explicitly named Mythos model catalog unchanged', () => {
+  const own = [{ id: 'mythos', name: 'Provider Mythos' }];
+  expect(offeredModels(CLI, own, undefined)).toEqual(own);
+});
+
 it('names what is wrong with a models option', () => {
   expect(modelsProblem(undefined)).toBeUndefined();
   expect(modelsProblem(['a/b', { id: 'c/d', name: 'D' }, { fetch: 'https://x', match: 'a/*', key: { fromEnv: 'K' } }])).toBeUndefined();
@@ -76,8 +81,30 @@ it('offers pinned IDs with context and per-model controls while retaining aliase
   const offered = pinnedModels(models, {});
   expect(offered.map((model) => model.id)).toEqual([
     'default', 'claude-sonnet-5-5[1m]', 'sonnet[1m]', 'claude-haiku-4-5-20251001', 'haiku', 'claude-haiku-5-5',
+    'claude-mythos-5-2',
   ]);
   expect(offered[1]).toMatchObject({ name: 'Sonnet 5.5[1m] (pinned)', configSchema: schema });
+});
+
+it('offers Fable and Mythos 5.2 pins without offering the old versions for their aliases', () => {
+  const offered = pinnedModels([
+    { id: 'fable', name: 'Fable' },
+    { id: 'mythos', name: 'Mythos' },
+  ], {});
+  expect(offered.map((model) => model.id)).toEqual([
+    'claude-fable-5-2', 'fable', 'claude-mythos-5-2', 'mythos',
+  ]);
+  expect(offered.map((model) => model.id)).not.toContain('claude-fable-5-1');
+  expect(offered.map((model) => model.id)).not.toContain('claude-mythos-5-1');
+});
+
+it('offers Mythos 5.2 when the first-party CLI list omits the mythos alias', () => {
+  const offered = pinnedModels([
+    { id: 'default', name: 'Default' },
+    { id: 'opus', name: 'Opus' },
+  ], {});
+  expect(offered.map((model) => model.id)).toContain('claude-mythos-5-2');
+  expect(offered.map((model) => model.id)).not.toContain('claude-mythos-5-1');
 });
 
 it.each([{ ANTHROPIC_BASE_URL: 'https://provider.invalid' }, { CLAUDE_CODE_USE_BEDROCK: '1' }])('preserves custom-provider catalogs with %j', (env) => {
@@ -88,5 +115,5 @@ it.each([true, false])('preserves existing canonical model metadata with alias f
   const alias = { id: 'haiku', name: 'Alias', configSchema: { marker: 'alias' } };
   const exact = { id: 'claude-haiku-5-5', name: 'Canonical from SDK', configSchema: { marker: 'canonical' }, extra: 'preserve me' };
   const original = aliasFirst ? [alias, exact] : [exact, alias];
-  expect(pinnedModels(original, {})).toEqual(original);
+  expect(pinnedModels(original, {})).toEqual([...original, { id: 'claude-mythos-5-2', name: 'Mythos 5.2 (pinned)' }]);
 });

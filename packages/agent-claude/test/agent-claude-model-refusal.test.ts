@@ -330,10 +330,15 @@ it('holds the queue behind a turn that is switching models, and sends the prompt
 });
 
 it.each([
-  ['fable', 'claude-fable-5-1'],
+  ['fable', 'claude-fable-5-2'],
+  ['mythos', 'claude-mythos-5-2'],
   ['opus', 'claude-opus-5-5'],
   ['sonnet', 'claude-sonnet-5-5'],
   ['haiku', 'claude-haiku-5-5'],
+  ['fable[1m]', 'claude-fable-5-2[1m]'],
+  ['mythos[200k]', 'claude-mythos-5-2[200k]'],
+  ['claude-fable-5-1', 'claude-fable-5-1'],
+  ['claude-mythos-5-1', 'claude-mythos-5-1'],
   ['sonnet[1m]', 'claude-sonnet-5-5[1m]'],
   ['haiku[200k]', 'claude-haiku-5-5[200k]'],
   ['claude-sonnet-5', 'claude-sonnet-5'],
@@ -355,6 +360,19 @@ it('fails an unavailable pinned alias without sending its prompt or asking for a
   session.begin('missing', 'hello', { id: 'haiku' });
   await settle();
   expect(sdk.asked).toEqual(['claude-haiku-5-5']);
+  expect(prompts).toEqual([]);
+  expect(failure('missing')).toContain('model unavailable');
+});
+
+it.each([
+  ['fable', 'claude-fable-5-2'],
+  ['mythos', 'claude-mythos-5-2'],
+])('does not fall back when %s 5.2 is unavailable', async (alias, pinned) => {
+  const { session, prompts, failure } = await open();
+  sdk.refuses[pinned] = 'model unavailable';
+  session.begin('missing', 'hello', { id: alias });
+  await settle();
+  expect(sdk.asked).toEqual([pinned]);
   expect(prompts).toEqual([]);
   expect(failure('missing')).toContain('model unavailable');
 });
@@ -381,6 +399,12 @@ it.each([
   expect(sdk.asked).toEqual(['sonnet']);
 });
 
+it.each(['fable', 'mythos'])('preserves the %s alias for a custom provider', async (alias) => {
+  const { session } = await open({ env: { ANTHROPIC_BASE_URL: 'https://gateway.example.test' } });
+  session.begin('custom', 'hello', { id: alias });
+  await settle();
+  expect(sdk.asked).toEqual([alias]);
+});
 
 it('preserves a provider selected in the daemon environment', async () => {
   vi.stubEnv('ANTHROPIC_BASE_URL', 'https://gateway.example.test');
