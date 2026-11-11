@@ -22,7 +22,16 @@ export function managedLifecycle(channel: ManagedChannel, host: Pick<Host, 'turn
   channel.send({ type: 'managed-ready', ...(providers ? { providers } : {}) });
 }
 
-export function managedPlugins(plugins: PluginSpec[], source: string, current: string): PluginSpec[] {
+export function managedPlugins(plugins: PluginSpec[], source: string, current: string, adapters: Record<string, string> = {}): PluginSpec[] {
   const move = (path: string): string => path.startsWith(`${source}/packages/`) ? current + path.slice(source.length) : path;
-  return plugins.map((plugin) => typeof plugin === 'string' ? move(plugin) : { ...plugin, name: move(plugin.name) });
+  return plugins.map((plugin) => {
+    if (typeof plugin === 'string') return move(plugin);
+    const options = plugin.options;
+    const command = options?.command;
+    const replacement = typeof command === 'string' && Object.hasOwn(adapters, command) ? adapters[command] : undefined;
+    if (plugin.enabled !== false && options?.provider === 'codex' && typeof replacement === 'string') {
+      return { ...plugin, name: move(plugin.name), options: { ...options, command: replacement } };
+    }
+    return { ...plugin, name: move(plugin.name) };
+  });
 }

@@ -63,7 +63,8 @@ export type { TerminalStore } from './terminals.js';
 
 /** How to construct a host. */
 export interface HostOptions {
-  admitSession?: () => () => void;
+  /** Called before a backend starts, with the current non-disposed session count. */
+  admitSession?: (context: { activeSessions: number }) => () => void;
   /**
    * The directory whose sessions this host serves, on the machine it runs on.
    *
