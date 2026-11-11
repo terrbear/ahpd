@@ -122,7 +122,8 @@ export const offeredModels = <T extends OfferedModel>(
 
 /** Explicit first-party targets; see https://platform.claude.com/docs/en/about-claude/models/overview. */
 const ALIAS_PINS: Record<string, string> = {
-  fable: 'claude-fable-5-1',
+  fable: 'claude-fable-5-2',
+  mythos: 'claude-mythos-5-2',
   opus: 'claude-opus-5-5',
   sonnet: 'claude-sonnet-5-5',
   haiku: 'claude-haiku-5-5',
@@ -142,18 +143,21 @@ export const pinnedModel = (id: string, env: Record<string, unknown>): string =>
   const endpoint = env.ANTHROPIC_BASE_URL;
   if (customProvider || typeof endpoint === 'string' && endpoint !== ''
     && endpoint.replace(/\/$/u, '') !== 'https://api.anthropic.com') return id;
-  const match = /^(fable|opus|sonnet|haiku)(\[(?:1m|200k)\])?$/u.exec(id);
+  const match = /^(fable|mythos|opus|sonnet|haiku)(\[(?:1m|200k)\])?$/u.exec(id);
   return match ? `${ALIAS_PINS[match[1] as string]}${match[2] ?? ''}` : id;
 };
 
-/** Offer explicit pin targets beside the CLI aliases, without asserting account access. */
-export const pinnedModels = <T extends OfferedModel>(models: readonly T[], env: Record<string, unknown>): T[] => {
+/** Offer explicit pins without asserting account access; include Mythos if the CLI omits its alias. */
+export const pinnedModels = <T extends OfferedModel>(models: readonly T[], env: Record<string, unknown>): (T | OfferedModel)[] => {
+  const label = (target: string): string => target.replace(/^claude-(\w+)-(\d+)-(\d+)/u,
+    (_match, family: string, major: string, minor: string) => `${family[0]!.toUpperCase()}${family.slice(1)} ${major}.${minor}`);
   const existing = new Set(models.map((model) => model.id));
-  return unique(models.flatMap((model) => {
+  const offered = unique(models.flatMap((model) => {
     const target = pinnedModel(model.id, env);
     if (target === model.id || existing.has(target)) return [model];
-    const label = target.replace(/^claude-(\w+)-(\d+)-(\d+)/u,
-      (_match, family: string, major: string, minor: string) => `${family[0]!.toUpperCase()}${family.slice(1)} ${major}.${minor}`);
-    return [{ ...model, id: target, name: `${label} (pinned)` }, model];
+    return [{ ...model, id: target, name: `${label(target)} (pinned)` }, model];
   }));
+  const mythos = pinnedModel('mythos', env);
+  if (mythos === 'mythos' || offered.some((model) => model.id === mythos)) return offered;
+  return [...offered, { id: mythos, name: `${label(mythos)} (pinned)` }];
 };

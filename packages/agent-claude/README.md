@@ -41,13 +41,14 @@ It takes no options in the ordinary install: it catalogues whatever directories 
 | `presets` | named sets of Claude options, by name. One is what every session runs on; two or more offer a session a choice, and the first is the default |
 
 For first-party Claude sessions, explicit family selections are pinned before
-reaching the SDK: `fable` → `claude-fable-5-1`, `opus` → `claude-opus-5-5`,
-`sonnet` → `claude-sonnet-5-5`, and `haiku` → `claude-haiku-5-5`.
+reaching the SDK: `fable` → `claude-fable-5-2`, `mythos` →
+`claude-mythos-5-2`, `opus` → `claude-opus-5-5`, `sonnet` →
+`claude-sonnet-5-5`, and `haiku` → `claude-haiku-5-5`.
 `[1m]` and `[200k]` suffixes are retained. Explicit version IDs are unchanged;
 `default` still delegates to the CLI. Turn selection, model config changes, and
-idle query restarts use the same pins. The model catalog also offers each
-canonical pin beside its family alias, so clients requiring an advertised
-exact ID can select it. An unavailable pinned model fails through the existing
+idle query restarts use the same pins. The model catalog offers each canonical
+pin beside its available family alias. It also offers the Mythos 5.2 pin if the
+CLI model list omits `mythos`. An unavailable pinned model fails through the existing
 SDK error path; ahpd does not retry an older model.
 
 Custom `models` catalogs, non-Anthropic `ANTHROPIC_BASE_URL` endpoints, and the
@@ -59,11 +60,11 @@ values; choose an explicit model ID to retain an older first-party release.
 These are request targets, not an account availability guarantee. The canonical
 IDs are documented in [Anthropic's model overview](https://platform.claude.com/docs/en/about-claude/models/overview).
 [Claude Code's model documentation](https://code.claude.com/docs/en/model-config)
-requires v2.1.257+ for Fable 5.1, v2.1.280+ for Opus 5.5, v2.1.284+ for
+requires v2.1.321+ for Fable 5.2, v2.1.280+ for Opus 5.5, v2.1.284+ for
 Sonnet 5.5, and v2.1.293+ for Haiku 5.5. Older runtimes or accounts without access
-may reject these requests. The bundled SDK minimum is 0.3.293 (Claude Code
-v2.1.293); this source dependency update does not upgrade a separately installed
-CLI or grant account access.
+may reject these requests.
+The bundled SDK minimum is 0.3.293 (Claude Code v2.1.293); this source dependency
+update does not upgrade a separately installed CLI or grant account access.
 
 ### Session configuration isolation
 

@@ -1525,6 +1525,7 @@ describe('what the harness offers', () => {
     expect(root.agents[0]?.models).toEqual([
       { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5 (pinned)', provider: 'claude' },
       { id: 'sonnet', name: 'Sonnet', provider: 'claude' },
+      { id: 'claude-mythos-5-2', name: 'Mythos 5.2 (pinned)', provider: 'claude' },
     ]);
 
     // Not asserted here: `root/agentsChanged`. The boot probe learns the
@@ -8384,7 +8385,7 @@ describe('the pull request a create-pr recorded', () => {
 });
 
 const pinnedFamilies = [
-  ['fable', 'claude-fable-5-1'], ['opus', 'claude-opus-5-5'],
+  ['fable', 'claude-fable-5-2'], ['mythos', 'claude-mythos-5-2'], ['opus', 'claude-opus-5-5'],
   ['sonnet', 'claude-sonnet-5-5'], ['haiku', 'claude-haiku-5-5'],
 ] as const;
 for (const [alias, target] of pinnedFamilies) {
