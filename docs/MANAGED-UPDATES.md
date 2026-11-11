@@ -21,9 +21,16 @@ readiness also starts the previously confirmed release.
 
 The original configuration and source checkout are preserved. Only plugin paths
 inside the managed source checkout are redirected in memory. The daemon keeps
-using the original configuration file, so settings edits survive updates. Custom plugins, credentials, provider commands, and Node stay
-operator-managed. In particular this updates ahpd, not separately pinned Codex
-ACP installations. Update those through setup when changing their pin.
+using the original configuration file, so settings edits survive updates. Enabled
+Codex providers using a recognized managed adapter path adopt the candidate
+release's exact adapter pin and locked Codex runtime. The adapter is installed
+and validated before draining the current host, then its command is redirected
+only in the child's in-memory configuration. Older supervisors validate it at
+activation and roll back before starting a candidate whose adapter fails.
+Custom plugins, custom provider commands, credentials, disabled providers and
+Node remain operator-managed. Markerless adapter directories are preserved;
+a verified `<commit>-managed` sibling is used when necessary. Rollback uses
+the prior release's adapter without rewriting saved configuration.
 
 To disable automatic updates, put `{"enabled":false}` in
 `~/.a3/ahpd/self-update.json`. The file is checked each minute. An optional
@@ -53,8 +60,10 @@ Re-running setup fast-forwards the branch already checked out (`main` or
 `develop`). It does not change branches. `AHPD_CHANNEL` applies to a new clone.
 If it is set and names the other branch, setup stops and says so.
 
-The Codex ACP adapter is the commit pinned in `scripts/codex-acp.json`. The
-channel does not move that pin. Update it through setup when the pin changes.
+Each validated host release carries the exact Codex ACP commit pinned in its
+`scripts/codex-acp.json`. Managed adapter installations follow that release pin
+on either channel, including the adapter's locked native Codex runtime. A
+custom adapter command remains unchanged; update custom installations yourself.
 
 To switch an install that is already running a release with channel tracking,
 check out the other branch in the source directory and restart the service.
