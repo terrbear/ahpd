@@ -60,9 +60,9 @@ values; choose an explicit model ID to retain an older first-party release.
 These are request targets, not an account availability guarantee. The canonical
 IDs are documented in [Anthropic's model overview](https://platform.claude.com/docs/en/about-claude/models/overview).
 [Claude Code's model documentation](https://code.claude.com/docs/en/model-config)
-requires v2.1.257+ for Fable 5.1, v2.1.280+ for Opus 5.5, v2.1.284+ for
+requires v2.1.321+ for Fable 5.2, v2.1.280+ for Opus 5.5, v2.1.284+ for
 Sonnet 5.5, and v2.1.293+ for Haiku 5.5. Older runtimes or accounts without access
-may reject these requests. Fable 5.2 requires Claude Code v2.1.321 or later.
+may reject these requests.
 The bundled SDK minimum is 0.3.293 (Claude Code v2.1.293); this source dependency
 update does not upgrade a separately installed CLI or grant account access.
 
