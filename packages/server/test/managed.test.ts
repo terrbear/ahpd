@@ -40,3 +40,18 @@ it('changes only managed plugin paths, preserving custom plugins, options and re
   expect(config.plugins[0]).toBe('/source/packages/agent-claude');
 });
 
+it('uses the release adapter only for validated enabled Codex commands and preserves rollback configuration', () => {
+  const managed = { name: '/source/packages/agent-acp', options: { provider: 'codex', command: '/old/adapter', env: { KEEP: 'yes' } } };
+  const custom = { name: '/custom/plugin', options: { provider: 'codex', command: '/custom/adapter' } };
+  const disabled = { ...managed, enabled: false };
+  const other = { ...managed, options: { provider: 'other', command: '/old/adapter' } };
+  const plugins = [managed, custom, disabled, other];
+  const result = managedPlugins(plugins, '/source', '/release', { '/old/adapter': '/new/adapter' });
+  expect(result[0]).toEqual({ ...managed, name: '/release/packages/agent-acp', options: { ...managed.options, command: '/new/adapter' } });
+  expect(result[1]).toEqual(custom);
+  expect(result[2]).toEqual({ ...disabled, name: '/release/packages/agent-acp' });
+  expect(result[3]).toEqual({ ...other, name: '/release/packages/agent-acp' });
+  expect(managed.options.command).toBe('/old/adapter');
+  expect(managedPlugins(plugins, '/source', '/old-release')[0]).toEqual({ ...managed, name: '/old-release/packages/agent-acp' });
+});
+

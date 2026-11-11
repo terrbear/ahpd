@@ -10,7 +10,7 @@ let bin: string;
 let install: string;
 let events: string;
 let pinFile: string;
-const revision = '51c77be57c7ed5bf1b5f0cf959bb697213bc04ca';
+const revision = '7fc1a0d2ce4a36535630ed2a6c5aca1c9fa77108';
 const nextRevision = '1111111111111111111111111111111111111111';
 const markerName = '.codex-acp-install.json';
 const installer = new URL('./install-codex-acp.mjs', import.meta.url);

@@ -5,7 +5,7 @@ description: One-time setup for the ahpd bundle. Installs the ahpd agent host wi
 
 # Set up ahpd for Anton
 
-This installs the [terrbear/ahpd](https://github.com/terrbear/ahpd) fork of the Agent Host Protocol server, so Anton can run Claude Code and Codex sessions on this machine. The fork contains the session and model-listing fixes used by the existing Anton setup. Managed installations follow the branch checked out in `~/.a3/ahpd-src`: `develop` adopts the CI-validated `anton-ahpd-develop` tag, and `main` (the default) adopts `anton-ahpd`, which moves only after that commit is promoted to `main`. Set `{"enabled":false}` in `~/.a3/ahpd/self-update.json` to opt out. Node, custom plugins, and the Codex ACP adapter pinned by commit in `scripts/codex-acp.json` remain operator-managed. The pin does not follow the channel.
+This installs the [terrbear/ahpd](https://github.com/terrbear/ahpd) fork of the Agent Host Protocol server, so Anton can run Claude Code and Codex sessions on this machine. The fork contains the session and model-listing fixes used by the existing Anton setup. Managed installations follow the branch checked out in `~/.a3/ahpd-src`: `develop` adopts the CI-validated `anton-ahpd-develop` tag, and `main` (the default) adopts `anton-ahpd`, which moves only after that commit is promoted to `main`. Set `{"enabled":false}` in `~/.a3/ahpd/self-update.json` to opt out. Managed Codex adapter installations follow the full commit in the validated release's `scripts/codex-acp.json`, including its locked Codex runtime. The updater installs and validates that adapter before activation; custom adapter paths, Node, and custom plugins remain operator-managed. Saved credentials and configuration stay unchanged, and rollback uses the prior release's adapter.
 
 Tell the user in one or two sentences what is about to happen, then do these steps in order. Stop and report the error if a step fails; do not improvise workarounds.
 
@@ -199,7 +199,7 @@ exit 1
 
 ## Release channel
 
-The updater follows the branch left checked out in `~/.a3/ahpd-src`. `develop` pulls the `anton-ahpd-develop` tag, which CI moves only after a successful push to `develop`. `main` and any other checkout pull `anton-ahpd`, which CI moves only after a successful push to `main`. Promoting develop is merging it into `main`. Main installs then see the change; they never fetch the develop tag. The Codex ACP pin in `scripts/codex-acp.json` is the same on both channels.
+The updater follows the branch left checked out in `~/.a3/ahpd-src`. `develop` pulls the `anton-ahpd-develop` tag, which CI moves only after a successful push to `develop`. `main` and any other checkout pull `anton-ahpd`, which CI moves only after a successful push to `main`. Promoting develop is merging it into `main`. Main installs then see the change; they never fetch the develop tag. Each validated release carries its own Codex ACP pin in `scripts/codex-acp.json`. Managed installations adopt that exact adapter and bundled runtime when the release activates; custom adapter commands stay unchanged. An adapter build or validation failure keeps the current host running or rolls activation back. Existing markerless directories are preserved using a verified `<commit>-managed` sibling.
 
 To switch an existing install, check out the other branch and restart the service:
 

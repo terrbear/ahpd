@@ -1,16 +1,27 @@
 import { fork } from 'node:child_process';
 import { dirname, join, basename } from 'node:path';
 import { json, prepare, prune, save } from './managed-build.mjs';
+import { prepareManagedCodex } from './managed-codex.mjs';
 
 export async function cycle({ source, current, config, previous, probation = false }, dependencies = {}) {
   const start = dependencies.start ?? ((entry, args, options) => fork(entry, args, options));
   const build = dependencies.prepare ?? prepare;
   const home = dirname(config);
   const log = dependencies.log ?? ((message) => process.stderr.write(`${new Date().toISOString()} managed update: ${message}\n`));
+  const prepareAdapter = dependencies.prepareAdapter ?? prepareManagedCodex;
+  let adapters;
+  try {
+    adapters = await prepareAdapter(config, current);
+  } catch (error) {
+    if (!probation || !previous) throw error;
+    log('new release failed adapter validation; rolling back');
+    await save(join(home, 'managed-update-state.json'), { current: previous, failed: basename(current) });
+    return { source, current: previous, config };
+  }
   const receipt = await json(join(home, 'managed-update-state.json'), {});
   const child = start(join(current, 'packages/server/dist/main.js'), ['--config-file', config], {
     execPath: process.execPath, execArgv: [], detached: true, stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
-    env: { ...process.env, AHPD_MANAGED_CHILD: '1', AHPD_MANAGED_SOURCE: source, AHPD_MANAGED_RELEASE: current, AHPD_MANAGED_PROVIDERS: JSON.stringify(probation ? receipt.providers ?? [] : []) },
+    env: { ...process.env, AHPD_MANAGED_CHILD: '1', AHPD_MANAGED_SOURCE: source, AHPD_MANAGED_RELEASE: current, AHPD_MANAGED_PROVIDERS: JSON.stringify(probation ? receipt.providers ?? [] : []), AHPD_MANAGED_CODEX_COMMANDS: JSON.stringify(adapters) },
   });
   const terminate = () => {
     if (!child.pid) { child.kill('SIGKILL'); return; }
@@ -35,7 +46,9 @@ export async function cycle({ source, current, config, previous, probation = fal
         lastCheck = Date.now();
         // The release checkout is detached. The channel is the branch of the
         // source setup cloned, which is the install the operator can switch.
-        pending = await build(home, current, abort.signal, source);
+        const candidate = await build(home, current, abort.signal, source);
+        if (candidate) await prepareAdapter(config, candidate, abort.signal);
+        pending = candidate;
         if (pending) log(`validated ${basename(pending)}; waiting for idle`);
       }
       if (pending && !stopping && child.connected) child.send({ type: 'managed-drain' });
