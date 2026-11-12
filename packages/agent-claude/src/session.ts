@@ -15,7 +15,7 @@ import { attachmentContent } from './attachments.js';
 import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
-import { pinnedModel, uniqueModels } from './models.js';
+import { pinnedModel, sdkModelId, uniqueModels } from './models.js';
 import { idleQuery } from './idle.js';
 import { executionFenceOf } from './tool-execution-fence.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
@@ -3357,9 +3357,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
     offered = list(init.models)
       .map((raw) => {
         const model = bag(raw);
-        // `value`, not `id`. Reading the wrong name costs every model there
-        // is and leaves a picker that offers nothing.
-        return { id: str(model.value) ?? '', name: str(model.displayName) ?? str(model.value) ?? '' };
+        // `value` can be an alias. `resolvedModel` is the exact dispatch id;
+        // keep the `default` selector special.
+        return { id: sdkModelId(model.value, model.resolvedModel), name: str(model.displayName) ?? str(model.value) ?? '' };
       })
       .filter((model) => model.id !== '');
     if (options.offerModels) offered = await options.offerModels(offered);

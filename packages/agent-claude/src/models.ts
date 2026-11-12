@@ -14,6 +14,14 @@ export interface OfferedModel {
   configSchema?: Record<string, unknown>;
 }
 
+/** Resolve an SDK picker alias to the exact model id used for dispatch. */
+export const sdkModelId = (value: unknown, resolvedModel: unknown): string => {
+  const picker = typeof value === 'string' ? value : '';
+  if (picker === 'default') return picker;
+  const resolved = typeof resolvedModel === 'string' ? resolvedModel : '';
+  return resolved || picker;
+};
+
 /**
  * One entry of the `models` option.
  *
