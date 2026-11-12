@@ -4,8 +4,7 @@ import { serversFor } from './mcp.js';
 import { createSession, EFFORT_LABELS, EFFORTS } from './session.js';
 import { turnsOf, subagentsOf } from './transcript.js';
 import { catalogue } from './catalog.js';
-import { offeredModels, ownModels, pinnedModels, type ModelEntry, type OfferedModel } from './models.js';
-import { presetValues, queryOptionsOf } from './options.js';
+import { offeredModels, ownModels, uniqueModels, type ModelEntry, type OfferedModel } from './models.js';
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -132,10 +131,7 @@ export function claude(options: ClaudeOptions): Agent {
   let named: Promise<OfferedModel[]> | undefined;
   /** A list the CLI reported, as this harness offers it. */
   const offer = async <T extends OfferedModel>(cli: T[]): Promise<(T | OfferedModel)[]> => {
-    if (options.models === undefined) {
-      const preset = queryOptionsOf(presetValues(options.presets, undefined));
-      return pinnedModels(cli, preset.env as Bag | undefined ?? process.env);
-    }
+    if (options.models === undefined) return uniqueModels(cli);
     named ??= ownModels(options.models, options.log);
     return offeredModels(cli, await named, options.keepCliModels);
   };

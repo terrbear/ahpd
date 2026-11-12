@@ -15,7 +15,7 @@ import { attachmentContent } from './attachments.js';
 import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
-import { pinnedModel, pinnedModels } from './models.js';
+import { pinnedModel, uniqueModels } from './models.js';
 import { idleQuery } from './idle.js';
 import { executionFenceOf } from './tool-execution-fence.js';
 import { toolProfileOf } from './tool-profile.js';
@@ -3369,7 +3369,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       })
       .filter((model) => model.id !== '');
     if (options.offerModels) offered = await options.offerModels(offered);
-    else offered = pinnedModels(offered, { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env });
+    else offered = uniqueModels(offered);
     /*
      * The style the preset names, applied once the CLI is there to take it.
      *
