@@ -22,6 +22,8 @@ const sdk = vi.hoisted(() => {
     feed,
     /** The stream the session pushes prompts onto, which nothing else reads. */
     prompt: undefined as AsyncGenerator<Bag> | undefined,
+    /** The options handed to the actual session query. */
+    options: undefined as undefined | Record<string, unknown>,
     /** Every model the CLI was asked for, in the order it was asked. */
     asked: [] as string[],
     /** What the CLI says about a model it will not take. */
@@ -33,6 +35,7 @@ const sdk = vi.hoisted(() => {
     reset() {
       feed.held = [];
       feed.wake = undefined;
+      sdk.options = undefined;
       sdk.asked = [];
       sdk.refuses = {};
       sdk.takes = {};
@@ -53,8 +56,9 @@ const sdk = vi.hoisted(() => {
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   createSdkMcpServer: (given: Record<string, unknown>) => ({ type: 'sdk', name: given.name, tools: given.tools }),
-  query: (given: { prompt: AsyncGenerator<Bag> }) => {
+  query: (given: { prompt: AsyncGenerator<Bag>; options: Record<string, unknown> }) => {
     sdk.prompt = given.prompt;
+    sdk.options = given.options;
     return {
       async *[Symbol.asyncIterator]() {
         for (;;) yield await sdk.next();
@@ -354,6 +358,16 @@ it.each([
   expect(message('pin').model).toEqual({ id });
 });
 
+it.each(['claude-fable-5-2', 'claude-mythos-5-2'])('passes the %s model ID unchanged without picker overrides', async (id) => {
+  const { session, message } = await open();
+  const settings = sdk.options?.settings as Bag;
+  expect(settings.modelPicker).toBeUndefined();
+  session.begin('native-model', 'hello', { id });
+  await settle();
+  expect(sdk.asked).toEqual([id]);
+  expect(message('native-model').model).toEqual({ id });
+});
+
 it('fails an unavailable pinned alias without sending its prompt or asking for an older model', async () => {
   const { session, prompts, failure } = await open();
   sdk.refuses['claude-haiku-5-5'] = 'model unavailable';
@@ -401,6 +415,7 @@ it.each([
 
 it.each(['fable', 'mythos'])('preserves the %s alias for a custom provider', async (alias) => {
   const { session } = await open({ env: { ANTHROPIC_BASE_URL: 'https://gateway.example.test' } });
+  expect((sdk.options?.settings as Bag).modelPicker).toBeUndefined();
   session.begin('custom', 'hello', { id: alias });
   await settle();
   expect(sdk.asked).toEqual([alias]);

@@ -1523,9 +1523,9 @@ describe('what the harness offers', () => {
     // backend answers `{ id, name }` because it has one provider, and this is
     // the only place that knows which.
     expect(root.agents[0]?.models).toEqual([
-      { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5 (pinned)', provider: 'claude' },
+      { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', provider: 'claude' },
       { id: 'sonnet', name: 'Sonnet', provider: 'claude' },
-      { id: 'claude-mythos-5-2', name: 'Mythos 5.2 (pinned)', provider: 'claude' },
+      { id: 'claude-mythos-5-2', name: 'Mythos 5.2', provider: 'claude' },
     ]);
 
     // Not asserted here: `root/agentsChanged`. The boot probe learns the

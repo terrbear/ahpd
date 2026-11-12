@@ -155,9 +155,9 @@ export const pinnedModels = <T extends OfferedModel>(models: readonly T[], env: 
   const offered = unique(models.flatMap((model) => {
     const target = pinnedModel(model.id, env);
     if (target === model.id || existing.has(target)) return [model];
-    return [{ ...model, id: target, name: `${label(target)} (pinned)` }, model];
+    return [{ ...model, id: target, name: label(target) }, model];
   }));
   const mythos = pinnedModel('mythos', env);
   if (mythos === 'mythos' || offered.some((model) => model.id === mythos)) return offered;
-  return [...offered, { id: mythos, name: `${label(mythos)} (pinned)` }];
+  return [...offered, { id: mythos, name: label(mythos) }];
 };

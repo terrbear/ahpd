@@ -83,7 +83,7 @@ it('offers pinned IDs with context and per-model controls while retaining aliase
     'default', 'claude-sonnet-5-5[1m]', 'sonnet[1m]', 'claude-haiku-4-5-20251001', 'haiku', 'claude-haiku-5-5',
     'claude-mythos-5-2',
   ]);
-  expect(offered[1]).toMatchObject({ name: 'Sonnet 5.5[1m] (pinned)', configSchema: schema });
+  expect(offered[1]).toMatchObject({ name: 'Sonnet 5.5[1m]', configSchema: schema });
 });
 
 it('offers Fable and Mythos 5.2 pins without offering the old versions for their aliases', () => {
@@ -94,6 +94,8 @@ it('offers Fable and Mythos 5.2 pins without offering the old versions for their
   expect(offered.map((model) => model.id)).toEqual([
     'claude-fable-5-2', 'fable', 'claude-mythos-5-2', 'mythos',
   ]);
+  expect(offered.map((model) => model.name)).toEqual(['Fable 5.2', 'Fable', 'Mythos 5.2', 'Mythos']);
+  expect(offered.map((model) => model.name).join(' ')).not.toContain('(pinned)');
   expect(offered.map((model) => model.id)).not.toContain('claude-fable-5-1');
   expect(offered.map((model) => model.id)).not.toContain('claude-mythos-5-1');
 });
@@ -115,5 +117,5 @@ it.each([true, false])('preserves existing canonical model metadata with alias f
   const alias = { id: 'haiku', name: 'Alias', configSchema: { marker: 'alias' } };
   const exact = { id: 'claude-haiku-5-5', name: 'Canonical from SDK', configSchema: { marker: 'canonical' }, extra: 'preserve me' };
   const original = aliasFirst ? [alias, exact] : [exact, alias];
-  expect(pinnedModels(original, {})).toEqual([...original, { id: 'claude-mythos-5-2', name: 'Mythos 5.2 (pinned)' }]);
+  expect(pinnedModels(original, {})).toEqual([...original, { id: 'claude-mythos-5-2', name: 'Mythos 5.2' }]);
 });
