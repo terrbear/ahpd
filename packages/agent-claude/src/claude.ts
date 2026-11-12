@@ -13,6 +13,7 @@ import { promisify } from 'node:util';
 import { machineAsked, refuseComputer } from '@ahpd/sdk';
 import { spawnInside } from './spawn.js';
 import type { Asked, Spawned } from './spawn.js';
+import { CLAUDE_TOOL_PROFILES } from './tool-profile.js';
 import type { Agent, Bag, MachineNeed, Start } from '@ahpd/sdk';
 
 /**
@@ -323,6 +324,16 @@ export function claude(options: ClaudeOptions): Agent {
         default: 'default',
         sessionMutable: false,
       },
+      claudeToolProfile: {
+        scope: 'session',
+        type: 'string',
+        title: 'Claude Code Tool Profile',
+        description: 'Default keeps every Claude Code built-in tool. Lean removes Workflow, ScheduleWakeup, ShareOnboardingGuide and ReportFindings from the model context. Lean without catalogs also removes Agent and Skill, which drops the agent and skill listings. Other built-in tools, MCP and AHP tools, permissions and hooks stay unchanged. Fixed when the session is created.',
+        enum: [...CLAUDE_TOOL_PROFILES],
+        enumLabels: ['Default built-in tools', 'Lean built-in tools', 'Lean without agent and skill catalogs'],
+        default: 'default',
+        sessionMutable: false,
+      },
       captureSdkInitToolManifest: {
         scope: 'session',
         type: 'string',
@@ -428,6 +439,7 @@ export function claude(options: ClaudeOptions): Agent {
     contributedTools: 'default',
     extraArgsPolicy: 'preset',
     claudeConfigIsolation: 'default',
+    claudeToolProfile: 'default',
     captureSdkInitToolManifest: 'disabled',
     toolExecutionFence: 'off',
     ...(presets.length > 1 ? { preset: first } : {}),
