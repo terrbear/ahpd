@@ -85,6 +85,18 @@ forks. The selector is fixed when the session is created. Other preset options,
 provider environment and credentials, model, effort, permissions, MCP servers
 and tools stay unchanged. This does not isolate other Claude configuration.
 
+### Built-in tool profile
+
+Set the per-session `claudeToolProfile` selector to `default`, `lean` or
+`lean-no-catalogs`. `default` keeps every built-in tool. `lean` adds
+`Workflow`, `ScheduleWakeup`, `ShareOnboardingGuide` and `ReportFindings` to the
+SDK's `disallowedTools`, so their schemas never reach the model. `lean-no-catalogs`
+also removes `Agent` and `Skill`; the CLI only drops the personal agent listing
+and the skill listing with those tools. The removed tools are also refused if
+called. The selector is fixed when the session is created and applies to idle
+restarts, restoration and forks. Session `permissions`, other built-in tools,
+MCP servers, AHP tools, hooks and setting sources stay unchanged.
+
 ### Presets
 
 A preset is a set of Claude options an operator writes once and sessions run on, rather than options each session offers a control for. Two of them give a session a `preset` to choose from, fixed when the session is created:
