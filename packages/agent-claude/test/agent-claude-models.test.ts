@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { modelsProblem, offeredModels, ownModels, pinnedModels } from '../src/models.js';
+import { modelsProblem, offeredModels, ownModels, uniqueModels } from '../src/models.js';
 
 /*
  * The models a Claude harness offers when its operator names them: written by
@@ -69,53 +69,42 @@ it('names what is wrong with a models option', () => {
   expect(modelsProblem([{ fetch: 'https://x', key: 'K' }])).toBe('options.models[0].key is not { fromEnv }');
 });
 
-it('offers pinned IDs with context and per-model controls while retaining aliases and explicit versions', () => {
-  const schema = { type: 'object', properties: { thinkingLevel: { enum: ['high'] } } };
+it('does not add alias targets that are absent from the SDK catalog', () => {
   const models = [
-    { id: 'default', name: 'Default' },
-    { id: 'sonnet[1m]', name: 'Sonnet', configSchema: schema },
-    { id: 'claude-haiku-4-5-20251001', name: 'Haiku 4.5' },
-    { id: 'haiku', name: 'Haiku' },
-    { id: 'claude-haiku-5-5', name: 'Already explicit' },
-  ];
-  const offered = pinnedModels(models, {});
-  expect(offered.map((model) => model.id)).toEqual([
-    'default', 'claude-sonnet-5-5[1m]', 'sonnet[1m]', 'claude-haiku-4-5-20251001', 'haiku', 'claude-haiku-5-5',
-    'claude-mythos-5-2',
-  ]);
-  expect(offered[1]).toMatchObject({ name: 'Sonnet 5.5[1m]', configSchema: schema });
-});
-
-it('offers Fable and Mythos 5.2 pins without offering the old versions for their aliases', () => {
-  const offered = pinnedModels([
     { id: 'fable', name: 'Fable' },
     { id: 'mythos', name: 'Mythos' },
-  ], {});
-  expect(offered.map((model) => model.id)).toEqual([
-    'claude-fable-5-2', 'fable', 'claude-mythos-5-2', 'mythos',
-  ]);
-  expect(offered.map((model) => model.name)).toEqual(['Fable 5.2', 'Fable', 'Mythos 5.2', 'Mythos']);
-  expect(offered.map((model) => model.name).join(' ')).not.toContain('(pinned)');
-  expect(offered.map((model) => model.id)).not.toContain('claude-fable-5-1');
-  expect(offered.map((model) => model.id)).not.toContain('claude-mythos-5-1');
-});
-
-it('offers Mythos 5.2 when the first-party CLI list omits the mythos alias', () => {
-  const offered = pinnedModels([
-    { id: 'default', name: 'Default' },
     { id: 'opus', name: 'Opus' },
-  ], {});
-  expect(offered.map((model) => model.id)).toContain('claude-mythos-5-2');
-  expect(offered.map((model) => model.id)).not.toContain('claude-mythos-5-1');
+    { id: 'sonnet', name: 'Sonnet' },
+    { id: 'haiku', name: 'Haiku' },
+  ];
+  const offered = uniqueModels(models);
+  expect(offered).toEqual(models);
+  expect(offered.map((model) => model.id)).not.toContain('claude-fable-5-2');
+  expect(offered.map((model) => model.id)).not.toContain('claude-mythos-5-2');
+  expect(offered.map((model) => model.id)).not.toContain('claude-opus-5-5');
+  expect(offered.map((model) => model.id)).not.toContain('claude-sonnet-5-5');
+  expect(offered.map((model) => model.id)).not.toContain('claude-haiku-5-5');
 });
 
-it.each([{ ANTHROPIC_BASE_URL: 'https://provider.invalid' }, { CLAUDE_CODE_USE_BEDROCK: '1' }])('preserves custom-provider catalogs with %j', (env) => {
-  expect(pinnedModels(CLI, env)).toEqual(CLI);
+it('keeps SDK-provided canonical rows once and preserves their metadata', () => {
+  const nativeFable = { id: 'claude-fable-5-2', name: 'Native Fable 5.2', configSchema: { marker: 'fable' } };
+  const nativeMythos = { id: 'claude-mythos-5-2', name: 'Native Mythos 5.2', configSchema: { marker: 'mythos' } };
+  const models = [
+    { id: 'fable', name: 'Fable' }, nativeFable,
+    { id: 'mythos', name: 'Mythos' }, nativeMythos,
+    { id: 'claude-mythos-5-2', name: 'Duplicate catalog row' },
+  ];
+  const offered = uniqueModels(models);
+  expect(offered).toEqual(models.slice(0, 4));
+  expect(offered.find((model) => model.id === nativeFable.id)).toEqual(nativeFable);
+  expect(offered.find((model) => model.id === nativeMythos.id)).toEqual(nativeMythos);
+  expect(new Set(offered.map((model) => model.id)).size).toBe(offered.length);
 });
 
-it.each([true, false])('preserves existing canonical model metadata with alias first: %s', (aliasFirst) => {
-  const alias = { id: 'haiku', name: 'Alias', configSchema: { marker: 'alias' } };
-  const exact = { id: 'claude-haiku-5-5', name: 'Canonical from SDK', configSchema: { marker: 'canonical' }, extra: 'preserve me' };
-  const original = aliasFirst ? [alias, exact] : [exact, alias];
-  expect(pinnedModels(original, {})).toEqual([...original, { id: 'claude-mythos-5-2', name: 'Mythos 5.2' }]);
+it('preserves user-defined provider names and ids', () => {
+  const own = [
+    { id: 'haiku', name: 'Provider Haiku' },
+    { id: 'mythos', name: 'Provider Mythos' },
+  ];
+  expect(offeredModels(CLI, own, undefined)).toEqual(own);
 });

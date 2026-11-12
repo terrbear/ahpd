@@ -1507,7 +1507,7 @@ describe('what the harness offers', () => {
     expect(command).toMatchObject({ name: 'advisor', description: 'Read support tickets', enabled: true });
   });
 
-  it('advertises the models on the root channel, keyed by `value`', async () => {
+  it('advertises only the models in the SDK catalog, keyed by `value`', async () => {
     sdk.init = {
       models: [{ value: 'sonnet', displayName: 'Sonnet' }],
       commands: [], agents: [],
@@ -1523,15 +1523,36 @@ describe('what the harness offers', () => {
     // backend answers `{ id, name }` because it has one provider, and this is
     // the only place that knows which.
     expect(root.agents[0]?.models).toEqual([
-      { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', provider: 'claude' },
       { id: 'sonnet', name: 'Sonnet', provider: 'claude' },
-      { id: 'claude-mythos-5-2', name: 'Mythos 5.2', provider: 'claude' },
     ]);
 
     // Not asserted here: `root/agentsChanged`. The boot probe learns the
     // models before any client has connected, so the change is dispatched to
     // nobody - and the snapshot above is how every client actually finds out.
     expect(p.notes.length).toBeGreaterThanOrEqual(0);
+  });
+
+  it('keeps native SDK model rows and removes duplicate ids', async () => {
+    sdk.init = {
+      models: [
+        { value: 'fable', displayName: 'Fable alias' },
+        { value: 'claude-fable-5-2', displayName: 'Native Fable 5.2' },
+        { value: 'claude-fable-5-2', displayName: 'Duplicate Fable row' },
+        { value: 'mythos', displayName: 'Mythos alias' },
+        { value: 'claude-mythos-5-2', displayName: 'Native Mythos 5.2' },
+      ],
+      commands: [], agents: [],
+    };
+    const { client } = await running();
+    const root = (await client.handle({ method: 'subscribe', params: { channel: 'ahp-root://' } }) as {
+      snapshot: { state: { agents: { models: { id: string; name: string; provider: string }[] }[] } };
+    }).snapshot.state;
+    expect(root.agents[0]?.models).toEqual([
+      { id: 'fable', name: 'Fable alias', provider: 'claude' },
+      { id: 'claude-fable-5-2', name: 'Native Fable 5.2', provider: 'claude' },
+      { id: 'mythos', name: 'Mythos alias', provider: 'claude' },
+      { id: 'claude-mythos-5-2', name: 'Native Mythos 5.2', provider: 'claude' },
+    ]);
   });
 
   it('gives each model its own thinking control, from what that model supports', async () => {
@@ -8384,33 +8405,41 @@ describe('the pull request a create-pr recorded', () => {
   });
 });
 
-const pinnedFamilies = [
+const modelAliases = [
   ['fable', 'claude-fable-5-2'], ['mythos', 'claude-mythos-5-2'], ['opus', 'claude-opus-5-5'],
   ['sonnet', 'claude-sonnet-5-5'], ['haiku', 'claude-haiku-5-5'],
 ] as const;
-for (const [alias, target] of pinnedFamilies) {
-  it.each([alias, target])('advertises and dispatches pinned model %s through the host without using its default', async (selected) => {
+for (const [alias, target] of modelAliases) {
+  it.each([alias, target])('offers native model choice %s and dispatches its exact target', async (selected) => {
     sdk.init = { models: [
       { value: 'default', displayName: 'Default (recommended)' },
-      ...pinnedFamilies.map(([value]) => ({ value, displayName: value })),
+      ...modelAliases.flatMap(([name, id]) => [
+        { value: name, displayName: `Alias ${name}` },
+        { value: id, displayName: `Native ${id}` },
+      ]),
       { value: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5' },
     ] };
     const { host, client, uri, chatUri } = await running();
     try {
       const root = await client.handle({ method: 'subscribe', params: { channel: 'ahp-root://' } }) as {
-        snapshot: { state: { agents: { models: { id: string }[] }[] } };
+        snapshot: { state: { agents: { models: { id: string; name: string }[] }[] } };
       };
-      const offered = root.snapshot.state.agents[0]!.models.map((model) => model.id);
+      const models = root.snapshot.state.agents[0]!.models;
+      const offered = models.map((model) => model.id);
       expect(offered).toContain(selected);
       expect(offered).toContain('default');
       expect(offered).toContain('claude-haiku-4-5-20251001');
+      expect(new Set(offered).size).toBe(offered.length);
+      expect(models.find((model) => model.id === target)?.name).toBe(`Native ${target}`);
       expect(sessionQueries().at(-1)!.options.model).toBeUndefined();
       client.handle({ method: 'dispatchAction', params: {
-        channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'pin', message: { text: 'pinned request', model: { id: selected } } },
+        channel: chatUri, action: { type: 'chat/turnStarted', turnId: 'pin', message: { text: 'model request', model: { id: selected } } },
       } });
       await settle();
       expect(sdk.modelsSet).toEqual([target]);
-      expect(sdk.said).toEqual(['pinned request']);
+      expect(sdk.modelsSet).not.toContain('claude-fable-5-1');
+      expect(sdk.modelsSet).not.toContain('claude-mythos-5-1');
+      expect(sdk.said).toEqual(['model request']);
       const state = await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
         snapshot: { state: { _meta: { model: string } } };
       };
