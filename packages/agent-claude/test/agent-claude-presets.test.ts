@@ -97,13 +97,19 @@ it('offers no preset key with none configured, and runs on what it ran on', asyn
   expect(offered()).not.toHaveProperty('preset');
   // Today's options: the sandbox layer absent, thinking on, nothing else.
   const options = await queried(undefined, undefined);
-  expect(options.settings).toEqual({ disableClaudeAiConnectors: true });
+  expect(options.settings).toEqual({ disableClaudeAiConnectors: true, modelPicker: { options: [
+    { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
+    { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
+  ] } });
   expect(options.thinking).toEqual({ type: 'adaptive' });
 });
 
 it('always disables Claude.ai connectors and preserves preset SDK settings', async () => {
   const options = await queried({ work: { sandbox: 'on' } }, 'work');
-  expect(options.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true });
+  expect(options.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true, modelPicker: { options: [
+    { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
+    { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
+  ] } });
 });
 
 it('offers no preset key with one configured, and runs on it', async () => {
@@ -123,10 +129,16 @@ it('offers the preset names from two, and defaults to the first', () => {
 it('runs each session on its own preset', async () => {
   const presets = { work: {}, test: { thinking: 'disabled', sandbox: 'on' } };
   expect((await queried(presets, 'test')).thinking).toEqual({ type: 'disabled' });
-  expect((await queried(presets, 'test')).settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true });
+  expect((await queried(presets, 'test')).settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true, modelPicker: { options: [
+    { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
+    { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
+  ] } });
   const work = await queried(presets, 'work');
   expect(work.thinking).toEqual({ type: 'adaptive' });
-  expect(work.settings).toEqual({ disableClaudeAiConnectors: true });
+  expect(work.settings).toEqual({ disableClaudeAiConnectors: true, modelPicker: { options: [
+    { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
+    { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
+  ] } });
 });
 
 it('resolves a stored name that no longer exists to the first preset', async () => {

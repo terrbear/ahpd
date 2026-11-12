@@ -1523,9 +1523,9 @@ describe('what the harness offers', () => {
     // backend answers `{ id, name }` because it has one provider, and this is
     // the only place that knows which.
     expect(root.agents[0]?.models).toEqual([
-      { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5 (pinned)', provider: 'claude' },
+      { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', provider: 'claude' },
       { id: 'sonnet', name: 'Sonnet', provider: 'claude' },
-      { id: 'claude-mythos-5-2', name: 'Mythos 5.2 (pinned)', provider: 'claude' },
+      { id: 'claude-mythos-5-2', name: 'Mythos 5.2', provider: 'claude' },
     ]);
 
     // Not asserted here: `root/agentsChanged`. The boot probe learns the
@@ -2228,11 +2228,17 @@ describe('choosing a model', () => {
     // What the operator wrote the preset down as, in the query the CLI runs.
     const onWork = await made('ahp-session:/onwork', { preset: 'work' });
     expect(onWork.thinking).toEqual({ type: 'disabled' });
-    expect(onWork.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true });
+    expect(onWork.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true, modelPicker: { options: [
+      { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
+      { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
+    ] } });
     // And a preset that says nothing adds no preset-specific settings.
     const onTest = await made('ahp-session:/ontest', { preset: 'test' });
     expect(onTest.thinking).toEqual({ type: 'adaptive' });
-    expect(onTest.settings).toEqual({ disableClaudeAiConnectors: true });
+    expect(onTest.settings).toEqual({ disableClaudeAiConnectors: true, modelPicker: { options: [
+      { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
+      { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
+    ] } });
     // A stored name nothing resolves is the first preset, which is what
     // renaming or removing one leaves behind.
     const onGone = await made('ahp-session:/ongone', { preset: 'gone' });
