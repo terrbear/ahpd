@@ -98,11 +98,11 @@ export const ownModels = async (
     if ('id' in entry) return [{ id: entry.id, name: entry.name ?? entry.id }];
     return fetched(entry, log, get);
   }));
-  return unique(lists.flat());
+  return uniqueModels(lists.flat());
 };
 
-/** The first of each id. */
-const unique = <T extends { id: string }>(models: readonly T[]): T[] => {
+/** Keep the first SDK or user model entry for each id. */
+export const uniqueModels = <T extends { id: string }>(models: readonly T[]): T[] => {
   const seen = new Set<string>();
   return models.filter((one) => (seen.has(one.id) ? false : (seen.add(one.id), true)));
 };
@@ -116,8 +116,8 @@ export const offeredModels = <T extends OfferedModel>(
   own: readonly OfferedModel[] | undefined,
   keepCliModels: boolean | undefined,
 ): (T | OfferedModel)[] => {
-  if (own === undefined) return [...cli];
-  return keepCliModels === true ? unique<T | OfferedModel>([...cli, ...own]) : [...own];
+  if (own === undefined) return uniqueModels(cli);
+  return keepCliModels === true ? uniqueModels<T | OfferedModel>([...cli, ...own]) : uniqueModels(own);
 };
 
 /** Explicit first-party targets; see https://platform.claude.com/docs/en/about-claude/models/overview. */
@@ -145,19 +145,4 @@ export const pinnedModel = (id: string, env: Record<string, unknown>): string =>
     && endpoint.replace(/\/$/u, '') !== 'https://api.anthropic.com') return id;
   const match = /^(fable|mythos|opus|sonnet|haiku)(\[(?:1m|200k)\])?$/u.exec(id);
   return match ? `${ALIAS_PINS[match[1] as string]}${match[2] ?? ''}` : id;
-};
-
-/** Offer explicit pins without asserting account access; include Mythos if the CLI omits its alias. */
-export const pinnedModels = <T extends OfferedModel>(models: readonly T[], env: Record<string, unknown>): (T | OfferedModel)[] => {
-  const label = (target: string): string => target.replace(/^claude-(\w+)-(\d+)-(\d+)/u,
-    (_match, family: string, major: string, minor: string) => `${family[0]!.toUpperCase()}${family.slice(1)} ${major}.${minor}`);
-  const existing = new Set(models.map((model) => model.id));
-  const offered = unique(models.flatMap((model) => {
-    const target = pinnedModel(model.id, env);
-    if (target === model.id || existing.has(target)) return [model];
-    return [{ ...model, id: target, name: label(target) }, model];
-  }));
-  const mythos = pinnedModel('mythos', env);
-  if (mythos === 'mythos' || offered.some((model) => model.id === mythos)) return offered;
-  return [...offered, { id: mythos, name: label(mythos) }];
 };
