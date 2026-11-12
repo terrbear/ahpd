@@ -358,19 +358,14 @@ it.each([
   expect(message('pin').model).toEqual({ id });
 });
 
-it.each([
-  ['claude-fable-5-2', 'Fable 5.2', 'claude-fable-5-1'],
-  ['claude-mythos-5-2', 'Mythos 5.2', 'claude-mythos-5-1'],
-])('passes the %s modelPicker compatibility to query and sends that exact model', async (id, label, behavesAs) => {
+it.each(['claude-fable-5-2', 'claude-mythos-5-2'])('passes the %s model ID unchanged without picker overrides', async (id) => {
   const { session, message } = await open();
   const settings = sdk.options?.settings as Bag;
-  expect(settings.modelPicker).toMatchObject({
-    options: expect.arrayContaining([{ model: id, label, behavesAs }]),
-  });
-  session.begin('compatible', 'hello', { id });
+  expect(settings.modelPicker).toBeUndefined();
+  session.begin('native-model', 'hello', { id });
   await settle();
   expect(sdk.asked).toEqual([id]);
-  expect(message('compatible').model).toEqual({ id });
+  expect(message('native-model').model).toEqual({ id });
 });
 
 it('fails an unavailable pinned alias without sending its prompt or asking for an older model', async () => {

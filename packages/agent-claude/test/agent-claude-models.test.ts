@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { modelsProblem, offeredModels, ownModels, pinnedModels, withModelPickerCompatibility } from '../src/models.js';
+import { modelsProblem, offeredModels, ownModels, pinnedModels } from '../src/models.js';
 
 /*
  * The models a Claude harness offers when its operator names them: written by
@@ -94,6 +94,8 @@ it('offers Fable and Mythos 5.2 pins without offering the old versions for their
   expect(offered.map((model) => model.id)).toEqual([
     'claude-fable-5-2', 'fable', 'claude-mythos-5-2', 'mythos',
   ]);
+  expect(offered.map((model) => model.name)).toEqual(['Fable 5.2', 'Fable', 'Mythos 5.2', 'Mythos']);
+  expect(offered.map((model) => model.name).join(' ')).not.toContain('(pinned)');
   expect(offered.map((model) => model.id)).not.toContain('claude-fable-5-1');
   expect(offered.map((model) => model.id)).not.toContain('claude-mythos-5-1');
 });
@@ -116,33 +118,4 @@ it.each([true, false])('preserves existing canonical model metadata with alias f
   const exact = { id: 'claude-haiku-5-5', name: 'Canonical from SDK', configSchema: { marker: 'canonical' }, extra: 'preserve me' };
   const original = aliasFirst ? [alias, exact] : [exact, alias];
   expect(pinnedModels(original, {})).toEqual([...original, { id: 'claude-mythos-5-2', name: 'Mythos 5.2' }]);
-});
-
-it('adds compatibility rows without replacing existing picker settings or rows', () => {
-  const settings = {
-    sandbox: { enabled: true },
-    modelPicker: {
-      replaceBuiltInOptions: false,
-      options: [
-        { model: 'custom/model', label: 'Custom model' },
-        { model: 'claude-fable-5-2', label: 'My Fable label', description: 'Existing row' },
-      ],
-    },
-  };
-  expect(withModelPickerCompatibility(settings, {})).toEqual({
-    sandbox: { enabled: true },
-    modelPicker: {
-      replaceBuiltInOptions: false,
-      options: [
-        { model: 'custom/model', label: 'Custom model' },
-        { model: 'claude-fable-5-2', label: 'My Fable label', description: 'Existing row', behavesAs: 'claude-fable-5-1' },
-        { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
-      ],
-    },
-  });
-});
-
-it('leaves a custom provider model picker untouched', () => {
-  const settings = { modelPicker: { options: [{ model: 'private/model', label: 'Private' }] } };
-  expect(withModelPickerCompatibility(settings, { ANTHROPIC_BASE_URL: 'https://gateway.example.test' })).toBe(settings);
 });

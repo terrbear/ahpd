@@ -2228,17 +2228,11 @@ describe('choosing a model', () => {
     // What the operator wrote the preset down as, in the query the CLI runs.
     const onWork = await made('ahp-session:/onwork', { preset: 'work' });
     expect(onWork.thinking).toEqual({ type: 'disabled' });
-    expect(onWork.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true, modelPicker: { options: [
-      { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
-      { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
-    ] } });
+    expect(onWork.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true });
     // And a preset that says nothing adds no preset-specific settings.
     const onTest = await made('ahp-session:/ontest', { preset: 'test' });
     expect(onTest.thinking).toEqual({ type: 'adaptive' });
-    expect(onTest.settings).toEqual({ disableClaudeAiConnectors: true, modelPicker: { options: [
-      { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
-      { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
-    ] } });
+    expect(onTest.settings).toEqual({ disableClaudeAiConnectors: true });
     // A stored name nothing resolves is the first preset, which is what
     // renaming or removing one leaves behind.
     const onGone = await made('ahp-session:/ongone', { preset: 'gone' });

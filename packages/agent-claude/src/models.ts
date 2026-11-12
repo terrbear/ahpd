@@ -147,39 +147,6 @@ export const pinnedModel = (id: string, env: Record<string, unknown>): string =>
   return match ? `${ALIAS_PINS[match[1] as string]}${match[2] ?? ''}` : id;
 };
 
-/**
- * Let the bundled CLI apply known-model behavior to the first-party 5.2 IDs.
- *
- * Keep other picker settings and rows, including an explicit behavior for one
- * of these IDs. A custom provider owns its picker and receives no Anthropic
- * compatibility rows.
- */
-export const withModelPickerCompatibility = (
-  settings: Record<string, unknown>,
-  env: Record<string, unknown>,
-): Record<string, unknown> => {
-  if (pinnedModel('fable', env) === 'fable') return settings;
-  const rawPicker = settings.modelPicker;
-  if (rawPicker !== undefined && (typeof rawPicker !== 'object' || rawPicker === null || Array.isArray(rawPicker))) return settings;
-  const picker = rawPicker as Record<string, unknown> | undefined ?? {};
-  if (picker.options !== undefined && !Array.isArray(picker.options)) return settings;
-  const options = [...(picker.options as unknown[] | undefined ?? [])];
-  const compatible = [
-    { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
-    { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
-  ];
-  for (const one of compatible) {
-    const found = options.findIndex((entry) => typeof entry === 'object' && entry !== null
-      && !Array.isArray(entry) && (entry as Record<string, unknown>).model === one.model);
-    if (found < 0) options.push(one);
-    else {
-      const existing = options[found] as Record<string, unknown>;
-      if (existing.behavesAs === undefined) options[found] = { ...one, ...existing };
-    }
-  }
-  return { ...settings, modelPicker: { ...picker, options } };
-};
-
 /** Offer explicit pins without asserting account access; include Mythos if the CLI omits its alias. */
 export const pinnedModels = <T extends OfferedModel>(models: readonly T[], env: Record<string, unknown>): (T | OfferedModel)[] => {
   const label = (target: string): string => target.replace(/^claude-(\w+)-(\d+)-(\d+)/u,

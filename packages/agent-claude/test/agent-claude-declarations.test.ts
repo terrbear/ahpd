@@ -107,10 +107,7 @@ it('says what an option is when nothing named one', () => {
 
 it('builds a session query from the declared values of its preset', async () => {
   const options = await queried({ sandbox: 'on', thinking: 'disabled', outputStyle: 'concise' });
-  expect(options.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true, modelPicker: { options: [
-    { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
-    { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
-  ] } });
+  expect(options.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true });
   expect(options.thinking).toEqual({ type: 'disabled' });
   // The style is not an option of the query; it waits for the handshake.
   await settle();
@@ -118,8 +115,5 @@ it('builds a session query from the declared values of its preset', async () => 
 });
 
 it('leaves the sandbox layer out when nobody asked for one', async () => {
-  expect((await queried({ sandbox: 'default' })).settings).toEqual({ disableClaudeAiConnectors: true, modelPicker: { options: [
-    { model: 'claude-fable-5-2', label: 'Fable 5.2', behavesAs: 'claude-fable-5-1' },
-    { model: 'claude-mythos-5-2', label: 'Mythos 5.2', behavesAs: 'claude-mythos-5-1' },
-  ] } });
+  expect((await queried({ sandbox: 'default' })).settings).toEqual({ disableClaudeAiConnectors: true });
 });

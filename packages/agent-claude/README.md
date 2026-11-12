@@ -63,7 +63,7 @@ IDs are documented in [Anthropic's model overview](https://platform.claude.com/d
 requires v2.1.321+ for Fable 5.2, v2.1.280+ for Opus 5.5, v2.1.284+ for
 Sonnet 5.5, and v2.1.293+ for Haiku 5.5. Older runtimes or accounts without access
 may reject these requests.
-The bundled SDK minimum is 0.3.293 (Claude Code v2.1.293); this source dependency
+The bundled SDK minimum is 0.3.322 (Claude Code v2.1.322); this source dependency
 update does not upgrade a separately installed CLI or grant account access.
 
 ### Session configuration isolation

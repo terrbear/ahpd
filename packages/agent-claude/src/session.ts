@@ -15,7 +15,7 @@ import { attachmentContent } from './attachments.js';
 import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
-import { pinnedModel, pinnedModels, withModelPickerCompatibility } from './models.js';
+import { pinnedModel, pinnedModels } from './models.js';
 import { idleQuery } from './idle.js';
 import { executionFenceOf } from './tool-execution-fence.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
@@ -2753,10 +2753,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
       }
       const presetQuery = { ...fromPreset };
       if (extraArgsPolicy === 'none') delete presetQuery.extraArgs;
-      const querySettings = withModelPickerCompatibility({
+      const querySettings = {
         ...(fromPreset.settings as Bag | undefined),
         disableClaudeAiConnectors: true,
-      }, { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env });
+      };
       const handle = query({
         prompt: input(signal.signal),
         options: {
