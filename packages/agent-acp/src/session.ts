@@ -24,6 +24,7 @@
  */
 
 import { customInstructionsMeta } from './instructions.js';
+import { humanSteering } from './steering.js';
 import { asyncInputs } from './async-input.js';
 import { idOf, embeddedAttachments } from '@ahpd/sdk';
 import { attachmentBlocks } from './attachments.js';
@@ -188,6 +189,21 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   let toolsEndpoint: ToolsEndpoint | undefined;
   /** The connection this session spawned, once it has one. */
   let live: AcpConnection | undefined;
+  let supportsActiveSteering = false;
+  const steering = humanSteering({
+    initial: record?.steering,
+    persist: (receipts) => {
+      if (record === undefined) throw new Error('No active ACP session');
+      record.steering = receipts;
+      catalog?.save(record, hostId);
+    },
+    inject: async (text) => {
+      if (live === undefined || acpSessionId === undefined) throw new Error('ACP connection closed');
+      return await live.steer(acpSessionId, text);
+    },
+    emit: (action) => emit('chat', action),
+    settled: () => { touch(); startNext(); },
+  });
   /** Whether this server can reload its saved conversation after the process exits. */
   let supportsSessionLoad = false;
   /** The server's own id for this conversation, once `session/new` answered. */
@@ -259,7 +275,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   /** Do not retire a runtime while any turn, saved answer, tool or terminal is still owned. */
   const safelyIdle = (): boolean => !closed && live !== undefined && supportsSessionLoad && acpSessionId !== undefined
     && active === undefined && queued.length === 0 && pendingInputs.size === 0 && permissions.size === 0
-    && inputs.size() === 0 && terminals.size === 0 && !offered.busy();
+    && inputs.size() === 0 && terminals.size === 0 && !offered.busy() && !steering.busy();
 
   const scheduleIdleRetirement = (): void => {
     invalidateIdleTimer();
@@ -766,6 +782,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
         inputs.cancel();
       });
       const handshake = await connection.initialize();
+      supportsActiveSteering = provider === 'codex' && bag(handshake._meta?.steering).activeOnly === true;
       if (closed || live !== connection) throw new Error(`${provider}: the session closed while the ACP server was opening`);
       supportsSessionLoad = handshake.agentCapabilities?.loadSession === true;
       const instructionMeta = customInstructionsMeta(instructions, handshake);
@@ -1225,7 +1242,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    * as a prompt is the one thing the `!` prefix exists not to do.
    */
   const startNext = (): void => {
-    if (active !== undefined || closed) return;
+    if (active !== undefined || closed || steering.busy()) return;
     const next = queued.shift();
     if (next === undefined) return;
     const held = bag(next.command);
@@ -1299,9 +1316,15 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       ...(activity !== undefined ? { activity } : {}),
       ...(draft !== undefined ? { draft } : {}),
       queuedMessages: queued.map((held) => ({ id: held.id, message: held.message })),
+      ...(steering.pending() === undefined ? {} : { steeringMessage: steering.pending() }),
+      _meta: { 'ahpd.humanSteering': steering.metadata() },
     }),
 
     begin: (turnId, text, model, from) => begin(turnId, text, model, from),
+    steer: (id, text) => {
+      if (!supportsActiveSteering || active === undefined || mapping?.prompted !== true || closed || cancelRequested) return false;
+      return steering.steer(id, text, String(active.id));
+    },
 
     /**
      * A person's `!command`, run by the host in one of its own shells.

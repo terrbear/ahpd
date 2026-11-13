@@ -7,7 +7,7 @@ const skill = readFileSync(new URL('../anton-bundle/skills/ahpd-setup/SKILL.md',
 const setupScript = skill.match(/```bash\r?\n([\s\S]*?)\r?\n```/)?.[1];
 if (!setupScript) throw new Error('ahpd setup skill has no bash installer block');
 
-const revision = '0bf05f7c8d2e02a700f57f023dce2c074d079f8e';
+const revision = '51c77be57c7ed5bf1b5f0cf959bb697213bc04ca';
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 

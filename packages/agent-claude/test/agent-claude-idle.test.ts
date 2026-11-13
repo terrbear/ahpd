@@ -1,11 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ProcessFixture } from './fixtures/process.js';
 import { idleQuery } from '../src/idle.js';
 
-const sdk = vi.hoisted(() => ({ nativeId: '11111111-1111-4111-8111-111111111111', inputGatedInit: false, initialize: undefined as undefined | ((index: number) => Promise<unknown>), spawn: false, localSpawn: undefined as undefined | (() => unknown), resources: [] as { closed: boolean }[], runs: [] as {
+const sdk = vi.hoisted(() => ({ nativeId: '11111111-1111-4111-8111-111111111111', preInitSessionId: undefined as string | undefined, initTools: undefined as unknown, inputGatedInit: false, initialize: undefined as undefined | ((index: number) => Promise<unknown>), spawn: false, localSpawn: undefined as undefined | (() => unknown), resources: [] as { closed: boolean }[], runs: [] as {
   options: Record<string, unknown>;
   closed: boolean;
   prompts: unknown[];
@@ -27,8 +27,12 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   },
   query: (given: { options: Record<string, unknown>; prompt: AsyncIterable<unknown> }) => {
     if (sdk.spawn) (given.options.spawnClaudeCodeProcess as (asked: unknown) => unknown)({ command: 'fixture', args: [], env: {} });
-    const init = { type: 'system', subtype: 'init', session_id: sdk.nativeId };
-    const frames: Record<string, unknown>[] = sdk.inputGatedInit ? [] : [init];
+    const init: Record<string, unknown> = { type: 'system', subtype: 'init', session_id: sdk.nativeId };
+    if (sdk.initTools !== undefined) init.tools = sdk.initTools;
+    const frames: Record<string, unknown>[] = sdk.inputGatedInit ? [] : [
+      ...(sdk.preInitSessionId === undefined ? [] : [{ type: 'system', subtype: 'hook_started', session_id: sdk.preInitSessionId }]),
+      init,
+    ];
     let wake: (() => void) | undefined;
     const run = {
       options: given.options,
@@ -62,6 +66,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { createSession } = await import('../src/session.js');
+const { claude } = await import('../src/claude.js');
 const directories: string[] = [];
 const sessions: ReturnType<typeof createSession>[] = [];
 const settle = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
@@ -72,12 +77,250 @@ const session = (options: Partial<Parameters<typeof createSession>[0]> = {}) => 
   sessions.push(held);
   return held;
 };
+const claudeSession = (options: {
+  settings?: Record<string, unknown>;
+  mcpServers?: Record<string, unknown>;
+  resume?: string;
+  forkAt?: string;
+} = {}) => {
+  const cwd = mkdtempSync(join(tmpdir(), 'ahpd-idle-claude-'));
+  directories.push(cwd);
+  writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({
+    mcpServers: { ambient: { type: 'http', url: 'https://ambient.example.test/mcp' } },
+  }));
+  const agent = claude({ paths: [cwd], idleTimeoutMs: 100 });
+  const held = agent.create({
+    uri: 'ahp-session:/11111111-1111-4111-8111-111111111111',
+    chatUri: 'ahp-chat:/idle',
+    workingDirectory: cwd,
+    schema: agent.schema,
+    settings: { ...agent.defaults(), ...options.settings },
+    mcpServers: options.mcpServers as never,
+    tools: [{ definition: { name: 'host_tool', inputSchema: { type: 'object' } }, run: () => 'ok' } as never],
+    emit: () => {},
+    ...(options.resume === undefined ? {} : { resume: options.resume }),
+    ...(options.forkAt === undefined ? {} : { forkAt: options.forkAt }),
+  });
+  sessions.push(held);
+  return held;
+};
 
-beforeEach(() => { vi.useFakeTimers(); sdk.runs.length = 0; sdk.resources.length = 0; sdk.nativeId = '11111111-1111-4111-8111-111111111111'; sdk.inputGatedInit = false; sdk.initialize = undefined; sdk.spawn = false; sdk.localSpawn = undefined; });
+beforeEach(() => { vi.useFakeTimers(); sdk.runs.length = 0; sdk.resources.length = 0; sdk.nativeId = '11111111-1111-4111-8111-111111111111'; sdk.preInitSessionId = undefined; sdk.initTools = undefined; sdk.inputGatedInit = false; sdk.initialize = undefined; sdk.spawn = false; sdk.localSpawn = undefined; });
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map((held) => held.close()));
   for (const cwd of directories.splice(0)) rmSync(cwd, { recursive: true, force: true });
   vi.useRealTimers();
+});
+
+const sdkManifestOf = (held: ReturnType<typeof createSession>): Record<string, unknown> | undefined => {
+  const meta = held.sessionState()._meta;
+  return typeof meta === 'object' && meta !== null
+    ? (meta as Record<string, unknown>)['ahpd.claudeSdkInitToolManifest'] as Record<string, unknown> | undefined
+    : undefined;
+};
+
+it('delivers steering to an active Claude query', async () => {
+  const held = claudeSession();
+  const initial = { type: 'user', message: { role: 'user', content: 'Start working' }, parent_tool_use_id: null };
+  held.begin('first', 'Start working');
+  await settle();
+  expect(sdk.runs[0]!.prompts).toEqual([initial]);
+  expect(held.steer).toBeDefined();
+  expect(held.steer?.('steer-1', 'Check the edge case')).toBe(true);
+  await settle();
+  expect(sdk.runs[0]!.prompts).toEqual([
+    initial,
+    { type: 'user', message: { role: 'user', content: 'Check the edge case' }, parent_tool_use_id: null },
+  ]);
+});
+
+it('captures only observed SDK init tool names when the per-session opt-in is enabled', async () => {
+  sdk.initTools = ['Bash', 'mcp__ahp__read'];
+  const held = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });
+  await settle();
+  expect(sdkManifestOf(held)).toEqual({
+    status: 'observed',
+    sessionUri: held.uri,
+    generation: 0,
+    nativeSessionId: sdk.nativeId,
+    toolNames: ['Bash', 'mcp__ahp__read'],
+  });
+  (sdk.initTools as string[]).push('late mutation');
+  expect(sdkManifestOf(held)?.toolNames).toEqual(['Bash', 'mcp__ahp__read']);
+});
+
+it('distinguishes a reported empty tool list from an unobserved manifest', async () => {
+  sdk.initTools = [];
+  const observed = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });
+  await settle();
+  expect(sdkManifestOf(observed)).toMatchObject({ status: 'observed', toolNames: [] });
+
+  sdk.inputGatedInit = true;
+  const unobserved = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });
+  await settle();
+  expect(sdkManifestOf(unobserved)).toMatchObject({ status: 'unknown', sessionUri: unobserved.uri });
+  expect(sdkManifestOf(unobserved)).not.toHaveProperty('toolNames');
+});
+
+it('keeps malformed init tool data unknown instead of retaining objects', async () => {
+  sdk.initTools = ['Bash', { name: 'untrusted tool detail', input_schema: { secret: 'not metadata' } }];
+  const held = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });
+  await settle();
+  expect(sdkManifestOf(held)).toMatchObject({ status: 'unknown', sessionUri: held.uri });
+  expect(sdkManifestOf(held)).not.toHaveProperty('toolNames');
+});
+
+it('does not report tools from an unrelated native session', async () => {
+  sdk.nativeId = 'a-different-native-session';
+  sdk.preInitSessionId = sdk.nativeId;
+  sdk.initTools = ['Bash'];
+  const held = claudeSession({
+    resume: '11111111-1111-4111-8111-111111111111',
+    settings: { captureSdkInitToolManifest: 'enabled' },
+  });
+  await settle();
+  expect(sdkManifestOf(held)).toMatchObject({ status: 'unknown', sessionUri: held.uri });
+  expect(sdkManifestOf(held)).not.toHaveProperty('nativeSessionId');
+  expect(sdkManifestOf(held)).not.toHaveProperty('toolNames');
+});
+
+it('re-observes init tools after a resumed query generation', async () => {
+  sdk.initTools = ['Bash', 'mcp__ahp__read'];
+  const held = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });
+  await settle();
+  expect(sdkManifestOf(held)).toMatchObject({ status: 'observed', generation: 0 });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(sdk.runs[0]!.closed).toBe(true);
+  held.begin('after-idle', 'Resume the session');
+  await settle();
+  expect(sdk.runs).toHaveLength(2);
+  expect(sdkManifestOf(held)).toEqual({
+    status: 'observed',
+    sessionUri: held.uri,
+    generation: 1,
+    nativeSessionId: sdk.nativeId,
+    toolNames: ['Bash', 'mcp__ahp__read'],
+  });
+});
+
+it('keeps the deny-all fence on initial, recreated, resumed, and forked queries', async () => {
+  const assertFence = (run: (typeof sdk.runs)[number] | undefined) => {
+    expect(run).toBeDefined();
+    const hooks = run!.options.hooks as { PreToolUse: { matcher?: string; hooks: unknown[] }[] };
+    expect(hooks.PreToolUse).toHaveLength(1);
+    expect(hooks.PreToolUse[0]).not.toHaveProperty('matcher');
+    expect(hooks.PreToolUse[0]!.hooks).toHaveLength(1);
+    expect(run!.options.canUseTool).toBeTypeOf('function');
+  };
+  const held = claudeSession({ settings: { toolExecutionFence: 'deny-all' } });
+  await settle();
+  assertFence(sdk.runs[0]);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(sdk.runs[0]!.closed).toBe(true);
+  held.begin('after-idle', 'Resume the session');
+  await settle();
+  assertFence(sdk.runs[1]);
+  await held.close();
+
+  const resumed = claudeSession({ resume: sdk.nativeId, settings: { toolExecutionFence: 'deny-all' } });
+  await settle();
+  expect(sdk.runs[2]!.options.resume).toBe(sdk.nativeId);
+  assertFence(sdk.runs[2]);
+  await resumed.close();
+
+  const forked = claudeSession({ resume: sdk.nativeId, forkAt: 'cut', settings: { toolExecutionFence: 'deny-all' } });
+  await settle();
+  expect(sdk.runs[3]!.options).toMatchObject({ forkSession: true, resumeSessionAt: 'cut' });
+  assertFence(sdk.runs[3]);
+});
+
+it('retains the exact allowlist across idle recreation, restore and fork without affecting another session', async () => {
+  const name = 'mcp__fixture__read';
+  const assertFence = async (index: number) => {
+    const options = sdk.runs[index]!.options;
+    const hooks = options.hooks as { PreToolUse: { hooks: ((input: unknown, id: string, context: unknown) => Promise<unknown>)[] }[] };
+    const gate = hooks.PreToolUse[0]!.hooks[0]!;
+    const callback = options.canUseTool as (name: string, input: object, options: object) => Promise<unknown>;
+    expect(await gate({ tool_name: name }, 'id', {})).toEqual({});
+    expect(await gate({ tool_name: 'mcp__late__read' }, 'id', {})).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    expect(await callback(name, {}, { signal: new AbortController().signal })).toMatchObject({ behavior: 'allow' });
+    expect(await callback('Bash', {}, { signal: new AbortController().signal })).toMatchObject({ behavior: 'deny' });
+  };
+  const held = claudeSession({ settings: {
+    toolExecutionFence: 'allowlist', toolExecutionAllowlist: [name],
+    permissions: { allow: [name, 'Bash'] },
+  } });
+  await settle();
+  await assertFence(0);
+  const saved = JSON.parse(JSON.stringify(held.settings!()));
+  await vi.advanceTimersByTimeAsync(100);
+  held.begin('after-idle', 'Resume');
+  await settle();
+  await assertFence(1);
+  await held.close();
+  const resumed = claudeSession({ resume: sdk.nativeId, settings: saved });
+  await settle();
+  await assertFence(2);
+  await resumed.close();
+  const forked = claudeSession({ resume: sdk.nativeId, forkAt: 'cut', settings: saved });
+  await settle();
+  expect(sdk.runs[3]!.options).toMatchObject({ forkSession: true, resumeSessionAt: 'cut' });
+  await assertFence(3);
+  await forked.close();
+  const independent = claudeSession({ settings: { toolExecutionFence: 'allowlist', toolExecutionAllowlist: ['Bash'], permissions: { allow: ['Bash', name] } } });
+  await settle();
+  const callback = sdk.runs[4]!.options.canUseTool as (name: string, input: object, options: object) => Promise<unknown>;
+  expect(await callback('Bash', {}, {})).toMatchObject({ behavior: 'allow' });
+  expect(await callback(name, {}, {})).toMatchObject({ behavior: 'deny' });
+  await independent.close();
+});
+
+it('recaptures tools when the AHP session is recreated for native resume', async () => {
+  sdk.initTools = ['Bash', 'mcp__ahp__read'];
+  const original = claudeSession({ settings: { captureSdkInitToolManifest: 'enabled' } });
+  await settle();
+  expect(sdkManifestOf(original)).toMatchObject({ status: 'observed', generation: 0 });
+  await original.close();
+
+  const recreated = claudeSession({
+    resume: sdk.nativeId,
+    settings: { captureSdkInitToolManifest: 'enabled' },
+  });
+  await settle();
+  expect(sdk.runs).toHaveLength(2);
+  expect(sdkManifestOf(recreated)).toEqual({
+    status: 'observed',
+    sessionUri: recreated.uri,
+    generation: 0,
+    nativeSessionId: sdk.nativeId,
+    toolNames: ['Bash', 'mcp__ahp__read'],
+  });
+});
+
+it('binds a fork manifest to the new native session id', async () => {
+  sdk.nativeId = 'forked-native-session';
+  sdk.initTools = ['Bash'];
+  const held = claudeSession({
+    resume: '11111111-1111-4111-8111-111111111111',
+    forkAt: 'turn-1',
+    settings: { captureSdkInitToolManifest: 'enabled' },
+  });
+  await settle();
+  expect(sdk.runs[0]?.options).toMatchObject({ forkSession: true, resume: '11111111-1111-4111-8111-111111111111' });
+  expect(sdkManifestOf(held)).toEqual({
+    status: 'observed',
+    sessionUri: held.uri,
+    generation: 0,
+    nativeSessionId: sdk.nativeId,
+    toolNames: ['Bash'],
+  });
+});
+
+it('does not capture init data when the opt-in is disabled', async () => {
+  sdk.initTools = ['Bash'];
+  const held = claudeSession();
+  await settle();
+  expect(sdkManifestOf(held)).toBeUndefined();
 });
 
 it('records startup stages without prompt data and waits for initialization before enqueue', async () => {
@@ -220,7 +463,13 @@ it('keeps active and queued turns alive, then resets inactivity after the queue 
 });
 
 it('resumes exactly the same native session with only the new prompt and retained config and history', async () => {
-  const held = session({ idleTimeoutMs: 100, resume: '11111111-1111-4111-8111-111111111111', forkAt: 'fork-point', settings: { permissionMode: 'plan' } });
+  const mcpServers = { fixture: { type: 'http' as const, url: 'https://fixture.example.test/mcp' } };
+  const held = claudeSession({
+    resume: '11111111-1111-4111-8111-111111111111',
+    forkAt: 'fork-point',
+    settings: { permissionMode: 'plan', builtInTools: 'none', claudeConfigIsolation: 'isolated' },
+    mcpServers,
+  });
   held.begin('first', 'Make one change');
   await settle();
   await complete();
@@ -235,6 +484,14 @@ it('resumes exactly the same native session with only the new prompt and retaine
   held.begin('next', 'Read the result');
   await settle();
   expect(sdk.runs).toHaveLength(2);
+  for (const run of sdk.runs) {
+    expect(run.options).toMatchObject({ tools: [], settingSources: [], strictMcpConfig: true, plugins: [] });
+    expect(run.options.mcpServers).toMatchObject({
+      ...mcpServers,
+      ahp: { type: 'sdk', name: 'ahp', tools: [{ name: 'host_tool' }] },
+    });
+    expect(run.options.mcpServers).not.toHaveProperty('ambient');
+  }
   expect(sdk.runs[1]!.options).toMatchObject({ resume: '11111111-1111-4111-8111-111111111111', model: 'chosen-model', effort: 'high', permissionMode: 'plan' });
   expect(sdk.runs[1]!.options).not.toHaveProperty('forkSession');
   expect(sdk.runs[1]!.options).not.toHaveProperty('resumeSessionAt');
@@ -243,11 +500,20 @@ it('resumes exactly the same native session with only the new prompt and retaine
 });
 
 it('recreates an unused native session with its exact ID rather than resuming an unwritten transcript', async () => {
-  const held = session({ idleTimeoutMs: 100 });
+  const mcpServers = { fixture: { type: 'http' as const, url: 'https://fixture.example.test/mcp' } };
+  const held = claudeSession({ settings: { builtInTools: 'none', claudeConfigIsolation: 'isolated' }, mcpServers });
   await settle();
   await vi.advanceTimersByTimeAsync(100);
   held.begin('first', 'First prompt');
   await settle();
+  for (const run of sdk.runs) {
+    expect(run.options).toMatchObject({ tools: [], settingSources: [], strictMcpConfig: true, plugins: [] });
+    expect(run.options.mcpServers).toMatchObject({
+      ...mcpServers,
+      ahp: { type: 'sdk', name: 'ahp', tools: [{ name: 'host_tool' }] },
+    });
+    expect(run.options.mcpServers).not.toHaveProperty('ambient');
+  }
   expect(sdk.runs[1]!.options).toMatchObject({ sessionId: '11111111-1111-4111-8111-111111111111' });
   expect(sdk.runs[1]!.options).not.toHaveProperty('resume');
   expect(sdk.runs[1]!.prompts).toHaveLength(1);
@@ -533,4 +799,27 @@ it('restarts an evicted query with the pinned model and its context suffix', asy
   await settle();
   expect(sdk.runs[1]!.options.model).toBe('claude-sonnet-5-5[1m]');
   expect(held.settings!().model).toBe('sonnet[1m]');
+});
+
+it('reports memory backpressure without spawning or replaying and resumes after recovery', async () => {
+  let blocked = true;
+  const sent: Record<string, unknown>[] = [];
+  const held = session({ idleTimeoutMs: 100, admitResume: () => {
+    if (blocked) throw new Error('Host capacity temporarily unavailable: memory pressure');
+    return () => {};
+  }, emit: (_channel, action) => { sent.push(action as Record<string, unknown>); } });
+  await settle();
+  await vi.advanceTimersByTimeAsync(100);
+  held.begin('blocked', 'Do not lose this request');
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(sdk.runs[0]!.prompts).toHaveLength(0);
+  expect(JSON.stringify(sent)).toContain('memory pressure');
+  blocked = false;
+  held.begin('retry', 'Retry explicitly');
+  await settle();
+  expect(sdk.runs).toHaveLength(2);
+  expect(sdk.runs[1]!.prompts).toHaveLength(1);
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).toContain('Retry explicitly');
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).not.toContain('Do not lose this request');
 });

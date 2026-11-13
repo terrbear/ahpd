@@ -6,7 +6,7 @@ import type { HistoricalTurnStatus, Listed } from '@ahpd/sdk';
 import type { WatchedSession } from './types.js';
 import { turnsOf } from './transcript.js';
 
-type Entry = Omit<WatchedSession, 'turns'> & { hostIds: string[] };
+type Entry = Omit<WatchedSession, 'turns' | 'steering'> & { hostIds: string[] };
 export interface AcpCatalog {
   get(id: string): WatchedSession | undefined;
   list(): Listed[];
@@ -152,7 +152,7 @@ export function persistentCatalog(directory: string, provider: string): AcpCatal
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
       }
       const previous = entries.get(record.id);
-      const { turns, ...fields } = record;
+      const { turns, steering: _steering, ...fields } = record;
       const entry = { ...fields, hostIds: [...new Set([...(previous?.hostIds ?? []), hostId])] };
       write(recordPath, {
         ...record,

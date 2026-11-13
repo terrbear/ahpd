@@ -184,7 +184,7 @@ const entrySchema = {
  * these tools are offered, so the model knows when to call them. Here it
  * goes into the agent's instructions, which is the same thing said once.
  */
-const ARTIFACT_TOOLS_INSTRUCTION = `Record notable artifacts and references with \`${ADD}\` so they are surfaced next to the chat input. Registration is optional, not an inventory of everything saved; default to no registration. ${CLASSIFICATION} Other artifacts are deliverables the user explicitly requested or standalone results the user is clearly likely to reopen, download, or reuse; references are existing resources the user will likely want to view. Batch related entries in one call when practical. Do not record routine files, scratch files, caches, logs, intermediate results, or configuration snapshots unless the user asked for them as deliverables; persistence or location outside the workspace is not an eligibility signal. Do not record incidental resources, commits you create unless the user asks, or sessions and chats created with session-management tools. Never create, copy, or relocate a file solely to have an artifact to register.`;
+const ARTIFACT_TOOLS_INSTRUCTION = `Optionally pin notable deliverables, pull requests and issues beside the chat with \`${ADD}\` (load it through ToolSearch); its description has the rules.`;
 
 /*
  * The compact wording, copied from the reference host's `getDefinitions`.
@@ -220,11 +220,11 @@ export const artifactTools = (): HostTool[] => [
       instruction: COMPACT_ARTIFACT_TOOLS_INSTRUCTION,
     },
     /*
-     * The reference's rule: the add tool the instruction names is never
-     * deferred, and remove and list are, since the model reaches them through
-     * the discovery the instruction points at.
+     * Deferred like the rest: the one-line instruction points at ToolSearch,
+     * and the classification rules load with this description when it is
+     * searched, so neither costs tokens on a request that never records one.
      */
-    deferLoading: false,
+    deferLoading: true,
     run: (input, at) => {
       const wanted = parseArtifacts(input, ADD);
       for (const one of wanted) {

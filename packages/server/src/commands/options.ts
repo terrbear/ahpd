@@ -1,3 +1,4 @@
+import type { AdmissionSettings } from '../admission.js';
 /**
  * The daemon's flags as one declaration, and the file underneath them.
  *
@@ -23,6 +24,7 @@ import { proxyConfiguration, proxyProblems, proxySchema, type ProxyConfiguration
 
 /** What this daemon was told, after argv and the configuration file were folded. */
 export interface Options {
+  admission?: AdmissionSettings;
   /** TCP port to bind. 0 lets the OS choose. */
   port: number;
   /** Address to bind. Loopback unless asked otherwise. */
@@ -234,6 +236,16 @@ export const serverFields = {
     enum: ['file', 'memory'],
     description: "Where the read and archived bits and a session's settings go.",
   },
+  admission: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      memoryLimitMb: { type: 'integer', minimum: 64 },
+      minimumFreeMb: { type: 'integer', minimum: 64 },
+      startupReservationMb: { type: 'integer', minimum: 16 },
+      startupReservationMs: { type: 'integer', minimum: 1000, maximum: 300000 },
+    },
+  },
   usage: {
     type: 'object',
     properties: {
@@ -288,7 +300,7 @@ export const serverFields = {
 } satisfies Record<string, Field>;
 
 /** The fields only the configuration file sets, which have no flag. */
-const FILE_ONLY = ['http', 'usage', 'proxy', 'mcpServers'] as const;
+const FILE_ONLY = ['http', 'usage', 'proxy', 'mcpServers', 'admission'] as const;
 
 /** The flags that mean something only when typed, which the file does not set. */
 const TYPED_ONLY = ['stdio', 'configFile', 'noPlugins', 'pluginOptions'] as const;
@@ -657,6 +669,7 @@ export function optionsFrom(input: Readonly<Record<string, unknown>>): Options {
     automations: given('automations') ?? 'file',
     sessions: given('sessions') ?? 'file',
     usagePer: given('usage')?.per ?? 'turn',
+    ...(given('admission') === undefined ? {} : { admission: given('admission') }),
     ...(usageZone === undefined ? {} : { usageTimezone: usageZone }),
     ...(wire === undefined ? {} : { wire }),
     ...(mcpServers === undefined ? {} : { mcpServers }),

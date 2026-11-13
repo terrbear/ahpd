@@ -359,6 +359,7 @@ export const sessionTools = (): HostTool[] => [
       },
       annotations: { title: 'List Sessions', readOnlyHint: true, openWorldHint: false },
     },
+    deferLoading: true,
     run: async (input, at) => JSON.stringify({ sessions: filterSessions(await at.sessions(), input).map(serializeSession) }),
   },
   {
@@ -369,6 +370,7 @@ export const sessionTools = (): HostTool[] => [
       inputSchema: { type: 'object', properties: {} },
       annotations: { title: 'Get Current Session', readOnlyHint: true, openWorldHint: false },
     },
+    deferLoading: true,
     run: async (_input, at) => {
       const row = await self(at);
       return JSON.stringify({
@@ -393,6 +395,7 @@ export const sessionTools = (): HostTool[] => [
       },
       annotations: { title: 'Set Workspace', readOnlyHint: false, destructiveHint: true },
     },
+    deferLoading: true,
     run: (input, at) => {
       const tool = 'set_workspace';
       if (at.turn() === undefined) throw new Error(`${tool} must run from an active chat turn.`);
@@ -426,6 +429,7 @@ export const sessionTools = (): HostTool[] => [
       },
       annotations: { title: 'Create Session', readOnlyHint: false, destructiveHint: true },
     },
+    deferLoading: true,
     run: async (input, at) => {
       const tool = 'create_session';
       const relationship = required(input.relationship, 'relationship', tool);
@@ -480,6 +484,7 @@ export const sessionTools = (): HostTool[] => [
       },
       annotations: { title: 'Create Chat', readOnlyHint: false, destructiveHint: true },
     },
+    deferLoading: true,
     run: async (input, at) => {
       const tool = 'create_chat';
       const asked = optional(input.session, 'session', tool);
@@ -509,6 +514,7 @@ export const sessionTools = (): HostTool[] => [
       },
       annotations: { title: 'Rename Chat', readOnlyHint: false, destructiveHint: false },
     },
+    deferLoading: true,
     /*
      * What a session's strategy asks of this tool. A utility strategy withholds
      * it whole, which the host does by leaving it out of the list; a deferred
@@ -561,6 +567,7 @@ export const sessionTools = (): HostTool[] => [
       },
       annotations: { title: 'Send Message', readOnlyHint: false, destructiveHint: true },
     },
+    deferLoading: true,
     run: async (input, at) => {
       const tool = 'send_message';
       const message = required(input.message, 'message', tool);
@@ -588,6 +595,7 @@ export const sessionTools = (): HostTool[] => [
       }, required: ['session', 'turnId'] },
       annotations: { title: 'Interrupt Session', readOnlyHint: false, destructiveHint: true },
     },
+    deferLoading: true,
     run: async (input, at) => {
       const found = await known(at, required(input.session, 'session', 'interrupt_session'), 'interrupt_session');
       const chats = at.chats(found.session.resource);
@@ -614,6 +622,7 @@ export const sessionTools = (): HostTool[] => [
       },
       annotations: { title: 'Get Session Context', readOnlyHint: true, openWorldHint: false },
     },
+    deferLoading: true,
     run: async (input, at) => {
       const tool = 'get_session_context';
       const found = await known(at, required(input.session, 'session', tool), tool);
@@ -653,6 +662,7 @@ export const sessionTools = (): HostTool[] => [
       },
       annotations: { title: 'Delete Session', readOnlyHint: false, destructiveHint: true },
     },
+    deferLoading: true,
     run: async (input, at) => {
       const tool = 'delete_session';
       const found = await known(at, required(input.session, 'session', tool), tool);

@@ -65,6 +65,25 @@ may reject these requests. The bundled SDK minimum is 0.3.293 (Claude Code
 v2.1.293); this source dependency update does not upgrade a separately installed
 CLI or grant account access.
 
+### Session configuration isolation
+
+Set the per-session `claudeConfigIsolation` selector to `default` or `isolated`.
+`default` preserves current behavior. `isolated` passes `settingSources: []`,
+`strictMcpConfig: true`, and `plugins: []` to the SDK. It uses only host-declared
+MCP servers and keeps AHP tools. It is separate from `builtInTools`.
+
+This is not a full CLI state sandbox. It does not disable `~/.claude.json`,
+auto-memory, built-in CLI agents or plugins, or administrator-managed policy.
+
+### Preset CLI arguments
+
+Set the per-session `extraArgsPolicy` selector to `preset` or `none`.
+`preset` is the default and keeps preset-owned `extraArgs`. `none` omits only
+those arguments from each SDK query, including idle restarts, restoration and
+forks. The selector is fixed when the session is created. Other preset options,
+provider environment and credentials, model, effort, permissions, MCP servers
+and tools stay unchanged. This does not isolate other Claude configuration.
+
 ### Presets
 
 A preset is a set of Claude options an operator writes once and sessions run on, rather than options each session offers a control for. Two of them give a session a `preset` to choose from, fixed when the session is created:
@@ -95,6 +114,20 @@ A preset holds five fields, and each is checked when the plugin loads, so a pres
 With one preset there is nothing to choose and every session runs on it; with none, a session runs on what this backend has always run on, which is `thinking: "adaptive"` and no sandbox layer. The first preset is the default in both senses, and a session whose own stored `preset` names one that has since been renamed or removed runs on the first, which is what is left of a choice that no longer resolves.
 
 A client may set the session's `shellXdgConfigHome` to the user's `XDG_CONFIG_HOME`. An empty string unsets it for Claude's Bash tool, letting tools use `HOME/.config`. Host-managed terminals accept the same setting per connection through `root/configChanged`. An operator can set `AHPD_SHELL_XDG_CONFIG_HOME` in the daemon environment as the fallback for both kinds of shell; an explicitly empty value unsets XDG in shells. The client setting wins over the operator setting. These settings change only shell commands; the daemon and Claude CLI keep their own environment, including any private XDG directory from the launcher or provider preset. With neither setting, shells keep their inherited XDG value.
+
+### Contributed tools per session
+
+`contributedTools` is fixed when a session is created. Its default, `"default"`, offers host and active-client tools through the AHP MCP bridge. `"none"` omits those contributions before SDK query creation and ignores later contribution updates. `"artifacts"` offers only the three artifact host tools (`add_artifact_or_reference`, `list_artifacts_and_references`, `remove_artifact_or_reference`) plus active-client tools; the other host tools (session, workspace, terminal and resource tools) are left out, including from later updates. The artifact instruction and ToolSearch for deferred artifact tools stay. Clients can detect support by finding `artifacts` in the `contributedTools` enum of the session config schema. The selection stays in saved settings and applies to recreated queries, restored sessions, forks, and new chats in the session.
+
+This selector does not disable Claude built-in tools or external MCP servers. In isolated configuration mode, explicit host `mcpServers` still reach the SDK at initialization, before any dynamic server toggles. This setting is not a network or filesystem sandbox, and it does not prove an empty SDK tool manifest.
+
+### Tool execution fence
+
+`toolExecutionFence` is fixed at session creation. `"off"` preserves ordinary behavior and `"deny-all"` blocks every tool. `"allowlist"` requires an explicit `toolExecutionAllowlist` array: at most 512 unique exact tool names, each 1–256 ASCII letters, digits, underscores or hyphens. An empty array denies every tool; wildcards and duplicate names are rejected. A nonempty list with any other mode is rejected.
+
+Allowlist mode denies unlisted calls through both an unconditional `PreToolUse` hook and `canUseTool`, ahead of normal permission decisions, including tools already approved in ordinary permission lists. Listed calls still pass through the existing hooks and permission checks. The list is copied and frozen at creation and retained in saved settings for query recreation, restoration and forks.
+
+The fence neither hides tool declarations nor authenticates a tool's MCP transport. A fixture-only integration must separately bind its transport and source, disable unrelated declarations and built-ins, verify the SDK tool inventory and retain those constraints across lifecycle changes. This control is not a network sandbox or a correctness validator.
 
 ### A second Claude on another endpoint
 

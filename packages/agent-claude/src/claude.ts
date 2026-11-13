@@ -286,6 +286,75 @@ export function claude(options: ClaudeOptions): Agent {
        * the Python environment the window has selected for the folder. No
        * `default`, so absent stays tellable from an explicit empty list.
        */
+      builtInTools: {
+        scope: 'session',
+        type: 'string',
+        title: 'Claude Code Tools',
+        description: 'Use Claude Code built-in tools or disable them. MCP tools remain available.',
+        enum: ['default', 'none'],
+        enumLabels: ['Default built-in tools', 'No built-in tools'],
+        default: 'default',
+        sessionMutable: false,
+      },
+      contributedTools: {
+        scope: 'session',
+        type: 'string',
+        title: 'Host and Client Tools',
+        description: 'Offer contributed host and active-client tools through AHP, only the artifact host tools plus active-client tools, or omit them all. Explicit external MCP servers and Claude built-in tools stay unchanged. Fixed when the session is created.',
+        enum: ['default', 'none', 'artifacts'],
+        enumLabels: ['Default contributed tools', 'No contributed tools', 'Artifact host tools and client tools'],
+        default: 'default',
+        sessionMutable: false,
+      },
+      extraArgsPolicy: {
+        scope: 'session',
+        type: 'string',
+        title: 'Preset CLI Arguments',
+        description: 'Use preset extra CLI arguments or discard them. Other preset options stay unchanged. Fixed when the session is created.',
+        enum: ['preset', 'none'],
+        enumLabels: ['Use preset arguments', 'No preset arguments'],
+        default: 'preset',
+        sessionMutable: false,
+      },
+      claudeConfigIsolation: {
+        scope: 'session',
+        type: 'string',
+        title: 'Claude Configuration',
+        description: 'Uses settingSources: [], strictMcpConfig: true, and plugins: []. Keeps host MCP and AHP tools. ' +
+          'Does not disable ~/.claude.json, auto-memory, built-in CLI agents/plugins, or administrator policy.',
+        enum: ['default', 'isolated'],
+        enumLabels: ['Default Claude configuration', 'Isolated session configuration'],
+        default: 'default',
+        sessionMutable: false,
+      },
+      captureSdkInitToolManifest: {
+        scope: 'session',
+        type: 'string',
+        title: 'Capture Claude SDK Tool Names',
+        description: 'When enabled, exposes only tool names from the Claude SDK system/init message in this session metadata. Disabled by default.',
+        enum: ['disabled', 'enabled'],
+        enumLabels: ['Do not capture', 'Capture tool names'],
+        default: 'disabled',
+        sessionMutable: false,
+      },
+      toolExecutionFence: {
+        scope: 'session',
+        type: 'string',
+        title: 'Tool Execution Fence',
+        description: 'Off keeps normal tool behavior. Deny all blocks every tool call. Allowlist denies calls outside toolExecutionAllowlist before ordinary permission checks. Fixed when the session is created; names do not authenticate MCP transports.',
+        enum: ['off', 'deny-all', 'allowlist'],
+        enumLabels: ['Off', 'Deny all tool calls', 'Exact tool allowlist'],
+        default: 'off',
+        sessionMutable: false,
+      },
+      toolExecutionAllowlist: {
+        scope: 'session',
+        type: 'array',
+        title: 'Tool Execution Allowlist',
+        description: 'At most 512 unique exact tool names, each 1-256 ASCII letters, digits, underscores or hyphens. Still subject to ordinary permissions. Empty denies every tool. Fixed when the session is created.',
+        items: { type: 'string', title: 'Exact tool name' },
+        sessionMutable: false,
+      },
       shellInitScripts: {
         scope: 'session',
         type: 'array',
@@ -308,6 +377,14 @@ export function claude(options: ClaudeOptions): Agent {
         type: 'string',
         title: 'Shell XDG Config Home',
         description: 'The client\'s XDG config directory for shell commands. An empty value unsets XDG_CONFIG_HOME.',
+        readOnly: true,
+        sessionMutable: true,
+      },
+      shellPath: {
+        scope: 'session',
+        type: 'string',
+        title: 'Shell PATH',
+        description: 'The client PATH for shell commands. An empty value keeps the daemon PATH.',
         readOnly: true,
         sessionMutable: true,
       },
@@ -351,6 +428,12 @@ export function claude(options: ClaudeOptions): Agent {
     // a control a client cannot show and cannot change.
     ...(perModelEffort ? {} : { effortLevel: 'high' }),
     permissions: { allow: [], deny: [] },
+    builtInTools: 'default',
+    contributedTools: 'default',
+    extraArgsPolicy: 'preset',
+    claudeConfigIsolation: 'default',
+    captureSdkInitToolManifest: 'disabled',
+    toolExecutionFence: 'off',
     ...(presets.length > 1 ? { preset: first } : {}),
   });
 
@@ -572,6 +655,7 @@ export function claude(options: ClaudeOptions): Agent {
        */
       const inside = insideOf(start);
       return createSession({
+      ...(start.admitResume === undefined ? {} : { admitResume: start.admitResume }),
       ...(inside === undefined ? {} : { spawn: inside, spawnExecutable: executable, spawnConfigDir: configDir }),
       ...(options.workerStop !== undefined ? { workerStop: options.workerStop } : {}),
       ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
@@ -580,14 +664,15 @@ export function claude(options: ClaudeOptions): Agent {
       chatUri: start.chatUri,
       cwd: workingDirectory(start.workingDirectory),
       /*
-       * The MCP servers, declared by this host rather than found by the CLI.
+       * The MCP servers this host declares, or the ones found in CLI config.
        *
-       * The same files the CLI reads - `.mcp.json` beside the project and
-       * `mcpServers` in `~/.claude.json` - handed to the SDK so they are
-       * *its* servers. That is what makes a token a client signed in with
-       * applicable: `setMcpServers` re-declares only what the SDK was given.
+       * Default mode preserves its existing filesystem discovery. Isolated
+       * mode takes only explicit Start declarations, so ambient files cannot
+       * add a server while deliberate host MCP and the `ahp` bridge remain.
        */
-      mcpServers: serversFor([workingDirectory(start.workingDirectory), ...(start.additional ?? [])]),
+      mcpServers: start.settings?.claudeConfigIsolation === 'isolated'
+        ? { ...(start.mcpServers ?? {}) }
+        : serversFor([workingDirectory(start.workingDirectory), ...(start.additional ?? [])]),
       // Each one checked the way the first is: a directory this host does not
       // serve is not one an agent may be pointed at, however it arrived.
       ...(start.additional && start.additional.length > 0

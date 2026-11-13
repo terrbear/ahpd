@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { createSdkMcpServer, query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import type { HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, HookCallback, PermissionMode, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { protectedResource, urlOf } from './mcp.js';
 import { lineOf, pastLineOf, summarize, toolInputOf } from './input.js';
 import { toolMetaOf } from './kinds.js';
@@ -17,6 +17,7 @@ import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, Session
 import { spawnFailure } from './spawn.js';
 import { pinnedModel, pinnedModels } from './models.js';
 import { idleQuery } from './idle.js';
+import { executionFenceOf } from './tool-execution-fence.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
 import type { Asked, Spawned } from './spawn.js';
 
@@ -69,7 +70,30 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const bag = (value: unknown): Bag => (typeof value === 'object' && value !== null ? value as Bag : {});
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+
+const DENY_ALL_TOOL_MESSAGE = 'Tool execution is disabled for this session.';
+const denyAllPreToolUse: HookCallback = async () => ({
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse',
+    permissionDecision: 'deny',
+    permissionDecisionReason: DENY_ALL_TOOL_MESSAGE,
+  },
+});
+const denyAllCanUseTool: CanUseTool = async () => ({ behavior: 'deny', message: DENY_ALL_TOOL_MESSAGE });
+
+/** Keep non-tool lifecycle hooks, but replace every prior tool gate. */
+export const replacePreToolUseHooks = (existing: unknown, preToolUse: unknown[]): Bag => ({
+  ...bag(existing),
+  PreToolUse: preToolUse,
+});
 const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
+const initToolNamesOf = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value) || value.length > 512) return undefined;
+  const names = value as unknown[];
+  if (!names.every((name): name is string => typeof name === 'string' && name.length > 0 && name.length <= 256 && !/[\x00-\x1f\x7f]/.test(name))) return undefined;
+  return names.slice();
+};
+const SDK_INIT_TOOL_MANIFEST = 'ahpd.claudeSdkInitToolManifest';
 
 /**
  * Which half of one API call's usage each streaming event reports.
@@ -627,12 +651,13 @@ const contributed = (
       description: one.definition.description ?? one.definition.title ?? name,
       inputSchema: inputShape(one.definition.inputSchema),
       /*
-       * A raw SDK definition, not the SDK's `tool()` helper, so the eager flag
-       * rides `_meta`. Passed only when the host defined it: `false` is the
-       * SDK's own default, and an undefined one must pass nothing so every
-       * other host and client tool keeps that default.
+       * A raw SDK definition, not the SDK's `tool()` helper, so the load policy
+       * rides `_meta`. Keep client-published tools eager. Host tools use the
+       * host's deferLoading hint; an absent host hint keeps the SDK default.
        */
-      ...(one.deferLoading !== undefined ? { _meta: { 'anthropic/alwaysLoad': !one.deferLoading } } : {}),
+      ...(one.owner !== undefined || one.deferLoading !== undefined
+        ? { _meta: { 'anthropic/alwaysLoad': one.owner !== undefined || !one.deferLoading } }
+        : {}),
       ...(one.definition.annotations ? { annotations: one.definition.annotations } : {}),
       handler: async (input: Record<string, unknown>) => {
         working(true);
@@ -690,6 +715,7 @@ export interface ClaudeSessionOptions extends SessionOptions {
    */
   workerStop?: 'worker' | 'session';
   idleTimeoutMs?: number;
+  admitResume?: () => () => void;
   /**
    * The presets `claude()` was configured with, by name.
    *
@@ -721,10 +747,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const timingOrigin = performance.now();
   let startupTimingEnabled = true;
   let timingGeneration = 0;
-  const timing = (stage: string, outcome: string): void => {
-    if (!startupTimingEnabled && !stage.startsWith('describe')) return;
+  const timing = (stage: string, outcome: string, metadata?: { turn_id?: string; effort_level?: typeof EFFORTS[number] }): void => {
+    if (!startupTimingEnabled && !stage.startsWith('describe') && stage !== 'effort_application') return;
     try {
-      options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), generation: timingGeneration, stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)) })}`);
+      options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), generation: timingGeneration, stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)), ...metadata })}`);
     } catch {}
   };
 
@@ -769,6 +795,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   let failed: string | undefined;
   let gone: string | undefined;
   let startedAt = 0;
+  let effortApplication: Promise<void> | undefined;
   /**
    * The model the turn now running actually answered on, as its own frames
    * reported it.
@@ -779,7 +806,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * on a historic turn and to size the context window that turn used.
    */
   let ran: string | undefined;
-  let handshake: Bag | undefined;
+  let handshakeModel: string | undefined;
   /**
    * The id the agent gave this session, which is not the URI it is served at.
    *
@@ -839,6 +866,61 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * backend declared a string are narrowed where they are read.
    */
   const settings: Record<string, unknown> = { permissionMode: 'default', ...options.settings };
+  const executionFence = executionFenceOf(settings);
+  settings.toolExecutionFence = executionFence.mode;
+  settings.toolExecutionAllowlist = executionFence.names;
+  const denyAllToolExecution = executionFence.mode === 'deny-all';
+  if (settings.builtInTools !== undefined && settings.builtInTools !== 'default' && settings.builtInTools !== 'none') {
+    throw new Error('builtInTools must be one of default, none');
+  }
+  const disableBuiltInTools = settings.builtInTools === 'none';
+  const contributedTools = settings.contributedTools === undefined ? 'default' : settings.contributedTools;
+  if (contributedTools !== 'default' && contributedTools !== 'none' && contributedTools !== 'artifacts') {
+    throw new Error('contributedTools must be one of default, none, artifacts');
+  }
+  settings.contributedTools = contributedTools;
+  const disableContributedTools = contributedTools === 'none';
+  /** `artifacts` keeps client tools and only the three artifact host tools. */
+  const artifactHostTools: ReadonlySet<string> = new Set([
+    'add_artifact_or_reference', 'list_artifacts_and_references', 'remove_artifact_or_reference',
+  ]);
+  const allowedContribution = (tools: readonly BoundTool[]): BoundTool[] => contributedTools === 'artifacts'
+    ? tools.filter((one) => one.owner !== undefined || artifactHostTools.has(one.definition.name))
+    : [...tools];
+  const extraArgsPolicy = settings.extraArgsPolicy === undefined ? 'preset' : settings.extraArgsPolicy;
+  if (extraArgsPolicy !== 'preset' && extraArgsPolicy !== 'none') {
+    throw new Error('extraArgsPolicy must be one of preset, none');
+  }
+  settings.extraArgsPolicy = extraArgsPolicy;
+  const configIsolation = settings.claudeConfigIsolation === undefined ? 'default' : settings.claudeConfigIsolation;
+  if (configIsolation !== 'default' && configIsolation !== 'isolated') {
+    throw new Error('claudeConfigIsolation must be one of default, isolated');
+  }
+  // Keep the resolved value in session state so an absent selector is explicit.
+  settings.claudeConfigIsolation = configIsolation;
+  const isolateClaudeConfig = configIsolation === 'isolated';
+  const manifestCapture = settings.captureSdkInitToolManifest === undefined ? 'disabled' : settings.captureSdkInitToolManifest;
+  if (manifestCapture !== 'disabled' && manifestCapture !== 'enabled') {
+    throw new Error('captureSdkInitToolManifest must be one of disabled, enabled');
+  }
+  settings.captureSdkInitToolManifest = manifestCapture;
+  const captureSdkInitToolManifest = manifestCapture === 'enabled';
+  let sdkInitToolManifest: Bag | undefined = captureSdkInitToolManifest
+    ? { status: 'unknown', sessionUri: uri, generation: 0 }
+    : undefined;
+  let manifestBoundNativeId: string | undefined = captureSdkInitToolManifest ? options.resume ?? reservedNativeId : undefined;
+  let manifestForkPending = false;
+  const sessionMeta = (): Bag | undefined => {
+    const meta: Bag = {};
+    const model = chosen ?? handshakeModel;
+    if (model !== undefined) meta.model = model;
+    if (sdkInitToolManifest !== undefined) meta[SDK_INIT_TOOL_MANIFEST] = sdkInitToolManifest;
+    return Object.keys(meta).length === 0 ? undefined : meta;
+  };
+  const publishSessionMeta = (): void => {
+    const meta = sessionMeta();
+    options.emit('session', { type: 'session/metaChanged', ...(meta === undefined ? {} : { _meta: meta }) });
+  };
 
   /*
    * The declared Claude options this session runs on, by field.
@@ -896,7 +978,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const xdg = typeof settings.shellXdgConfigHome === 'string'
       ? settings.shellXdgConfigHome
       : process.env.AHPD_SHELL_XDG_CONFIG_HOME;
+    const shellPath = typeof settings.shellPath === 'string' ? settings.shellPath : undefined;
     const prefix = [
+      ...(shellPath ? [`export PATH='${shellPath.replaceAll("'", "'\\''")}'${'${PATH:+:$PATH}'}`] : []),
       ...(typeof xdg === 'string'
         ? [xdg === '' ? 'unset XDG_CONFIG_HOME' : `export XDG_CONFIG_HOME='${xdg.replaceAll("'", "'\\''")}'`]
         : []),
@@ -981,7 +1065,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * than read from `options` once, and `setTools` re-declares the server the
    * model reaches them through.
    */
-  let offering: BoundTool[] = [...(options.tools ?? [])];
+  let offering: BoundTool[] = disableContributedTools ? [] : allowedContribution(options.tools ?? []);
   let contributedCalls = 0;
   const contributedWork = (running: boolean): void => {
     contributedCalls += running ? 1 : -1;
@@ -2612,7 +2696,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       permissionDecision: approved ? 'allow' : 'deny',
       permissionDecisionReason: approved
         ? `AHP human approved this call for ${scope.keys.join(', ')}.`
-        : 'AHP human confirmation was denied.',
+        : str(answer.message) || 'AHP human confirmation was denied.',
     } };
   };
 
@@ -2622,6 +2706,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const dependencies = new Set<string>();
   const disabledServers = new Set<string>();
   const idle = idleQuery<ReturnType<typeof query>>({
+    ...(options.admitResume === undefined ? {} : { admitResume: options.admitResume }),
     timeout: options.spawn === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
     timing,
     eligible: () => !closed && gone === undefined && !busy()
@@ -2645,10 +2730,19 @@ export function createSession(options: ClaudeSessionOptions): Session {
     },
     create: (generation) => {
       timingGeneration = generation;
+      if (captureSdkInitToolManifest) {
+        sdkInitToolManifest = { status: 'unknown', sessionUri: uri, generation };
+        publishSessionMeta();
+      }
       const signal = new AbortController();
       let childExit: ReturnType<typeof processExit> | undefined;
       let resume = options.resume;
       if (generation > 0) resume = hasNativePrompt ? agentId ?? reservedNativeId : undefined;
+      if (captureSdkInitToolManifest) {
+        manifestForkPending = generation === 0 && options.forkAt !== undefined;
+        if (manifestForkPending) manifestBoundNativeId = undefined;
+        else manifestBoundNativeId ??= resume ?? agentId ?? reservedNativeId;
+      }
       if (generation > 0) {
         paid.clear();
         backgroundSnapshot = false;
@@ -2659,6 +2753,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
         }
         if (offering.length > 0) declared.ahp = contributed(offering, clientRunner(), contributedWork) as Bag;
       }
+      const presetQuery = { ...fromPreset };
+      if (extraArgsPolicy === 'none') delete presetQuery.extraArgs;
       const handle = query({
         prompt: input(signal.signal),
         options: {
@@ -2666,7 +2762,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
           spawnClaudeCodeProcess: (asked: Asked) => {
             timing('sdk_spawn_hook', 'start');
             try {
-              const child = (options.spawn ?? spawnLocal)(asked);
+              // ToolSearch is required for deferred host tools; leave opted-out sessions unchanged.
+              const processAsked = disableContributedTools
+                ? asked
+                : { ...asked, env: { ...asked.env, ENABLE_TOOL_SEARCH: 'true' } };
+              const child = (options.spawn ?? spawnLocal)(processAsked);
               childExit = processExit(child);
               timing('sdk_spawn_hook', 'returned');
               return child;
@@ -2716,6 +2816,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * `setMcpServers` does not touch servers that came from a settings file.
            */
           ...(Object.keys(declared).length > 0 ? { mcpServers: { ...declared } as never } : {}),
+          // A per-session opt-out of the SDK's built-in tool set. MCP servers
+          // remain separate. Deferred host tools still need ToolSearch, which
+          // does not enable any of Claude's other built-in tools.
+          ...(disableBuiltInTools
+            ? { tools: offering.some((one) => one.owner === undefined && one.deferLoading === true) ? ['ToolSearch'] : [] }
+            : {}),
+          // Settings sources, plugins, and filesystem MCP discovery are kept
+          // separate from intentional host declarations in isolated mode.
+          ...(isolateClaudeConfig ? { settingSources: [], strictMcpConfig: true, plugins: [] } : {}),
           /*
            * What the host wants said, after the CLI's own prompt.
            *
@@ -2747,18 +2856,24 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * the subprocess simply inherits, which is how every session worked
            * before this and how an automation's still does.
            */
-          ...fromPreset,
+          ...presetQuery,
+          settings: { ...(fromPreset.settings as Bag | undefined), disableClaudeAiConnectors: true },
           ...(options.env ? { env: { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env } } : {}),
           // From the settings, which is where it lives: it is a config key like
           // the others, and a second way in was a second thing to keep in step.
           ...(typeof settings.permissionMode === 'string' ? { permissionMode: settings.permissionMode } : {}),
           ...(chosen === undefined ? {} : { model: modelId(chosen) }),
           ...(typeof settings.effortLevel === 'string' ? { effort: settings.effortLevel } : {}),
-          // Before every shell command, while a client has a script in force.
-          hooks: { PreToolUse: [
-            { matcher: 'Bash', hooks: [sourceFirst] },
-            { matcher: 'mcp__.*', hooks: [requireJiraScope], timeout: 1800 },
-          ] },
+          hooks: denyAllToolExecution
+            ? replacePreToolUseHooks(fromPreset.hooks, [{ hooks: [denyAllPreToolUse] }])
+            : {
+                PreToolUse: [
+                  ...(executionFence.mode === 'allowlist' ? [{ hooks: [executionFence.preToolUse] }] : []),
+                  // Before every shell command, while a client has a script in force.
+                  { matcher: 'Bash', hooks: [executionFence.wrapHook(sourceFirst)] },
+                  { matcher: 'mcp__.*', hooks: [executionFence.wrapHook(requireJiraScope)], timeout: 1800 },
+                ],
+              },
           /*
            * The lists, at the moment the query is built.
            *
@@ -2795,7 +2910,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
             ? { resumeSessionAt: options.rewindAt }
             : {}),
           ...(resume === undefined ? { sessionId: agentId ?? reservedNativeId } : {}),
-          canUseTool,
+          canUseTool: denyAllToolExecution ? denyAllCanUseTool : executionFence.wrap(canUseTool as CanUseTool),
         },
       } as Parameters<typeof query>[0]);
       return {
@@ -2924,6 +3039,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
       return;
     }
     beginning = turnId;
+    const previousEffortApplication = effortApplication;
+    if (previousEffortApplication !== undefined) {
+      try { await previousEffortApplication; } catch {}
+      if (closed || beginning !== turnId) return;
+    }
     if (model !== undefined && model.id !== chosen) {
       touch();
       let refused: string | undefined;
@@ -2988,9 +3108,26 @@ export function createSession(options: ClaudeSessionOptions): Session {
     if (closed || beginning !== turnId || str(active?.id) !== turnId) return;
     const level = EFFORTS.find((one) => one === (model?.config ?? {}).thinkingLevel);
     if (level !== undefined && level !== settings.effortLevel) {
+      const metadata = { turn_id: turnId.slice(0, 128), effort_level: level };
+      timing('effort_application', 'start', metadata);
+      let application: Promise<void> | undefined;
+      try {
+        application = handle.applyFlagSettings({ effortLevel: level });
+        effortApplication = application;
+        await application;
+      } catch (error: unknown) {
+        timing('effort_application', 'error', metadata);
+        if (!closed && beginning === turnId && str(active?.id) === turnId)
+          reject(error instanceof Error ? error.message : String(error));
+        return;
+      } finally {
+        if (application !== undefined && effortApplication === application) effortApplication = undefined;
+      }
+      timing('effort_application', 'ok', metadata);
+      if (closed) return;
       settings.effortLevel = level;
-      void handle.applyFlagSettings({ effortLevel: level }).catch(() => {});
       emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
+      if (beginning !== turnId || str(active?.id) !== turnId) return;
     }
     beginning = undefined;
     let sent = carried === undefined ? text : `${carried}\n\n${text}`;
@@ -3242,8 +3379,20 @@ export function createSession(options: ClaudeSessionOptions): Session {
         const type = str(message.type);
         // Every message carries it, so this needs no particular one to arrive.
         const said = str(message.session_id);
+        const expectedNativeId = agentId ?? reservedNativeId;
+        let matchesExpectedNativeId = false;
+        if (captureSdkInitToolManifest && said !== undefined) {
+          if (manifestBoundNativeId !== undefined) matchesExpectedNativeId = said === manifestBoundNativeId;
+          else if (manifestForkPending) {
+            // A requested fork gets its own native id. Bind it once, from this
+            // query generation, then require the same id for its init frame.
+            manifestBoundNativeId = said;
+            manifestForkPending = false;
+            matchesExpectedNativeId = true;
+          }
+        }
         if (said) {
-          if (idle.generation() > 0 && (agentId ?? reservedNativeId) !== said) {
+          if (idle.generation() > 0 && expectedNativeId !== said) {
             const error = new Error('Claude resumed a different native session; refusing to continue');
             throw error;
           }
@@ -3261,8 +3410,20 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
         // The message stream's own init. Capabilities come from the control
         // protocol instead (see `describe`), because those are needed before
-        // a turn; what this adds is the model the turn actually ran on.
-        if (type === 'system' && str(message.subtype) === 'init') { handshake = message; continue; }
+        // a turn; what this adds is the model the turn actually ran on. The
+        // optional manifest keeps only the reported names, never the SDK frame.
+        if (type === 'system' && str(message.subtype) === 'init') {
+          handshakeModel = str(message.model);
+          if (captureSdkInitToolManifest) {
+            const nativeSessionId = matchesExpectedNativeId ? said : undefined;
+            const toolNames = matchesExpectedNativeId ? initToolNamesOf(message.tools) : undefined;
+            sdkInitToolManifest = toolNames === undefined
+              ? { status: 'unknown', sessionUri: uri, generation: idle.generation(), ...(nativeSessionId === undefined ? {} : { nativeSessionId }) }
+              : { status: 'observed', sessionUri: uri, generation: idle.generation(), ...(nativeSessionId === undefined ? {} : { nativeSessionId }), toolNames };
+            publishSessionMeta();
+          }
+          continue;
+        }
 
         /*
          * The harness compacted its context.
@@ -3680,9 +3841,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
        * beside `title` and `provider` reads like a declared field, which is a
        * mistake somebody has already made with this one.
        */
-      ...(chosen ?? str(bag(handshake).model)
-        ? { _meta: { model: (chosen ?? str(bag(handshake).model)) as string } }
-        : {}),
+      ...(sessionMeta() === undefined ? {} : { _meta: sessionMeta() }),
       // Set only while something is wanted. A key that is always present and
       // sometimes empty is a client that has to guess which it is.
       ...(pending.size + byClient.size > 0 ? { inputNeeded: [
@@ -4194,7 +4353,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       void handle.stopTask(task).catch(() => {});
     },
 
-    confirm: (toolCallId, approved, optionId) => {
+    confirm: (toolCallId, approved, optionId, reasonMessage) => {
       // Found by id rather than assumed to be the only one. This used to
       // compare against whichever question happened to be held and return
       // silently when it did not match - which, with two tool calls open, is
@@ -4232,12 +4391,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
         turnId: scope.turn?.id,
         toolCallId,
         approved,
-        ...(approved ? { confirmed: 'user-action' } : {}),
+        ...(approved ? { confirmed: 'user-action' } : { reason: 'denied' }),
         ...(picked === undefined ? {} : { selectedOptionId: picked.id }),
+        ...(reasonMessage === undefined ? {} : { reasonMessage }),
       });
+      const reason = typeof reasonMessage === 'string' ? reasonMessage : reasonMessage?.markdown;
       settle(approved
         ? { behavior: 'allow', updatedInput: {}, ...(picked?.id === 'allow-always' && held.suggestions !== undefined ? { updatedPermissions: held.suggestions } : {}) }
-        : { behavior: 'deny', message: 'The person declined this action' });
+        : { behavior: 'deny', message: reason?.trim() ? reason : 'The person declined this action' });
       touch();
     },
 
@@ -4251,6 +4412,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * built.
      */
     setTools: async (next) => {
+      if (disableContributedTools) return true;
+      next = allowedContribution(next);
       const before = offering.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const after = next.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const revision = clientToolsRevision;
@@ -4258,8 +4421,16 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const requested = { ...declared };
       if (next.length > 0) requested.ahp = contributed(next, clientRunner(), contributedWork) as Bag;
       else delete requested.ahp;
-      try { await handle.setMcpServers(requested as never); }
-      catch { return false; }
+      try {
+        if (declared.ahp !== undefined && requested.ahp !== undefined) {
+          const withoutClientTools = { ...requested };
+          delete withoutClientTools.ahp;
+          const removed = await handle.setMcpServers(withoutClientTools as never);
+          if (Object.keys(removed.errors).length > 0) return false;
+        }
+        const result = await handle.setMcpServers(requested as never);
+        if (Object.keys(result.errors).length > 0) return false;
+      } catch { return false; }
       offering = [...next];
       publishedToolsRevision = revision;
       if (requested.ahp === undefined) delete declared.ahp;
@@ -4427,7 +4598,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
          * typed it under - the tool reads the value as the answer itself.
          */
         const inner = bag(answer.value);
-        said[question] = inner.value ?? answer.value ?? value;
+        const selected = inner.value ?? answer.value ?? value;
+        const freeform = list(inner.freeformValues ?? answer.freeformValues)
+          .filter((entry): entry is string => typeof entry === 'string');
+        if (freeform.length === 0) {
+          said[question] = selected;
+          continue;
+        }
+        const selections = Array.isArray(selected) ? selected : [selected];
+        said[question] = [...selections.filter((entry): entry is string => typeof entry === 'string' && entry !== ''), ...freeform].join(', ');
       }
       held.settle({ behavior: 'allow', updatedInput: { questions: held.questions ?? [], answers: said } });
       touch();

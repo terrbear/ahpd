@@ -109,10 +109,10 @@ describe('the three tools', () => {
     await expect(async () => tool('remove_artifact_or_reference').run({}, at)).rejects.toThrow('id must be a non-empty string.');
   });
 
-  it('keeps the add tool eager and lets remove and list be discovered', () => {
+  it('defers all three tools behind discovery', () => {
     const marked = Object.fromEntries(artifactTools().map((one) => [one.definition.name, one.deferLoading]));
     expect(marked).toEqual({
-      add_artifact_or_reference: false,
+      add_artifact_or_reference: true,
       remove_artifact_or_reference: true,
       list_artifacts_and_references: true,
     });
@@ -128,6 +128,12 @@ describe('the three tools', () => {
     // what to call.
     expect(add.compact?.instruction).toContain('add_artifact_or_reference');
     expect(add.compact?.definition?.description).toContain('add_artifact_or_reference');
+    expect(add.instruction).toContain('add_artifact_or_reference');
+    expect(add.instruction).toContain('ToolSearch');
+    expect(add.instruction?.match(/[.!?](?:\s|$)/g)).toHaveLength(1);
+    expect(add.instruction?.length).toBeLessThan(200);
+    // The rules live in the description, which loads only when searched.
+    expect(add.definition.description).toContain('Registration is optional, not an inventory');
     // And only the add tool carries one.
     const others = artifactTools().filter((one) => one.definition.name !== 'add_artifact_or_reference');
     expect(others.every((one) => one.compact === undefined)).toBe(true);

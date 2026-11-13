@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest';
+import type { StringOrMarkdown } from '@microsoft/agent-host-protocol';
 import { createHost } from '../src/host.js';
 import { createPeer, receive } from '../src/rpc.js';
 import { nestedAgent } from '../src/nested.js';
@@ -172,7 +173,7 @@ it('a turn goes in and the inner session\'s actions come out unchanged', async (
 });
 
 it('a permission ask answered outside is seen inside', async () => {
-  const answered: { id: string; approved: boolean; option?: string }[] = [];
+  const answered: { id: string; approved: boolean; option?: string; reasonMessage?: StringOrMarkdown }[] = [];
   const asking: Agent = {
     provider: PROVIDER,
     displayName: 'Cofold',
@@ -200,8 +201,8 @@ it('a permission ask answered outside is seen inside', async () => {
           request: { id: 'req-1', message: 'May I run it?', questions: [{ id: 'q1', kind: 'text', message: 'Allow?', required: true }] },
         });
       },
-      confirm: (toolCallId: string, approved: boolean, optionId?: string) => {
-        answered.push({ id: toolCallId, approved, ...(optionId === undefined ? {} : { option: optionId }) });
+      confirm: (toolCallId: string, approved: boolean, optionId?: string, reasonMessage?: StringOrMarkdown) => {
+        answered.push({ id: toolCallId, approved, ...(optionId === undefined ? {} : { option: optionId }), ...(reasonMessage === undefined ? {} : { reasonMessage }) });
       },
       cancel: () => {}, queue: () => {}, unqueue: () => {}, setDraft: () => {}, reorder: () => {},
       answer: () => {}, setCustomizationEnabled: async () => false, startMcpServer: async () => false,
@@ -230,6 +231,12 @@ it('a permission ask answered outside is seen inside', async () => {
   session.confirm('req-1', true, 'always');
   await until(() => answered.length > 1);
   expect(answered[1]).toStrictEqual({ id: 'req-1', approved: true, option: 'always' });
+  for (const reasonMessage of ['rewrite as issue-worktree-only changes', { markdown: 'Keep **all changes local**.' }]) {
+    const count = answered.length;
+    session.confirm('req-1', false, 'deny', reasonMessage);
+    await until(() => answered.length > count);
+    expect(answered[count]).toStrictEqual({ id: 'req-1', approved: false, option: 'deny', reasonMessage });
+  }
   session.close();
 });
 

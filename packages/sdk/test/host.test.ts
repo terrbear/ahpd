@@ -3,6 +3,7 @@ import type { Peer } from '../src/types/rpc.js';
 import type { Agent } from '../src/types/agent.js';
 import type { OpenedTerminal } from '../src/types/terminals.js';
 import { Status } from '../src/catalog.js';
+import { ARTIFACTS_META } from '../src/artifacttools.js';
 import { fileSessions, memorySessions } from '../src/sessions.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -129,8 +130,13 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
           sdk.mcpDeclareFails--;
           throw new Error('fixture refused the MCP update');
         }
-        fake.options.mcpServers = servers;
-        sdk.mcpDeclared.push(servers);
+        const previous = fake.options.mcpServers as Record<string, { type?: string }> | undefined;
+        const installed = Object.fromEntries(Object.entries(servers).map(([name, server]) => [
+          name, previous?.[name]?.type === 'sdk' ? previous[name] : server,
+        ]));
+        fake.options.mcpServers = installed;
+        sdk.mcpDeclared.push(installed);
+        return { added: [], removed: [], errors: {} };
       },
       // The control protocol: answers without a turn having happened, which
       // is the whole reason capabilities are read from here.
@@ -226,6 +232,12 @@ describe('the handshake', () => {
     // Answering 1.0.0 would be answering with something it cannot read.
     const result = await client.handle(hello(['1.0.0', '0.8.0'])) as { protocolVersion: string };
     expect(result.protocolVersion).toBe('0.8.0');
+  });
+
+  it('advertises human steering for Claude and Codex', async () => {
+    const client = open();
+    const result = await client.handle(hello(['0.9.0'])) as { _meta?: Record<string, unknown> };
+    expect(result._meta?.['ahpd.humanSteering']).toEqual({ version: 1, providers: ['codex', 'claude'] });
   });
 
   it('takes the client\'s order of preference, not its own', async () => {
@@ -1180,6 +1192,24 @@ describe('driving a turn', () => {
       expect(await once.decision).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } });
     });
 
+    it.each([
+      { name: 'plain text', reasonMessage: 'rewrite as issue-worktree-only changes', message: 'rewrite as issue-worktree-only changes' },
+      { name: 'markdown', reasonMessage: { markdown: 'Only edit **the issue worktree**.' }, message: 'Only edit **the issue worktree**.' },
+      { name: 'multiline', reasonMessage: 'Do not push.\nKeep the changes local.', message: 'Do not push.\nKeep the changes local.' },
+      { name: 'missing', reasonMessage: undefined, message: 'The person declined this action' },
+      { name: 'empty', reasonMessage: '', message: 'The person declined this action' },
+      { name: 'blank', reasonMessage: ' \n ', message: 'The person declined this action' },
+    ])('delivers a rejection comment to Claude and watching clients: $name', async ({ reasonMessage, message }) => {
+      const { p, chatUri, decision, answer } = await asking(rule);
+      await answer({ approved: false, selectedOptionId: 'deny', ...(reasonMessage === undefined ? {} : { reasonMessage }) });
+      expect(await decision).toEqual({ behavior: 'deny', message });
+      const echoed = p.notes.find((n) => n.method === 'action'
+        && (n.params as { channel: string }).channel === chatUri && actionOf(n)?.type === 'chat/toolCallConfirmed');
+      expect(actionOf(echoed)).toMatchObject({ approved: false, selectedOptionId: 'deny' });
+      expect(actionOf(echoed)?.reasonMessage).toEqual(reasonMessage);
+      expect(checker().frame(echoed).map((one) => `${one.def} ${one.at} ${one.what}`)).toEqual([]);
+    });
+
     it('says what a mode suggestion does', async () => {
       const { ready } = await asking([{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]);
       const options = actionOf(ready)?.options as { id: string; label: string }[];
@@ -1231,6 +1261,30 @@ describe('driving a turn', () => {
       behavior: 'allow',
       updatedInput: { questions, answers: { 'Which database?': 'SQLite' } },
     });
+  });
+
+  it.each([
+    { name: 'free text', kind: 'selected', value: '', free: ["there's no way to attach anything to a github issue?"], expected: "there's no way to attach anything to a github issue?" },
+    { name: 'choice and free text', kind: 'selected', value: 'SQLite', free: ['Use a temporary database'], expected: 'SQLite, Use a temporary database' },
+    { name: 'multiple choices and free text', kind: 'selected-many', value: ['SQLite', 'Postgres'], free: ['Use isolated fixtures'], expected: 'SQLite, Postgres, Use isolated fixtures' },
+  ])('delivers $name from a submitted question instead of an empty answer', async ({ kind, value, free, expected }) => {
+    for (const synced of [false, true]) {
+      const { client, peer: p, uri } = await running();
+      client.handle({ method: 'dispatchAction', params: { channel: uri, action: { type: 'chat/turnStarted', turnId: 'free-text-turn', message: { text: 'Ask a question' } } } });
+      await settle();
+      const questions = [{ question: 'Which database?', options: [{ label: 'Postgres' }, { label: 'SQLite' }], multiSelect: kind === 'selected-many' }];
+      const decision = sdk.canUseTool?.('AskUserQuestion', { questions });
+      await settle();
+      const request = actions(p).find((e) => e.action.type === 'chat/inputRequested')?.action.request as { id: string };
+      const answer = { state: 'submitted', value: { kind, value, freeformValues: free } };
+      if (synced) {
+        client.handle({ method: 'dispatchAction', params: { channel: uri, action: { type: 'chat/inputAnswerChanged', requestId: request.id, questionId: 'q1', answer } } });
+        await settle();
+      }
+      client.handle({ method: 'dispatchAction', params: { channel: uri, action: { type: 'chat/inputCompleted', requestId: request.id, response: 'accept', ...(synced ? {} : { answers: { q1: answer } }) } } });
+      expect(await decision).toEqual({ behavior: 'allow', updatedInput: { questions, answers: { 'Which database?': expected } } });
+      expect(actions(p).some((e) => e.action.type === 'session/inputNeededRemoved' && e.action.id === request.id)).toBe(true);
+    }
   });
 
   it('syncs a half-typed answer, and completes with what was typed', async () => {
@@ -1995,6 +2049,152 @@ describe('choosing a model', () => {
     expect(state.config.values.effortLevel).toBe('high');
   });
 
+  it('exposes opt-in Claude SDK init names beside host metadata', async () => {
+    const uri = 'ahp-session:/11111111-1111-4111-8111-111111111111';
+    const sessionUri = 'claude:/11111111-1111-4111-8111-111111111111';
+    const hostOwner = { id: 'host-owner' };
+    const hostGit = { branchName: 'host-branch', baseBranchName: 'main' };
+    const hostArtifacts = [{ id: 'host-artifact', label: 'host-owned' }];
+    const agentMeta = {
+      owner: { id: 'agent-owner' },
+      git: { branchName: 'agent-branch' },
+      [ARTIFACTS_META]: [{ id: 'agent-artifact', label: 'agent-owned' }],
+      apiKeySource: 'must-not-be-retained',
+    };
+    const withUntrustedAgentMetadata = (meta: Record<string, unknown>): Record<string, unknown> => {
+      const manifest = meta['ahpd.claudeSdkInitToolManifest'];
+      return {
+        ...meta,
+        ...(typeof manifest === 'object' && manifest !== null
+          ? { 'ahpd.claudeSdkInitToolManifest': { ...(manifest as Record<string, unknown>), apiKeySource: 'must-not-be-retained' } }
+          : {}),
+        ...agentMeta,
+      };
+    };
+    const backend = claude({ paths: ['/tmp'] });
+    const agent: Agent = {
+      ...backend,
+      create: (start) => {
+        const session = backend.create({
+          ...start,
+          emit: (channel, action) => {
+            if (channel === 'session' && action.type === 'session/metaChanged') {
+              const meta = typeof action._meta === 'object' && action._meta !== null ? action._meta as Record<string, unknown> : {};
+              start.emit(channel, { ...action, _meta: withUntrustedAgentMetadata(meta) });
+            }
+            else start.emit(channel, action);
+          },
+        });
+        return {
+          ...session,
+          sessionState: () => {
+            const state = session.sessionState();
+            const meta = typeof state._meta === 'object' && state._meta !== null ? state._meta as Record<string, unknown> : {};
+            return { ...state, _meta: withUntrustedAgentMetadata(meta) };
+          },
+        };
+      },
+    };
+    const host = createHost({
+      path: '/tmp',
+      agents: [agent],
+      directories: { meta: () => ({ fixtureHost: 'kept', owner: hostOwner, git: hostGit, [ARTIFACTS_META]: hostArtifacts }) },
+    });
+    const p = peer();
+    const client = host.accept(p);
+    await client.handle(hello(['0.8.0']));
+    await client.handle({
+      method: 'createSession',
+      params: { channel: uri, provider: 'claude', config: { captureSdkInitToolManifest: 'enabled' } },
+    });
+    try {
+      await client.handle({ method: 'subscribe', params: { channel: uri } });
+      const initial = (await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(initial._meta).toMatchObject({
+        fixtureHost: 'kept',
+        'ahpd.claudeSdkInitToolManifest': { status: 'unknown', sessionUri, generation: 0 },
+      });
+      expect(initial._meta?.owner).toEqual(hostOwner);
+      expect(initial._meta?.git).toEqual(hostGit);
+      expect(initial._meta?.[ARTIFACTS_META]).toEqual(hostArtifacts);
+      expect(initial._meta).not.toHaveProperty('apiKeySource');
+      expect((initial._meta?.['ahpd.claudeSdkInitToolManifest'] as Record<string, unknown> | undefined)).not.toHaveProperty('apiKeySource');
+
+      await emit({
+        type: 'system',
+        subtype: 'init',
+        session_id: '11111111-1111-4111-8111-111111111111',
+        tools: ['Bash', 'mcp__ahp__read'],
+        apiKeySource: 'must-not-be-retained',
+      });
+      const action = actions(p, uri).filter((one) => one.action.type === 'session/metaChanged').at(-1);
+      expect(action?.action._meta).toMatchObject({
+        fixtureHost: 'kept',
+        'ahpd.claudeSdkInitToolManifest': {
+          status: 'observed',
+          sessionUri,
+          generation: 0,
+          nativeSessionId: '11111111-1111-4111-8111-111111111111',
+          toolNames: ['Bash', 'mcp__ahp__read'],
+        },
+      });
+      expect(action?.action._meta).not.toHaveProperty('apiKeySource');
+      expect(action?.action._meta).not.toHaveProperty('model');
+      expect(((action?.action._meta as Record<string, unknown> | undefined)?.['ahpd.claudeSdkInitToolManifest'] as Record<string, unknown> | undefined)).not.toHaveProperty('apiKeySource');
+      expect((action?.action._meta as Record<string, unknown> | undefined)?.owner).toEqual(hostOwner);
+      expect((action?.action._meta as Record<string, unknown> | undefined)?.git).toEqual(hostGit);
+      expect((action?.action._meta as Record<string, unknown> | undefined)?.[ARTIFACTS_META]).toEqual(hostArtifacts);
+      const aliasUri = 'claude:/11111111-1111-4111-8111-111111111111';
+      const aliasSnapshot = (await client.handle({ method: 'subscribe', params: { channel: aliasUri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(aliasSnapshot._meta).toEqual(action?.action._meta);
+      expect(aliasSnapshot._meta?.['ahpd.claudeSdkInitToolManifest']).toMatchObject({
+        status: 'observed',
+        sessionUri,
+        generation: 0,
+        toolNames: ['Bash', 'mcp__ahp__read'],
+      });
+      const after = (await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(after._meta).toEqual(action?.action._meta);
+    }
+    finally {
+      await client.handle({ method: 'disposeSession', params: { channel: uri } });
+      await host.close();
+    }
+  });
+
+  it('keeps normal Claude metadata behavior when SDK init capture is disabled', async () => {
+    const uri = 'ahp-session:/22222222-2222-4222-8222-222222222222';
+    const host = createHost({ path: '/tmp', agents: [claude({ paths: ['/tmp'] })], directories: { meta: () => undefined } });
+    const client = host.accept(peer());
+    await client.handle(hello(['0.8.0']));
+    await client.handle({ method: 'createSession', params: { channel: uri, provider: 'claude' } });
+    try {
+      await client.handle({ method: 'subscribe', params: { channel: uri } });
+      await emit({
+        type: 'system',
+        subtype: 'init',
+        session_id: '22222222-2222-4222-8222-222222222222',
+        model: 'claude-test-model',
+        tools: ['Bash'],
+      });
+      const state = (await client.handle({ method: 'subscribe', params: { channel: uri } }) as {
+        snapshot: { state: { _meta?: Record<string, unknown> } };
+      }).snapshot.state;
+      expect(state._meta?.model).toBe('claude-test-model');
+      expect(state._meta).not.toHaveProperty('ahpd.claudeSdkInitToolManifest');
+    }
+    finally {
+      await client.handle({ method: 'disposeSession', params: { channel: uri } });
+      await host.close();
+    }
+  });
+
   it('changes the effort level on the running session', async () => {
     const { client, uri } = await running();
     client.handle({
@@ -2027,11 +2227,11 @@ describe('choosing a model', () => {
     // What the operator wrote the preset down as, in the query the CLI runs.
     const onWork = await made('ahp-session:/onwork', { preset: 'work' });
     expect(onWork.thinking).toEqual({ type: 'disabled' });
-    expect(onWork.settings).toEqual({ sandbox: { enabled: true } });
-    // And a preset that says nothing is the empty one, which changes nothing.
+    expect(onWork.settings).toEqual({ sandbox: { enabled: true }, disableClaudeAiConnectors: true });
+    // And a preset that says nothing adds no preset-specific settings.
     const onTest = await made('ahp-session:/ontest', { preset: 'test' });
     expect(onTest.thinking).toEqual({ type: 'adaptive' });
-    expect(onTest.settings).toBeUndefined();
+    expect(onTest.settings).toEqual({ disableClaudeAiConnectors: true });
     // A stored name nothing resolves is the first preset, which is what
     // renaming or removing one leaves behind.
     const onGone = await made('ahp-session:/ongone', { preset: 'gone' });
@@ -7887,13 +8087,15 @@ describe('what a session recorded', () => {
     expect(prompt?.append).toContain('Follow the Anton system instructions.');
   });
 
-  it('tells the model when to record one, in the reference host\'s words, through the system prompt', async () => {
+  it('tells the model when to record one, concisely, through the system prompt', async () => {
     await withTools();
     const prompt = sessionQueries().at(-1)?.options.systemPrompt as { type: string; preset: string; append: string; snapshot: boolean } | undefined;
     expect(prompt?.type).toBe('preset');
     expect(prompt?.preset).toBe('claude_code');
     expect(prompt?.snapshot).toBe(true);
-    expect(prompt?.append).toContain('Record notable artifacts and references with `add_artifact_or_reference`');
+    expect(prompt?.append).toContain('`add_artifact_or_reference`');
+    expect(prompt?.append).toContain('ToolSearch');
+    expect(prompt?.append).not.toContain('not an inventory');
   });
 
   it('tells the model the short wording when the client asks for it, and offers every tool the same', async () => {
