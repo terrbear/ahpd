@@ -79,8 +79,9 @@ const UNTITLED = 'ACP session';
  * turn, so a session somebody opened and never used costs no subprocess.
  */
 export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatalog): Session {
-  const idleTimeoutMs = options.idleTimeoutMs ?? 3_600_000;
-  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 2_147_483_647) {
+  const requestedIdleTimeoutMs = options.idleTimeoutMs ?? 3_600_000;
+  const idleTimeoutMs = start.claimSessionId === undefined ? requestedIdleTimeoutMs : 0;
+  if (!Number.isSafeInteger(requestedIdleTimeoutMs) || requestedIdleTimeoutMs < 0 || requestedIdleTimeoutMs > 2_147_483_647) {
     throw new Error('idleTimeoutMs must be an integer from 0 to 2147483647 milliseconds');
   }
   const hostId = idOf(start.uri);

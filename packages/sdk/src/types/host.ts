@@ -10,6 +10,7 @@ import type { ChangesetSource } from './changes.js';
 import type { Worktrees } from './worktrees.js';
 import type { PullRequests } from './github.js';
 import type { AutomationStore } from './automations.js';
+import type { WriterExitProof } from './session.js';
 import type { SessionStore } from './sessions.js';
 import type { ComputerPort } from './computers.js';
 import type { ContainerPort } from './containers.js';
@@ -64,7 +65,8 @@ export type { TerminalStore } from './terminals.js';
 /** How to construct a host. */
 export interface SessionLease {
   claim(canonicalId: string): Promise<void>;
-  release(): Promise<void>;
+  release(proof: WriterExitProof | { kind: 'never-started' }): Promise<void>;
+  disposed?(): Promise<void>;
 }
 
 export interface SessionLifecycle {

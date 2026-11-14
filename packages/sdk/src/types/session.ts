@@ -224,7 +224,13 @@ export interface MessageFrom {
 }
 
 /** A live session. */
+export interface WriterExitProof {
+  kind: 'isolated-process-scope-empty';
+  scope: string;
+}
+
 export interface Session {
+  writerExitProof?: () => WriterExitProof | undefined;
   supportsAttachments?: boolean;
   /** The session channel URI. */
   readonly uri: string;

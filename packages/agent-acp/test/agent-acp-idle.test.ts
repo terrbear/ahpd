@@ -165,7 +165,7 @@ it('refuses a resumed native identity before spawning another writer', async () 
   expect(() => readFileSync(log)).toThrow();
 });
 
-it('claims a newly allocated native identity before prompting and again before idle reload', async () => {
+it('claims a new native identity before prompting and retains its process without containment', async () => {
   const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-claims-'));
   paths.push(path);
   const log = join(path, 'requests.jsonl');
@@ -182,6 +182,8 @@ it('claims a newly allocated native identity before prompting and again before i
   await wait(100);
   session.begin('second', 'hello');
   await vi.waitFor(() => expect(completedTurns(events)).toHaveLength(2));
-  expect(claims).toHaveLength(2);
-  expect(claims[0]).toBe(claims[1]);
+  expect(claims).toHaveLength(1);
+  const prompts = requests(log).filter((entry) => entry.method === 'session/prompt');
+  expect(prompts[0]!.pid).toBe(prompts[1]!.pid);
+  expect(requests(log).some((entry) => entry.method === 'session/load')).toBe(false);
 });

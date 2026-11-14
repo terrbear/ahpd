@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createHost } from '../src/host.js';
 import { sessionLifetimes } from '../src/session-lifecycle.js';
 import { echo } from '../../../examples/echo/agent.js';
-import type { Host, SessionLifecycle, SessionLease, Peer } from '../src/index.js';
+import type { Host, SessionLifecycle, SessionLease, WriterExitProof, Peer } from '../src/index.js';
 
 const hosts: Host[] = [];
 afterEach(async () => { for (const host of hosts.splice(0)) await host.close(); });
@@ -13,19 +13,22 @@ const deferred = () => {
 };
 const peer: Peer = { send: () => {}, notify: () => {}, request: async () => ({}), answered: () => {}, close: () => {} };
 
-async function setup(lifecycle: SessionLifecycle, close: () => Promise<void> = async () => {}) {
+const proof: WriterExitProof = { kind: 'isolated-process-scope-empty', scope: 'test-contained-scope' };
+
+async function setup(lifecycle: SessionLifecycle, close: () => Promise<void> = async () => {}, contained = true) {
   const base = echo({ path: '/tmp', pace: 0 });
   const starts = vi.fn(base.create);
   const host = createHost({ path: '/tmp', agents: [{ ...base, multipleDirectories: true, create: (start) => {
     const session = starts(start);
-    return { ...session, close: async () => { await close(); await session.close(); } };
+    return { ...session, ...(contained ? { writerExitProof: () => proof } : {}), close: async () => { await close(); await session.close(); } };
   } }], sessionLifecycle: lifecycle });
   hosts.push(host);
-  const client = host.accept(peer);
+  const notes = vi.fn();
+  const client = host.accept({ ...peer, notify: notes });
   await client.handle({ method: 'initialize', params: { clientId: 'anton-chat-one', protocolVersions: ['0.9.0'] } });
   const create = () => client.handle({ method: 'createSession', params: { channel: 'echo:/one', provider: 'echo', workingDirectories: ['file:///tmp', 'file:///var/tmp'] } });
   const dispose = () => client.handle({ method: 'disposeSession', params: { channel: 'echo:/one' } });
-  return { client, host, starts, create, dispose };
+  return { client, host, starts, create, dispose, notes };
 }
 
 it('waits for admission before create and carries the authenticated connection identity', async () => {
@@ -79,11 +82,11 @@ it('retains a logical lease across repeated admission and failed release', async
   const context = { provider: 'echo', sessionUri: 'echo:/one', chatUri: 'chat:/one' };
   expect(await lifetimes.acquire(context)).toBe(lease);
   expect(await lifetimes.acquire(context)).toBe(lease);
-  await expect(lifetimes.release(context.chatUri)).rejects.toThrow('registry unavailable');
-  expect(await lifetimes.acquire(context)).toBe(lease);
+  await expect(lifetimes.dispose(context.chatUri, proof)).rejects.toThrow('registry unavailable');
+  await expect(lifetimes.acquire(context)).rejects.toThrow('awaiting its owner task fence');
   expect(acquire).toHaveBeenCalledOnce();
   failing = false;
-  await lifetimes.release(context.chatUri);
+  await lifetimes.dispose(context.chatUri, proof);
   await lifetimes.acquire(context);
   expect(acquire).toHaveBeenCalledTimes(2);
 });
@@ -112,4 +115,72 @@ it('waits for restart disposal while keeping the same logical lease', async () =
   expect(release).not.toHaveBeenCalled();
   await t.dispose();
   expect(release).toHaveBeenCalledOnce();
+});
+
+it('keeps ownership after successful direct-child close without containment proof', async () => {
+  const release = vi.fn(async () => {});
+  const disposed = vi.fn(async () => {});
+  const t = await setup({ acquire: async () => ({ claim: async () => {}, release, disposed }) }, async () => {}, false);
+  await t.create();
+  await t.dispose();
+  expect(release).not.toHaveBeenCalled();
+  expect(disposed).toHaveBeenCalledOnce();
+  await expect(t.create()).rejects.toThrow('awaiting its owner task fence');
+  expect(t.starts).toHaveBeenCalledOnce();
+});
+
+it('refuses same-task restart without containment before stopping the current provider', async () => {
+  const close = vi.fn(async () => {});
+  const release = vi.fn(async () => {});
+  const t = await setup({ acquire: async () => ({ claim: async () => {}, release }) }, close, false);
+  await t.create();
+  await t.client.handle({ method: 'dispatchAction', params: {
+    channel: 'ahp-chat://default/ZWNobzovb25l',
+    action: { type: 'chat/workingDirectoryRemoved', directory: 'file:///var/tmp' },
+  } });
+  await vi.waitFor(() => expect(JSON.stringify(t.notes.mock.calls)).toContain('containment'));
+  expect(close).not.toHaveBeenCalled();
+  expect(t.starts).toHaveBeenCalledOnce();
+  expect(release).not.toHaveBeenCalled();
+});
+
+it('does not release malformed proof or a partially started factory on cancellation', async () => {
+  const release = vi.fn(async () => {});
+  const disposed = vi.fn(async () => {});
+  const lifetimes = sessionLifetimes({ acquire: async () => ({ claim: async () => {}, release, disposed }) });
+  const context = { provider: 'echo', sessionUri: 'echo:/one', chatUri: 'chat:/one' };
+  await lifetimes.acquire(context);
+  lifetimes.started(context.chatUri);
+  await lifetimes.cancelUnstarted(context.chatUri);
+  expect(release).not.toHaveBeenCalled();
+  await lifetimes.dispose(context.chatUri, { kind: 'isolated-process-scope-empty', scope: '' });
+  expect(release).not.toHaveBeenCalled();
+  expect(disposed).toHaveBeenCalledOnce();
+  await expect(lifetimes.acquire(context)).rejects.toThrow('task fence');
+});
+
+it('can release admission that provably never entered the provider factory', async () => {
+  const release = vi.fn(async () => {});
+  const lifetimes = sessionLifetimes({ acquire: async () => ({ claim: async () => {}, release }) });
+  const context = { provider: 'echo', sessionUri: 'echo:/one', chatUri: 'chat:/one' };
+  await lifetimes.acquire(context);
+  await lifetimes.cancelUnstarted(context.chatUri);
+  expect(release).toHaveBeenCalledWith({ kind: 'never-started' });
+});
+
+it('reports concurrent logical disposal once without interpreting it as exit proof', async () => {
+  const gate = deferred();
+  const release = vi.fn(async () => {});
+  const disposed = vi.fn(() => gate.promise);
+  const lifetimes = sessionLifetimes({ acquire: async () => ({ claim: async () => {}, release, disposed }) });
+  const context = { provider: 'echo', sessionUri: 'echo:/one', chatUri: 'chat:/one' };
+  await lifetimes.acquire(context);
+  lifetimes.started(context.chatUri);
+  const stopping = Promise.all([lifetimes.dispose(context.chatUri), lifetimes.dispose(context.chatUri)]);
+  await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce());
+  gate.resolve();
+  await stopping;
+  await lifetimes.dispose(context.chatUri);
+  expect(disposed).toHaveBeenCalledOnce();
+  expect(release).not.toHaveBeenCalled();
 });

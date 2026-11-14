@@ -847,3 +847,18 @@ it('refuses an owned Claude resume before starting a query', async () => {
   expect(claim).toHaveBeenCalledWith('saved-native');
   expect(sdk.runs).toHaveLength(0);
 });
+
+it('keeps a lifecycle-owned Claude process through idle time without containment proof', async () => {
+  const claim = vi.fn(async () => {});
+  const held = session({ claimSessionId: claim, idleTimeoutMs: 100 });
+  held.begin('first', 'hello');
+  await settle();
+  await complete();
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(sdk.runs).toHaveLength(1);
+  expect(sdk.runs[0]!.closed).toBe(false);
+  held.begin('next', 'continue');
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(claim).toHaveBeenCalledOnce();
+});

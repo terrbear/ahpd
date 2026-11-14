@@ -120,8 +120,15 @@ interface SessionLifecycle {
 }
 interface SessionLease {
   claim(canonicalId: string): Promise<void>;
-  release(): Promise<void>;
+  release(proof: WriterExitProof | { kind: 'never-started' }): Promise<void>;
+  disposed?(): Promise<void>;
 }
+interface WriterExitProof {
+  kind: 'isolated-process-scope-empty';
+  scope: string;
+}
+// Optional Session capability; absent from current ACP and Claude providers:
+// writerExitProof?: () => WriterExitProof | undefined;
 ```
 
 Admission completes before `Agent.create`. Creation and lazy resume carry the
@@ -130,24 +137,53 @@ Automation admission has no client ID, and a cloud coordinator may reject it.
 Client IDs are routing identities, not authentication credentials. Admission
 must remain inside the already authenticated owner's boundary.
 
-The host retains one lease per logical chat across provider idle retirement
-and explicit restart. Native claims are idempotent for that lease and must be
-namespaced by provider. Claude claims its reserved native ID before spawning
-its query. ACP claims an existing ID before spawning the adapter for resume;
-for a new session, ACP allocates the ID, then the hook claims it before any
-prompt. An ACP allocator must guarantee that a new ID does not alias an
-existing transcript. Claude forks are refused when the lifecycle hook is
-active because their new native ID cannot be reserved through this SDK path.
+The host retains one lease per logical chat across supported provider restarts.
+Native claims are idempotent for that lease and must be namespaced by provider.
+Claude claims its reserved native ID before spawning its query. ACP claims an
+existing ID before spawning the adapter for resume; for a new session, ACP
+allocates the ID, then the hook claims it before any prompt. An ACP allocator
+must guarantee that a new ID does not alias an existing transcript. Claude
+forks are refused when the lifecycle hook is active because their new native
+ID cannot be reserved through this SDK path.
 
-Disposal awaits provider close, then lease release, before removing the chat.
-Rejected closes or releases retain the lease. A synchronous provider factory
-that throws after allocating a writer leaves its lease held; generic host code
-cannot prove that factory's partial work exited. The coordinator must fence
-that task before reclaiming it. A rejected admission can be retried.
+Disposal awaits provider close. It calls `Session.writerExitProof()` only after
+close completes. Only a proof with kind `isolated-process-scope-empty` and a
+nonempty scope can authorize `lease.release(proof)`. The capability is a trusted
+provider contract: its implementation must establish that every writer was
+contained in that scope and that the scope is now empty. A process-group kill,
+a direct-child exit, or a successful cleanup callback is not this proof.
+The cloud coordinator must validate proof shape again before any cleanup and
+retain all locks and protection on missing, invalid, or failed proof.
 
-**Provider close is not yet a complete process-tree fence.** Current ACP and
-Claude shutdown helpers establish direct-child exit, and nested/detached
-writers may survive. The cloud release callback must not drop registry
-ownership or task protection without an independent containment/exit proof.
-Keep shared cloud operation disabled until that proof is implemented. These
-hooks do not themselves establish ECS task death or safe credential sharing.
+Without proof the host calls optional `lease.disposed()` and retains the lease.
+This notification means only that the logical chat was closed; it must not
+release filesystem locks, registry claims, or ECS protection. The closed chat
+is removed from the host, but same-task reacquisition is refused until the task
+is fenced. Notification failure can be retried. Rejected closes or releases
+retain the lease. Host shutdown follows the same proof rule.
+
+A provider factory that throws after entry leaves its lease held: generic host
+code cannot prove that factory's partial work exited. Only admission cancelled
+before entering the factory can release with `{kind: 'never-started'}`. The
+host remembers prior factory entry across retries, so that exception cannot
+release a previous partial writer. A rejected admission can be retried.
+
+**Current ACP and Claude providers do not furnish containment proof.** Their
+close methods establish direct-child exit only. With the lifecycle hook active,
+they disable idle retirement, and the host refuses explicit restart, directory
+restart, and rewind until containment support exists. Plain non-shared sessions
+retain their previous idle and restart behavior. Do not claim five-minute
+memory retirement savings for lifecycle-enabled cloud sessions.
+
+The conservative cloud recovery path retains ownership for the task lifetime.
+After logical sessions are disposed, an external drain controller can stop
+admission and terminate the task while protection remains; reassignment waits
+for authoritative confirmation that that exact ECS task is STOPPED. This SDK
+does not stop tasks, clear protection, or reconcile ECS desired count. A
+per-session delegated cgroup could eventually provide real containment, but
+ordinary ECS cgroup visibility is not evidence that delegation is available.
+Process groups alone cannot contain descendants that create their own session.
+
+Keep shared cloud operation disabled until drain/recovery, routing, and
+credential coordination are integrated and tested. These hooks do not establish
+ECS task death or safe credential sharing.

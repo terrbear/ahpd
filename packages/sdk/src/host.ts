@@ -1,4 +1,4 @@
-import { sessionLifetimes } from './session-lifecycle.js';
+import { sessionLifetimes, validWriterExitProof } from './session-lifecycle.js';
 import { admittedStart } from './admission.js';
 import { assertDiagnosticTarget, sessionExecutionDiagnostics } from './sessiondiagnostics.js';
 /**
@@ -3625,6 +3625,18 @@ export function createHost(options: HostOptions): Host {
 
   const lifetimes = sessionLifetimes(options.sessionLifecycle);
   const sessionClients = new Map<string, string>();
+  const requireRestartContainment = (chat: Session): void => {
+    if (options.sessionLifecycle !== undefined && chat.writerExitProof === undefined) {
+      throw new Error('Session restart requires writer containment; dispose and fence the owner task first');
+    }
+  };
+  const stopForRestart = async (chat: Session): Promise<void> => {
+    requireRestartContainment(chat);
+    await chat.close();
+    if (options.sessionLifecycle !== undefined && !validWriterExitProof(chat.writerExitProof?.())) {
+      throw new Error('Session writers have not been proven stopped; retaining ownership');
+    }
+  };
   const spawnHeld = async (
     agent: Agent,
     uri: string,
@@ -3681,9 +3693,10 @@ export function createHost(options: HostOptions): Host {
     let deliveryOwner: Session | undefined;
     const lease = await lifetimes.acquire({ provider: agent.provider, sessionUri: uri, chatUri, ...(sessionClients.has(uri) ? { clientId: sessionClients.get(uri)! } : {}) });
     if (closed) {
-      await lifetimes.release(chatUri);
+      await lifetimes.cancelUnstarted(chatUri);
       throw new RpcError(INTERNAL_ERROR, CLOSING);
     }
+    lifetimes.started(chatUri);
     const session = admittedStart(options.admitSession, () => used.create({
       ...(lease === undefined ? {} : { claimSessionId: (id: string) => lease.claim(id) }),
       ...(options.admitSession === undefined ? {} : { admitResume: options.admitSession }),
@@ -4882,7 +4895,7 @@ export function createHost(options: HostOptions): Host {
       throw new RpcError(-32001, `No agent for session ${uri}`);
     for (const [chatUri, chat] of held.chats) {
       await chat.close();
-      await lifetimes.release(chatUri);
+      await lifetimes.dispose(chatUri, chat.writerExitProof?.());
       byChat.delete(chatUri);
       drafts.delete(chatUri);
       madeFrom.delete(chatUri);
@@ -5025,6 +5038,7 @@ export function createHost(options: HostOptions): Host {
   ): Promise<void> => {
     const held = sessions.get(uri);
     if (!held) return;
+    for (const chat of held.chats.values()) requireRestartContainment(chat);
     const mine = decided.get(uri) ?? {};
     // The repository rather than the worktree: the choice is made against the
     // directory somebody asked for, and a worktree is only where a previous
@@ -5045,7 +5059,7 @@ export function createHost(options: HostOptions): Host {
     const before = held.workingDirectory;
     // Their names stay the session's while it starts again.
     for (const [chatUri, chat] of held.chats) {
-      await chat.close();
+      await stopForRestart(chat);
       byChat.drop(chatUri);
     }
     /*
@@ -5184,7 +5198,7 @@ export function createHost(options: HostOptions): Host {
     const talking = chat.agentId() !== undefined
       ? { resume: chat.agentId() as string, seed: chat.allTurns() }
       : undefined;
-    await chat.close();
+    await stopForRestart(chat);
     if (byChat.get(chatUri)?.chat !== chat) throw new Error(`${chatUri} changed during restart`);
     held.chats.delete(chatUri);
     byChat.drop(chatUri);
@@ -6919,7 +6933,7 @@ export function createHost(options: HostOptions): Host {
         };
         const going: Promise<void>[] = [];
         for (const held of sessions.values()) {
-          for (const [uri, chat] of held.chats) going.push(step(uri, async () => { await chat.close(); await lifetimes.release(uri); }));
+          for (const [uri, chat] of held.chats) going.push(step(uri, async () => { await chat.close(); await lifetimes.dispose(uri, chat.writerExitProof?.()); }));
         }
         // A run already past its guard ends here, refused at `spawn` or started
         // and so among the sessions; its outcome is the run's to report.
@@ -8852,7 +8866,7 @@ export function createHost(options: HostOptions): Host {
           }
           deliveries.forgetChat(chatUri, found.chat);
           await found.chat.close();
-          await lifetimes.release(chatUri);
+          await lifetimes.dispose(chatUri, found.chat.writerExitProof?.());
           byChat.delete(chatUri);
           drafts.delete(chatUri);
           madeFrom.delete(chatUri);
@@ -10871,9 +10885,10 @@ export function createHost(options: HostOptions): Host {
              * be told to cut it, which is the same end state reached by
              * showing somebody the turns they asked to be rid of.
              */
+            requireRestartContainment(session);
             dispatch(session.chatUri, action);
             return (async () => {
-              await session.close();
+              await stopForRestart(session);
               if (byChat.get(session.chatUri)?.chat !== session) throw new Error(`${session.chatUri} changed during rewind`);
               // So the next thing the new session says about itself is reported
               // rather than compared against what the old one last said.

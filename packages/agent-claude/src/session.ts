@@ -2712,7 +2712,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       await options.claimSessionId!(agentId ?? reservedNativeId);
     } }),
     ...(options.admitResume === undefined ? {} : { admitResume: options.admitResume }),
-    timeout: options.spawn === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
+    timeout: options.spawn === undefined && options.claimSessionId === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
     timing,
     eligible: () => !closed && gone === undefined && !busy()
       && (nativePromptSent || options.forkAt === undefined && options.rewindAt === undefined)
