@@ -240,6 +240,7 @@ export const serverFields = {
     type: 'object',
     additionalProperties: false,
     properties: {
+      enabled: { type: 'boolean', description: 'Enforce memory-based session admission. Off unless explicitly true.' },
       memoryLimitMb: { type: 'integer', minimum: 64 },
       minimumFreeMb: { type: 'integer', minimum: 64 },
       startupReservationMb: { type: 'integer', minimum: 16 },

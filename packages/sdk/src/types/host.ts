@@ -75,7 +75,7 @@ export interface SessionLifecycle {
 
 export interface HostOptions {
   sessionLifecycle?: SessionLifecycle;
-  admitSession?: () => () => void;
+  admitSession?: (context: { activeSessions: number }) => () => void;
   /**
    * The directory whose sessions this host serves, on the machine it runs on.
    *

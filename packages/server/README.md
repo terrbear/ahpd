@@ -163,17 +163,18 @@ MIT © Softov
 
 ## Memory admission
 
-The daemon checks memory before starting a backend for a new chat, a restored session, or a fork. The Claude backend also checks before recreating a process that idle cleanup stopped. Admission samples the daemon and its descendants, available host memory, and Linux cgroup v2 limits and usage (including tighter ancestor limits). On macOS it reads the process tree with `ps` and uses available host memory. Missing or invalid measurements pause admission.
+Memory admission is off by default. Set `"admission": { "enabled": true }` to turn it on. When it is off, the daemon does not sample memory or refuse session starts for memory pressure. When it is on, the daemon checks memory before starting a backend for a new chat, restored session, or fork once at least three AHP sessions are loaded. The Claude backend also checks before recreating a process that idle cleanup stopped. Admission samples the daemon and its descendants, available host memory, and Linux cgroup v2 limits and usage (including tighter ancestor limits). On macOS it reads the process tree with `ps` and uses available host memory. Missing or invalid measurements pause admission only at or above that session threshold. The first three sessions may start regardless of memory pressure. The count includes loaded, non-disposed sessions, not saved catalogue entries or individual chats. It is checked again for every start or idle resume; dropping below three clears an earlier pause.
 
-By default the process-tree budget is 85% of effective RAM, with at least 512 MiB or 10% of effective RAM left available, whichever is larger. Each accepted start reserves 384 MiB for 30 seconds so simultaneous requests cannot all consume the same measured headroom before child memory appears. A synchronous startup failure returns its reservation. Reservations hold a projected memory floor based on usage when each start was admitted. As startup RSS becomes measurable, it replaces that allowance rather than being added to it again. Only the unobserved portion is deducted from available host memory. Failed or expired starts release their own allowance; a fall in RSS does not erase another pending start's reservation.
+When enabled, the default process-tree budget is 85% of effective RAM, with at least 512 MiB or 10% of effective RAM left available, whichever is larger. Each accepted start, including one below the session threshold, reserves 384 MiB for 30 seconds so simultaneous requests cannot all consume the same measured headroom before child memory appears. A synchronous startup failure returns its reservation. Reservations hold a projected memory floor based on usage when each start was admitted. As startup RSS becomes measurable, it replaces that allowance rather than being added to it again. Only the unobserved portion is deducted from available host memory. If a below-threshold start could not be measured, its reservation uses the next valid sample as a conservative baseline. Failed or expired starts release their own allowance; a fall in RSS does not erase another pending start's reservation.
 
 Under pressure, new starts receive a capacity error; create-session RPC errors include `reason` and `retryAfterMs`, while action-based resumes receive a normal action rejection. Existing sessions and historical reads remain available. Admission reopens on a later request once usage falls to 80% of the budget and free headroom reaches 125% of its minimum. Pause and recovery transitions are logged. The guard does not kill processes, restart the daemon, replay requests, or promise that already-running work cannot exhaust memory. Keep existing service memory limits and idle cleanup.
 
-Optional `config.json` settings, in MiB and milliseconds:
+Optional `config.json` settings, in MiB and milliseconds. The limits apply only when `enabled` is `true`:
 
 ```json
 {
   "admission": {
+    "enabled": true,
     "memoryLimitMb": 8192,
     "minimumFreeMb": 1536,
     "startupReservationMb": 384,
@@ -182,4 +183,4 @@ Optional `config.json` settings, in MiB and milliseconds:
 }
 ```
 
-These are host-specific budgets, not defaults to copy to every installation. The default budget follows the smaller of host RAM and applicable cgroup limits. Startup reservations last at most five minutes when configured. Unsupported or unreadable process/cgroup accounting is reported as unavailable capacity rather than treated as zero usage.
+These are host-specific budgets, not defaults to copy to every installation. The default budget follows the smaller of host RAM and applicable cgroup limits. Set `enabled` to `false`, or omit it, to leave the guard off. Existing configs that set budget values must add `"enabled": true` to keep admission enforced. Startup reservations last at most five minutes when configured. Unsupported or unreadable process/cgroup accounting is reported as unavailable capacity rather than treated as zero usage.

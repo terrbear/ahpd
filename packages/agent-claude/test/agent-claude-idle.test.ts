@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ProcessFixture } from './fixtures/process.js';
 import { idleQuery } from '../src/idle.js';
 
-const sdk = vi.hoisted(() => ({ nativeId: '11111111-1111-4111-8111-111111111111', preInitSessionId: undefined as string | undefined, initTools: undefined as unknown, inputGatedInit: false, initialize: undefined as undefined | ((index: number) => Promise<unknown>), spawn: false, localSpawn: undefined as undefined | (() => unknown), resources: [] as { closed: boolean }[], runs: [] as {
+const sdk = vi.hoisted(() => ({ nativeId: '11111111-1111-4111-8111-111111111111', preInitSessionId: undefined as string | undefined, initTools: undefined as unknown, control: undefined as undefined | ((stage: string, index: number) => Promise<void>), inputGatedInit: false, initialize: undefined as undefined | ((index: number) => Promise<unknown>), spawn: false, localSpawn: undefined as undefined | (() => unknown), resources: [] as { closed: boolean }[], runs: [] as {
   options: Record<string, unknown>;
   closed: boolean;
   prompts: unknown[];
@@ -54,8 +54,8 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
       reloadSkills: async () => ({ skills: [] }),
       reloadPlugins: async () => ({ plugins: [] }),
       supportedModels: async () => [],
-      setModel: async () => {},
-      applyFlagSettings: async () => {},
+      setModel: async () => { await sdk.control?.('model_selection', sdk.runs.indexOf(run)); },
+      applyFlagSettings: async () => { await sdk.control?.('effort_application', sdk.runs.indexOf(run)); },
       setPermissionMode: async () => {},
       interrupt: async () => {},
       toggleMcpServer: async () => {},
@@ -105,7 +105,7 @@ const claudeSession = (options: {
   return held;
 };
 
-beforeEach(() => { vi.useFakeTimers(); sdk.runs.length = 0; sdk.resources.length = 0; sdk.nativeId = '11111111-1111-4111-8111-111111111111'; sdk.preInitSessionId = undefined; sdk.initTools = undefined; sdk.inputGatedInit = false; sdk.initialize = undefined; sdk.spawn = false; sdk.localSpawn = undefined; });
+beforeEach(() => { vi.useFakeTimers(); sdk.runs.length = 0; sdk.resources.length = 0; sdk.nativeId = '11111111-1111-4111-8111-111111111111'; sdk.preInitSessionId = undefined; sdk.initTools = undefined; sdk.inputGatedInit = false; sdk.initialize = undefined; sdk.control = undefined; sdk.spawn = false; sdk.localSpawn = undefined; });
 afterEach(async () => {
   await Promise.all(sessions.splice(0).map((held) => held.close()));
   for (const cwd of directories.splice(0)) rmSync(cwd, { recursive: true, force: true });
@@ -347,7 +347,7 @@ it('records startup stages without prompt data and waits for initialization befo
     ['initialization', 'start'],
   ]);
   expect(lines.join('\n')).not.toContain('private prompt sentinel');
-  expect(records().every((one) => one.session_id === '11111111-1111-4111-8111-111111111111' && one.generation === 0 && typeof one.elapsed_ms === 'number' && Object.keys(one).sort().join(',') === 'elapsed_ms,generation,outcome,session_id,stage')).toBe(true);
+  expect(records().every((one) => one.session_id === '11111111-1111-4111-8111-111111111111' && one.generation === 0 && typeof one.elapsed_ms === 'number' && Object.keys(one).filter((key) => key !== 'turn_id').sort().join(',') === 'elapsed_ms,generation,outcome,session_id,stage')).toBe(true);
   release?.();
   await settle();
   expect(Object.fromEntries(records().filter((one) => String(one.stage).startsWith('describe')).map((one) => [one.stage, one.outcome]))).toMatchObject({
@@ -374,6 +374,66 @@ it('records startup stages without prompt data and waits for initialization befo
     ['enqueue', 'ok'],
     ['sdk_user_input', 'yield'],
   ]);
+});
+
+it.each(['model_selection', 'effort_application'])('bounds %s after a completed turn, recovers the queue, and ignores late acknowledgements', async (stage) => {
+  const lines: string[] = [];
+  const events: Record<string, unknown>[] = [];
+  const held = session({ log: (line) => lines.push(line), emit: (_channel, event) => events.push(event) });
+  held.begin('first', 'private first prompt', { id: 'opus' });
+  await settle();
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', is_error: false, duration_ms: 1 });
+  await settle();
+  let release!: () => void;
+  sdk.control = (operation, index) => operation === stage && index === 0
+    ? new Promise<void>((resolve) => { release = resolve; })
+    : Promise.resolve();
+  held.begin('stalled', 'private stalled prompt', { id: 'sonnet', config: { thinkingLevel: 'high' } });
+  held.queue('queued', 'private queued prompt');
+  await settle();
+  await vi.advanceTimersByTimeAsync(29_999);
+  expect(sdk.runs[0]!.prompts).toHaveLength(1);
+  expect(sdk.runs).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1);
+  await settle();
+  expect(sdk.runs[0]!.closed).toBe(true);
+  expect(sdk.runs).toHaveLength(2);
+  expect(sdk.runs[1]!.options.resume).toBe(sdk.nativeId);
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).toContain('private queued prompt');
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).not.toContain('private stalled prompt');
+  expect(held.chatState().queuedMessages).toEqual([]);
+  expect(JSON.stringify(events.filter((event) => event.type === 'chat/error' && event.turnId === 'stalled'))).toContain(`${stage} exceeded 30 seconds`);
+  const records = lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>);
+  expect(records.find((record) => record.stage === stage && record.outcome === 'timeout')).toMatchObject({
+    session_id: '11111111-1111-4111-8111-111111111111', generation: 0, turn_id: 'stalled', timeout_ms: 30_000, duration_ms: 30_000,
+  });
+  expect(records.filter((record) => record.stage === 'timeout_recovery').map((record) => record.outcome)).toEqual(['start', 'ok']);
+  expect(lines.join('\n')).not.toContain('private');
+  release();
+  await settle();
+  expect(sdk.runs[1]!.prompts).toHaveLength(1);
+  expect(held.settings().effortLevel).not.toBe('high');
+});
+
+it.each(['model_selection', 'effort_application'])('releases a cancelled %s wait without letting its timeout clear the replacement turn', async (operation) => {
+  const lines: string[] = [];
+  const held = session({ log: (line) => lines.push(line) });
+  sdk.control = (stage, index) => stage === operation && index === 0 ? new Promise<void>(() => {}) : Promise.resolve();
+  held.begin('cancelled', 'private cancelled prompt', { id: 'opus', config: { thinkingLevel: 'high' } });
+  await settle();
+  held.cancel('cancelled');
+  held.begin('replacement', 'private replacement prompt');
+  await settle();
+  await vi.advanceTimersByTimeAsync(30_000);
+  await settle();
+  expect(sdk.runs).toHaveLength(2);
+  expect(sdk.runs[0]!.closed).toBe(true);
+  expect(sdk.runs[1]!.prompts).toHaveLength(1);
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).toContain('private replacement prompt');
+  expect(JSON.stringify(sdk.runs[1]!.prompts)).not.toContain('private cancelled prompt');
+  expect(held.chatState().activeTurn).toMatchObject({ id: 'replacement' });
+  const timeout = lines.map((line) => JSON.parse(line.slice('[claude-startup] '.length)) as Record<string, unknown>).find((record) => record.outcome === 'timeout');
+  expect(timeout?.turn_id).toBe('cancelled');
 });
 
 it('does not let timing sink errors fail startup', async () => {

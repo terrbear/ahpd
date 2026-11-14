@@ -115,11 +115,13 @@ export async function runForeground(options: Options): Promise<void> {
   const managedSource = process.env.AHPD_MANAGED_SOURCE;
   const managedRelease = process.env.AHPD_MANAGED_RELEASE;
   const managedProviders = managed ? JSON.parse(process.env.AHPD_MANAGED_PROVIDERS ?? '[]') as string[] : [];
+  const managedCodexCommands = managed ? JSON.parse(process.env.AHPD_MANAGED_CODEX_COMMANDS ?? '{}') as Record<string, string> : {};
   delete process.env.AHPD_MANAGED_CHILD;
   delete process.env.AHPD_MANAGED_SOURCE;
   delete process.env.AHPD_MANAGED_RELEASE;
   delete process.env.AHPD_MANAGED_PROVIDERS;
-  if (managed && managedSource && managedRelease) options.plugins = managedPlugins(options.plugins, managedSource, managedRelease);
+  delete process.env.AHPD_MANAGED_CODEX_COMMANDS;
+  if (managed && managedSource && managedRelease) options.plugins = managedPlugins(options.plugins, managedSource, managedRelease, managedCodexCommands);
   const { token, from } = secret(options);
   /*
    * Whether `ahpd start` spawned this process, and so will record it. Taken out

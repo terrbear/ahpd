@@ -3697,9 +3697,11 @@ export function createHost(options: HostOptions): Host {
       throw new RpcError(INTERNAL_ERROR, CLOSING);
     }
     lifetimes.started(chatUri);
-    const session = admittedStart(options.admitSession, () => used.create({
+    const admitSession = options.admitSession === undefined ? undefined
+      : () => options.admitSession!({ activeSessions: sessions.size });
+    const session = admittedStart(admitSession, () => used.create({
       ...(lease === undefined ? {} : { claimSessionId: (id: string) => lease.claim(id) }),
-      ...(options.admitSession === undefined ? {} : { admitResume: options.admitSession }),
+      ...(admitSession === undefined ? {} : { admitResume: admitSession }),
       uri,
       chatUri,
       scanPermission: async (request, signal) => {

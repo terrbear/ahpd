@@ -14,6 +14,14 @@ export interface OfferedModel {
   configSchema?: Record<string, unknown>;
 }
 
+/** Resolve an SDK picker alias to the exact model id used for dispatch. */
+export const sdkModelId = (value: unknown, resolvedModel: unknown): string => {
+  const picker = typeof value === 'string' ? value : '';
+  if (picker === 'default') return picker;
+  const resolved = typeof resolvedModel === 'string' ? resolvedModel : '';
+  return resolved || picker;
+};
+
 /**
  * One entry of the `models` option.
  *
@@ -98,11 +106,11 @@ export const ownModels = async (
     if ('id' in entry) return [{ id: entry.id, name: entry.name ?? entry.id }];
     return fetched(entry, log, get);
   }));
-  return unique(lists.flat());
+  return uniqueModels(lists.flat());
 };
 
-/** The first of each id. */
-const unique = <T extends { id: string }>(models: readonly T[]): T[] => {
+/** Keep the first SDK or user model entry for each id. */
+export const uniqueModels = <T extends { id: string }>(models: readonly T[]): T[] => {
   const seen = new Set<string>();
   return models.filter((one) => (seen.has(one.id) ? false : (seen.add(one.id), true)));
 };
@@ -116,13 +124,14 @@ export const offeredModels = <T extends OfferedModel>(
   own: readonly OfferedModel[] | undefined,
   keepCliModels: boolean | undefined,
 ): (T | OfferedModel)[] => {
-  if (own === undefined) return [...cli];
-  return keepCliModels === true ? unique<T | OfferedModel>([...cli, ...own]) : [...own];
+  if (own === undefined) return uniqueModels(cli);
+  return keepCliModels === true ? uniqueModels<T | OfferedModel>([...cli, ...own]) : uniqueModels(own);
 };
 
 /** Explicit first-party targets; see https://platform.claude.com/docs/en/about-claude/models/overview. */
 const ALIAS_PINS: Record<string, string> = {
-  fable: 'claude-fable-5-1',
+  fable: 'claude-fable-5-2',
+  mythos: 'claude-mythos-5-2',
   opus: 'claude-opus-5-5',
   sonnet: 'claude-sonnet-5-5',
   haiku: 'claude-haiku-5-5',
@@ -142,18 +151,6 @@ export const pinnedModel = (id: string, env: Record<string, unknown>): string =>
   const endpoint = env.ANTHROPIC_BASE_URL;
   if (customProvider || typeof endpoint === 'string' && endpoint !== ''
     && endpoint.replace(/\/$/u, '') !== 'https://api.anthropic.com') return id;
-  const match = /^(fable|opus|sonnet|haiku)(\[(?:1m|200k)\])?$/u.exec(id);
+  const match = /^(fable|mythos|opus|sonnet|haiku)(\[(?:1m|200k)\])?$/u.exec(id);
   return match ? `${ALIAS_PINS[match[1] as string]}${match[2] ?? ''}` : id;
-};
-
-/** Offer explicit pin targets beside the CLI aliases, without asserting account access. */
-export const pinnedModels = <T extends OfferedModel>(models: readonly T[], env: Record<string, unknown>): T[] => {
-  const existing = new Set(models.map((model) => model.id));
-  return unique(models.flatMap((model) => {
-    const target = pinnedModel(model.id, env);
-    if (target === model.id || existing.has(target)) return [model];
-    const label = target.replace(/^claude-(\w+)-(\d+)-(\d+)/u,
-      (_match, family: string, major: string, minor: string) => `${family[0]!.toUpperCase()}${family.slice(1)} ${major}.${minor}`);
-    return [{ ...model, id: target, name: `${label} (pinned)` }, model];
-  }));
 };

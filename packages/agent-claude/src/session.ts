@@ -15,9 +15,10 @@ import { attachmentContent } from './attachments.js';
 import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
-import { pinnedModel, pinnedModels } from './models.js';
+import { pinnedModel, sdkModelId, uniqueModels } from './models.js';
 import { idleQuery } from './idle.js';
 import { executionFenceOf } from './tool-execution-fence.js';
+import { toolProfileOf } from './tool-profile.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
 import type { Asked, Spawned } from './spawn.js';
 
@@ -746,12 +747,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
   }
   const { uri, chatUri, cwd, emit } = options;
   const timingOrigin = performance.now();
-  let startupTimingEnabled = true;
   let timingGeneration = 0;
-  const timing = (stage: string, outcome: string, metadata?: { turn_id?: string; effort_level?: typeof EFFORTS[number] }): void => {
-    if (!startupTimingEnabled && !stage.startsWith('describe') && stage !== 'effort_application') return;
+  const timing = (stage: string, outcome: string, metadata?: { turn_id?: string; effort_level?: typeof EFFORTS[number]; timeout_ms?: number; duration_ms?: number }): void => {
     try {
-      options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), generation: timingGeneration, stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)), ...metadata })}`);
+      options.log?.(`[claude-startup] ${JSON.stringify({ session_id: idOf(uri), generation: timingGeneration, stage, outcome, elapsed_ms: Math.max(0, Math.round(performance.now() - timingOrigin)), ...(beginning === undefined ? {} : { turn_id: beginning.slice(0, 128) }), ...metadata })}`);
     } catch {}
   };
 
@@ -796,7 +795,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   let failed: string | undefined;
   let gone: string | undefined;
   let startedAt = 0;
-  let effortApplication: Promise<void> | undefined;
+  let startupApplication: Promise<void> | undefined;
   /**
    * The model the turn now running actually answered on, as its own frames
    * reported it.
@@ -900,6 +899,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
   // Keep the resolved value in session state so an absent selector is explicit.
   settings.claudeConfigIsolation = configIsolation;
   const isolateClaudeConfig = configIsolation === 'isolated';
+  const toolProfile = toolProfileOf(settings.claudeToolProfile);
+  settings.claudeToolProfile = toolProfile.profile;
+  const profileRemoved: ReadonlySet<string> = new Set(toolProfile.removed);
   const manifestCapture = settings.captureSdkInitToolManifest === undefined ? 'disabled' : settings.captureSdkInitToolManifest;
   if (manifestCapture !== 'disabled' && manifestCapture !== 'enabled') {
     throw new Error('captureSdkInitToolManifest must be one of disabled, enabled');
@@ -1613,7 +1615,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
           if (next.type === 'user' && !firstUserInputLogged) {
             firstUserInputLogged = true;
             timing('sdk_user_input', 'yield');
-            startupTimingEnabled = false;
           }
           yield next;
           if (steering !== undefined) {
@@ -2402,7 +2403,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * tool in both is one somebody has forbidden and also once approved.
    */
   const settled = (toolName: string): 'allow' | 'deny' | undefined => {
-    if (allowed.deny.includes(toolName)) return 'deny';
+    if (allowed.deny.includes(toolName) || profileRemoved.has(toolName)) return 'deny';
     if (allowed.allow.includes(toolName)) return 'allow';
     return undefined;
   };
@@ -2707,13 +2708,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const dependencies = new Set<string>();
   const disabledServers = new Set<string>();
   const idle = idleQuery<ReturnType<typeof query>>({
-    ...(options.claimSessionId === undefined ? {} : { beforeCreate: async () => {
+    ...(options.claimSessionId === undefined ? {} : { replacementAllowed: false, beforeCreate: async () => {
       if (options.forkAt !== undefined) throw new Error('Forking with shared session ownership is not supported');
       await options.claimSessionId!(agentId ?? reservedNativeId);
     } }),
     ...(options.admitResume === undefined ? {} : { admitResume: options.admitResume }),
     timeout: options.spawn === undefined && options.claimSessionId === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
     timing,
+    context: () => beginning === undefined ? {} : { turn_id: beginning.slice(0, 128) },
     eligible: () => !closed && gone === undefined && !busy()
       && (nativePromptSent || options.forkAt === undefined && options.rewindAt === undefined)
       && queued.length === 0 && waiting.length === 0 && steering === undefined
@@ -2760,6 +2762,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
       }
       const presetQuery = { ...fromPreset };
       if (extraArgsPolicy === 'none') delete presetQuery.extraArgs;
+      const querySettings = {
+        ...(fromPreset.settings as Bag | undefined),
+        disableClaudeAiConnectors: true,
+      };
       const handle = query({
         prompt: input(signal.signal),
         options: {
@@ -2862,7 +2868,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * before this and how an automation's still does.
            */
           ...presetQuery,
-          settings: { ...(fromPreset.settings as Bag | undefined), disableClaudeAiConnectors: true },
+          settings: querySettings,
           ...(options.env ? { env: { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env } } : {}),
           // From the settings, which is where it lives: it is a config key like
           // the others, and a second way in was a second thing to keep in step.
@@ -2888,7 +2894,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * call and that is what makes one set mid-session take effect.
            */
           ...(allowed.allow.length > 0 ? { allowedTools: [...allowed.allow] } : {}),
-          ...(allowed.deny.length > 0 ? { disallowedTools: [...allowed.deny] } : {}),
+          ...(allowed.deny.length > 0 || profileRemoved.size > 0
+            ? { disallowedTools: [...new Set([...allowed.deny, ...profileRemoved])] }
+            : {}),
           // Resumed, not replayed: the agent picks up the context it built - the
           // files it read, the decisions it made - rather than being handed a
           // transcript of them and asked to infer the rest.
@@ -3010,7 +3018,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const take = async (id: string): Promise<string | undefined> => {
     timing('model_selection', 'start');
     try {
-      await handle.setModel(modelId(id));
+      const application = handle.setModel(modelId(id));
+      startupApplication = application;
+      try { await application; }
+      finally { if (startupApplication === application) startupApplication = undefined; }
       timing('model_selection', 'ok');
       return undefined;
     }
@@ -3032,7 +3043,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
   const beginTurn = async (turnId: string, text: string, model?: Chosen, queuedMessageId?: string, from?: MessageFrom): Promise<void> => {
-    timing('begin_turn', 'start');
+    timing('begin_turn', 'start', { turn_id: turnId.slice(0, 128) });
     try { attachmentContent(text, from?.attachments); }
     catch (error) { refuseTurn(turnId, text, error instanceof Error ? error.message : String(error), queuedMessageId, from); return; }
     if (gone !== undefined) {
@@ -3044,111 +3055,126 @@ export function createSession(options: ClaudeSessionOptions): Session {
       return;
     }
     beginning = turnId;
-    const previousEffortApplication = effortApplication;
-    if (previousEffortApplication !== undefined) {
-      try { await previousEffortApplication; } catch {}
-      if (closed || beginning !== turnId) return;
-    }
-    if (model !== undefined && model.id !== chosen) {
+    try {
+      const previousStartupApplication = startupApplication;
+      if (previousStartupApplication !== undefined) {
+        timing('previous_startup_application', 'start');
+        try { await previousStartupApplication; } catch {}
+        timing('previous_startup_application', 'settled');
+        if (closed || beginning !== turnId) return;
+      }
+      if (model !== undefined && model.id !== chosen) {
+        touch();
+        let refused: string | undefined;
+        try { await ready(); refused = await take(model.id); }
+        catch (error: unknown) { refused = error instanceof Error ? error.message : String(error); }
+        if (closed || beginning !== turnId) return;
+        if (refused !== undefined) {
+          beginning = undefined;
+          refuseTurn(turnId, text, refused, queuedMessageId, from);
+          startNext();
+          return;
+        }
+        chosen = model.id;
+      }
+      const selected = chosen;
+      active = {
+        id: turnId,
+        startedAt: new Date().toISOString(),
+        message: {
+          text,
+          origin: from?.origin ?? { kind: 'user' },
+          ...(from?._meta ? { _meta: from._meta } : {}),
+          ...(from?.attachments ? { attachments: from.attachments } : {}),
+          ...(selected ? { model: { id: selected, ...(model?.config ? { config: model.config } : {}) } } : {}),
+        },
+        responseParts: [],
+        usage: undefined,
+      } satisfies WireTurn<ActiveTurn> as Bag;
+      startedAt = Date.now();
+      failed = undefined;
+      newTurn();
+      emit('chat', {
+        type: 'chat/turnStarted',
+        turnId,
+        startedAt: active.startedAt,
+        message: active.message,
+        ...(queuedMessageId !== undefined ? { queuedMessageId } : {}),
+      });
+      if (title === 'New session' && text) retitle(text.slice(0, 60));
+      doing('Thinking');
       touch();
-      let refused: string | undefined;
-      try { await ready(); refused = await take(model.id); }
-      catch (error: unknown) { refused = error instanceof Error ? error.message : String(error); }
-      if (closed || beginning !== turnId) return;
-      if (refused !== undefined) {
+      const reject = (why: string) => {
+        if (str(active?.id) !== turnId) return;
+        const turn = active!;
+        turn.state = 'error';
+        turn.duration = Date.now() - startedAt;
+        failed = why;
+        const part = addFailure(turn, why);
+        turns.push(turn);
+        active = undefined;
         beginning = undefined;
-        refuseTurn(turnId, text, refused, queuedMessageId, from);
+        emit('chat', { type: 'chat/error', turnId, duration: turn.duration, part });
+        doing(undefined);
+        touch();
         startNext();
+      };
+      try { await ready(); }
+      catch (error: unknown) {
+        reject(error instanceof Error ? error.message : String(error));
         return;
       }
-      chosen = model.id;
-    }
-    const selected = chosen;
-    active = {
-      id: turnId,
-      startedAt: new Date().toISOString(),
-      message: {
-        text,
-        origin: from?.origin ?? { kind: 'user' },
-        ...(from?._meta ? { _meta: from._meta } : {}),
-        ...(from?.attachments ? { attachments: from.attachments } : {}),
-        ...(selected ? { model: { id: selected, ...(model?.config ? { config: model.config } : {}) } } : {}),
-      },
-      responseParts: [],
-      usage: undefined,
-    } satisfies WireTurn<ActiveTurn> as Bag;
-    startedAt = Date.now();
-    failed = undefined;
-    newTurn();
-    emit('chat', {
-      type: 'chat/turnStarted',
-      turnId,
-      startedAt: active.startedAt,
-      message: active.message,
-      ...(queuedMessageId !== undefined ? { queuedMessageId } : {}),
-    });
-    if (title === 'New session' && text) retitle(text.slice(0, 60));
-    doing('Thinking');
-    touch();
-    const reject = (why: string) => {
-      if (str(active?.id) !== turnId) return;
-      const turn = active!;
-      turn.state = 'error';
-      turn.duration = Date.now() - startedAt;
-      failed = why;
-      const part = addFailure(turn, why);
-      turns.push(turn);
-      active = undefined;
+      if (closed || beginning !== turnId || str(active?.id) !== turnId) return;
+      const level = EFFORTS.find((one) => one === (model?.config ?? {}).thinkingLevel);
+      if (level !== undefined && level !== settings.effortLevel) {
+        const metadata = { turn_id: turnId.slice(0, 128), effort_level: level };
+        timing('effort_application', 'start', metadata);
+        let application: Promise<void> | undefined;
+        try {
+          application = handle.applyFlagSettings({ effortLevel: level });
+          startupApplication = application;
+          await application;
+        } catch (error: unknown) {
+          timing('effort_application', 'error', metadata);
+          if (!closed && beginning === turnId && str(active?.id) === turnId)
+            reject(error instanceof Error ? error.message : String(error));
+          return;
+        } finally {
+          if (application !== undefined && startupApplication === application) startupApplication = undefined;
+        }
+        timing('effort_application', 'ok', metadata);
+        if (closed) return;
+        settings.effortLevel = level;
+        emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
+        if (beginning !== turnId || str(active?.id) !== turnId) return;
+      }
       beginning = undefined;
-      emit('chat', { type: 'chat/error', turnId, duration: turn.duration, part });
-      doing(undefined);
-      touch();
-      startNext();
-    };
-    try { await ready(); }
-    catch (error: unknown) {
-      reject(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    if (closed || beginning !== turnId || str(active?.id) !== turnId) return;
-    const level = EFFORTS.find((one) => one === (model?.config ?? {}).thinkingLevel);
-    if (level !== undefined && level !== settings.effortLevel) {
-      const metadata = { turn_id: turnId.slice(0, 128), effort_level: level };
-      timing('effort_application', 'start', metadata);
-      let application: Promise<void> | undefined;
-      try {
-        application = handle.applyFlagSettings({ effortLevel: level });
-        effortApplication = application;
-        await application;
-      } catch (error: unknown) {
-        timing('effort_application', 'error', metadata);
-        if (!closed && beginning === turnId && str(active?.id) === turnId)
-          reject(error instanceof Error ? error.message : String(error));
-        return;
-      } finally {
-        if (application !== undefined && effortApplication === application) effortApplication = undefined;
+      let sent = carried === undefined ? text : `${carried}\n\n${text}`;
+      if (interruptionPending) {
+        sent = `${interruptionNotice}\n\n${sent}`;
+        interruptionPending = false;
       }
-      timing('effort_application', 'ok', metadata);
-      if (closed) return;
-      settings.effortLevel = level;
-      emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
-      if (beginning !== turnId || str(active?.id) !== turnId) return;
+      carried = undefined;
+      hasNativePrompt = true;
+      nativePromptSent = true;
+      timing('enqueue', 'start', { turn_id: turnId.slice(0, 128) });
+      waiting.push({ type: 'user', message: { role: 'user', content: attachmentContent(sent, from?.attachments) }, parent_tool_use_id: null });
+      timing('enqueue', 'ok', { turn_id: turnId.slice(0, 128) });
+      wake?.();
+      wake = undefined;
+      touch();
+    } catch (error: unknown) {
+      if (!closed && beginning === turnId) {
+        const why = error instanceof Error ? error.message : String(error);
+        if (str(active?.id) === turnId) active = undefined;
+        refuseTurn(turnId, text, why, queuedMessageId, from);
+      }
+    } finally {
+      if (beginning === turnId) {
+        beginning = undefined;
+        startNext();
+      }
     }
-    beginning = undefined;
-    let sent = carried === undefined ? text : `${carried}\n\n${text}`;
-    if (interruptionPending) {
-      sent = `${interruptionNotice}\n\n${sent}`;
-      interruptionPending = false;
-    }
-    carried = undefined;
-    hasNativePrompt = true;
-    nativePromptSent = true;
-    timing('enqueue', 'start');
-    waiting.push({ type: 'user', message: { role: 'user', content: attachmentContent(sent, from?.attachments) }, parent_tool_use_id: null });
-    timing('enqueue', 'ok');
-    wake?.();
-    wake = undefined;
-    touch();
   };
 
   /**
@@ -3342,13 +3368,13 @@ export function createSession(options: ClaudeSessionOptions): Session {
     offered = list(init.models)
       .map((raw) => {
         const model = bag(raw);
-        // `value`, not `id`. Reading the wrong name costs every model there
-        // is and leaves a picker that offers nothing.
-        return { id: str(model.value) ?? '', name: str(model.displayName) ?? str(model.value) ?? '' };
+        // `value` can be an alias. `resolvedModel` is the exact dispatch id;
+        // keep the `default` selector special.
+        return { id: sdkModelId(model.value, model.resolvedModel), name: str(model.displayName) ?? str(model.value) ?? '' };
       })
       .filter((model) => model.id !== '');
     if (options.offerModels) offered = await options.offerModels(offered);
-    else offered = pinnedModels(offered, { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env });
+    else offered = uniqueModels(offered);
     /*
      * The style the preset names, applied once the CLI is there to take it.
      *

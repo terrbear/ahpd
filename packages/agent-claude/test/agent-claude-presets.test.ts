@@ -31,7 +31,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
       toggleMcpServer: async () => {},
       reconnectMcpServer: async () => {},
       setMcpServers: async () => {},
-      initializationResult: async () => ({}),
+      initializationResult: async () => sdk.initialization,
       mcpServerStatus: async () => [],
       reloadSkills: async () => ({ skills: [] }),
       reloadPlugins: async () => ({ plugins: [] }),
@@ -42,7 +42,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   },
 }));
 
-const sdk = vi.hoisted(() => ({ options: [] as Record<string, unknown>[] }));
+const sdk = vi.hoisted(() => ({ options: [] as Record<string, unknown>[], initialization: {} as Record<string, unknown> }));
 
 const { createSession } = await import('../src/session.js');
 
@@ -57,6 +57,7 @@ const settle = async (times = 8): Promise<void> => {
 /** One session's `query()` options, created with a preset name in its config. */
 const queried = async (presets: Record<string, Record<string, unknown>> | undefined, preset: unknown, env?: Record<string, string>, shellXdgConfigHome?: string): Promise<Record<string, unknown>> => {
   sdk.options = [];
+  sdk.initialization = {};
   createSession({
     uri: 'ahp-session:/preset',
     chatUri: 'ahp-chat:/preset',
@@ -252,4 +253,46 @@ it('offers the models the harness names once a session has started', async () =>
   });
   await settle();
   expect(session.models?.()).toEqual([{ id: 'stealth/space-bunny-alpha', name: 'Space Bunny' }]);
+});
+
+it('refreshes session models with resolved SDK ids and keeps default special', async () => {
+  sdk.options = [];
+  sdk.initialization = {
+    models: [
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5' },
+      { value: 'claude-opus-5', resolvedModel: 'claude-opus-5', displayName: 'Opus 5' },
+      { value: 'claude-opus-5-5', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5 duplicate' },
+      { value: 'default', resolvedModel: 'claude-opus-5-5', displayName: 'Default' },
+      { value: 'custom/model', displayName: 'Custom model' },
+    ],
+  };
+  const session = createSession({
+    uri: 'ahp-session:/resolved-models',
+    chatUri: 'ahp-chat:/resolved-models',
+    cwd: mkdtempSync(join(tmpdir(), 'ahpd-resolved-models-')),
+    emit: () => {},
+    settings: {},
+  });
+  await settle();
+  expect(session.models?.()).toEqual([
+    { id: 'claude-opus-5-5', name: 'Opus 5.5' },
+    { id: 'claude-opus-5', name: 'Opus 5' },
+    { id: 'default', name: 'Default' },
+    { id: 'custom/model', name: 'Custom model' },
+  ]);
+});
+
+it('does not rewrite explicit offered model ids after session refresh', async () => {
+  sdk.options = [];
+  sdk.initialization = { models: [{ value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5' }] };
+  const session = createSession({
+    uri: 'ahp-session:/custom-models',
+    chatUri: 'ahp-chat:/custom-models',
+    cwd: mkdtempSync(join(tmpdir(), 'ahpd-custom-models-')),
+    emit: () => {},
+    settings: {},
+    offerModels: async () => [{ id: 'provider/opus-5-5', name: 'Provider Opus' }],
+  });
+  await settle();
+  expect(session.models?.()).toEqual([{ id: 'provider/opus-5-5', name: 'Provider Opus' }]);
 });
