@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { Bag, Session } from '@ahpd/sdk';
+import type { Bag, Session, Start } from '@ahpd/sdk';
 import { acpAgent } from '../src/agent.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/acp-server.mjs', import.meta.url));
@@ -17,7 +17,7 @@ afterEach(async () => {
   for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-function setup(options: { idleTimeoutMs?: number; asyncQuestions?: boolean; nonResumable?: boolean } = {}) {
+function setup(options: { idleTimeoutMs?: number; asyncQuestions?: boolean; nonResumable?: boolean; beginWork?: Start['beginWork'] } = {}) {
   const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-idle-'));
   paths.push(path);
   const log = join(path, 'requests.jsonl');
@@ -33,6 +33,7 @@ function setup(options: { idleTimeoutMs?: number; asyncQuestions?: boolean; nonR
   const events: Bag[] = [];
   const session = acpAgent(sessionOptions).create({
     uri: 'idle-test:/host', chatUri: 'ahp-chat:/idle-test', workingDirectory: path,
+    ...(options.beginWork === undefined ? {} : { beginWork: options.beginWork }),
     settings: {}, schema: () => ({}), emit: (_channel, action) => { events.push(action); },
   }) as Session;
   sessions.push(session);
@@ -186,4 +187,40 @@ it('claims a new native identity before prompting and retains its process withou
   const prompts = requests(log).filter((entry) => entry.method === 'session/prompt');
   expect(prompts[0]!.pid).toBe(prompts[1]!.pid);
   expect(requests(log).some((entry) => entry.method === 'session/load')).toBe(false);
+});
+
+
+it('awaits work admission before spawning and finishes only after the ACP response', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async () => { await gate; return finish; });
+  const t = setup({ beginWork });
+  t.session.begin('first', 'ask');
+  await vi.waitFor(() => expect(beginWork).toHaveBeenCalledOnce());
+  expect(() => readFileSync(t.log)).toThrow();
+  expect(finish).not.toHaveBeenCalled();
+  admit();
+  await vi.waitFor(() => expect((t.session.sessionState() as Bag).inputNeeded).toMatchObject([{ kind: 'toolConfirmation' }]));
+  expect(finish).not.toHaveBeenCalled();
+  t.session.confirm('call-perm', true, 'yes-once');
+  await vi.waitFor(() => expect(completedTurns(t.events)).toHaveLength(1));
+  expect(finish).toHaveBeenCalledOnce();
+});
+
+it('does not spawn when work admission is rejected', async () => {
+  const t = setup({ beginWork: async () => { throw new Error('task sealed'); } });
+  t.session.begin('first', 'hello');
+  await vi.waitFor(() => expect(t.events.some((event) => event.type === 'chat/error')).toBe(true));
+  expect(() => readFileSync(t.log)).toThrow();
+});
+
+it('retains an admitted ACP permit when shutdown interrupts an unanswered prompt', async () => {
+  const finish = vi.fn(async () => {});
+  const t = setup({ beginWork: async () => finish });
+  t.session.begin('first', 'ask');
+  await vi.waitFor(() => expect((t.session.sessionState() as Bag).inputNeeded).toMatchObject([{ kind: 'toolConfirmation' }]));
+  await t.session.close();
+  await wait(30);
+  expect(finish).not.toHaveBeenCalled();
 });

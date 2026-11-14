@@ -187,3 +187,29 @@ Process groups alone cannot contain descendants that create their own session.
 Keep shared cloud operation disabled until drain/recovery, routing, and
 credential coordination are integrated and tested. These hooks do not establish
 ECS task death or safe credential sharing.
+
+## Work admission (partial instrumentation)
+
+A lease may implement `beginWork(work: SessionWork): Promise<() => Promise<void>>`,
+where `SessionWork` contains string `kind` and globally unique `operationId`.
+The lease already identifies the logical chat, so a cloud implementation calls
+`drain.beginWork({logicalId: context.chatUri, ...work})`. The returned asynchronous
+function records definitive completion. Failed completion must leave the work
+outstanding. Admission rejection must prevent dispatch.
+
+The host passes this hook to providers as `Start.beginWork` and refuses new
+work after logical disposal. Contributed host tools await admission before
+calling the tool and finish after a successful return. Tool rejection retains
+the permit because arbitrary tool code may have started detached work.
+ACP prompts await admission before opening their runtime and finish after an
+actual ACP prompt response, including an authoritative cancelled response.
+Transport errors and shutdown during a prompt retain the permit. Cancellation
+before opening the runtime may finish because no work was dispatched.
+
+This is not a complete activity census. Claude operations, client-owned tools
+and replies, shell commands, native background activity, pending questions,
+approvals, and other host operations still need instrumentation. An ACP prompt
+response alone does not establish that its questions or background work ended.
+Do not acknowledge a drain participant as fully instrumented or enable sealing
+based on these hooks alone. Disconnect and synthetic cancellation results are
+not definitive completion evidence.

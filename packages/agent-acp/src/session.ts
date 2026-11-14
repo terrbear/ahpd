@@ -1057,9 +1057,12 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    */
   const run = async (turnId: string, text: string, chosen: Chosen | undefined): Promise<void> => {
     try {
+      const completed = await start.beginWork?.({ kind: 'prompt', operationId: crypto.randomUUID() });
+      if (closed || active === undefined || String(active.id) !== turnId) { await completed?.(); return; }
       const held = await open();
       if (closed || active === undefined || String(active.id) !== turnId) return;
       if (cancelRequested) {
+        await completed?.();
         finish(turnId, 'cancelled');
         return;
       }
@@ -1071,6 +1074,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       if (attachments.some((part) => part.type === 'resource') && !capabilities?.embeddedContext) throw new Error('This ACP agent does not support embedded files');
       const response = await held.connection.prompt(held.sessionId, text, attachments);
       saidUsage(response.usage);
+      await completed?.();
       finish(turnId, cancelRequested || response.stopReason === 'cancelled' ? 'cancelled' : 'complete');
     }
     catch (why: unknown) {

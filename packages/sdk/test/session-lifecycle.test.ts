@@ -184,3 +184,34 @@ it('reports concurrent logical disposal once without interpreting it as exit pro
   expect(disposed).toHaveBeenCalledOnce();
   expect(release).not.toHaveBeenCalled();
 });
+
+it('passes awaited work admission to the provider with its logical lease', async () => {
+  const gate = deferred();
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async () => { await gate.promise; return finish; });
+  const t = await setup({ acquire: async () => ({ claim: async () => {}, release: async () => {}, beginWork }) });
+  await t.create();
+  const start = t.starts.mock.calls[0]![0];
+  let admitted = false;
+  const pending = start.beginWork!({ kind: 'prompt', operationId: 'unique-operation' }).then((done) => { admitted = true; return done; });
+  await vi.waitFor(() => expect(beginWork).toHaveBeenCalledOnce());
+  expect(admitted).toBe(false);
+  gate.resolve();
+  await (await pending)();
+  expect(finish).toHaveBeenCalledOnce();
+  await t.dispose();
+  await expect(start.beginWork!({ kind: 'prompt', operationId: 'later' })).rejects.toThrow('cannot admit work');
+});
+
+it('refuses new work while asynchronous disposal notification is pending', async () => {
+  const notification = deferred();
+  const beginWork = vi.fn(async () => async () => {});
+  const lifetimes = sessionLifetimes({ acquire: async () => ({ claim: async () => {}, release: async () => {}, disposed: () => notification.promise, beginWork }) });
+  await lifetimes.acquire({ provider: 'test', sessionUri: 'test:/one', chatUri: 'chat:/one' });
+  lifetimes.started('chat:/one');
+  const disposal = lifetimes.dispose('chat:/one');
+  await expect(lifetimes.beginWork('chat:/one', { kind: 'prompt', operationId: 'one' })).rejects.toThrow('cannot admit work');
+  expect(beginWork).not.toHaveBeenCalled();
+  notification.resolve();
+  await disposal;
+});

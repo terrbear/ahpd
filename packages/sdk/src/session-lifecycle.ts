@@ -1,4 +1,4 @@
-import type { SessionLease, SessionLifecycle } from './types/host.js';
+import type { SessionLease, SessionLifecycle, SessionWork } from './types/host.js';
 import type { WriterExitProof } from './types/session.js';
 
 type Held = {
@@ -35,6 +35,14 @@ export function sessionLifetimes(lifecycle: SessionLifecycle | undefined) {
         void pending.catch(() => { if (leases.get(context.chatUri) === acquiring) leases.delete(context.chatUri); });
       }
       return held.pending;
+    },
+    async beginWork(chatUri: string, work: SessionWork): Promise<(() => Promise<void>) | undefined> {
+      if (lifecycle === undefined) return undefined;
+      const held = leases.get(chatUri);
+      if (held === undefined || held.disposed || held.closing) throw new Error(`${chatUri} cannot admit work`);
+      const lease = await held.pending;
+      if (held.disposed || held.closing) throw new Error(`${chatUri} cannot admit work`);
+      return lease.beginWork?.(work);
     },
     started(chatUri: string): void {
       const held = leases.get(chatUri);

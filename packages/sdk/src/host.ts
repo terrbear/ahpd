@@ -50,7 +50,7 @@ import type { SessionConfigAnswerer, SessionConfigAsk } from './types/completion
 import type { MessageFrom, Ran } from './types/session.js';
 import type { WriteMode } from './types/resources.js';
 import type { ChangesetOperationContext, ChangesetState } from './types/changes.js';
-import type { Clients, Connection, Credential, Host, HostOptions, HostTool, TitleStrategy, ToolCall } from './types/host.js';
+import type { Clients, Connection, Credential, Host, HostOptions, HostTool, SessionWork, TitleStrategy, ToolCall } from './types/host.js';
 import type { HostEvent } from './types/events.js';
 import { raise } from './plugins.js';
 import type { Grant, Principal } from './types/users.js';
@@ -3701,6 +3701,7 @@ export function createHost(options: HostOptions): Host {
       : () => options.admitSession!({ activeSessions: sessions.size });
     const session = admittedStart(admitSession, () => used.create({
       ...(lease === undefined ? {} : { claimSessionId: (id: string) => lease.claim(id) }),
+      ...(lease?.beginWork === undefined ? {} : { beginWork: (work: SessionWork) => lifetimes.beginWork(chatUri, work).then((finish) => finish!) }),
       ...(admitSession === undefined ? {} : { admitResume: admitSession }),
       uri,
       chatUri,
@@ -5917,8 +5918,10 @@ export function createHost(options: HostOptions): Host {
         // done, so a handler knows whether it answered and not only that it
         // ran. Raising it before would report an attempt as a result.
         run: async (input: Record<string, unknown>): Promise<string> => {
+          const finish = await lifetimes.beginWork(chatUri, { kind: 'host-tool', operationId: crypto.randomUUID() });
           try {
             const answer = await one.run(input, toolContext(uri, chatUri));
+            await finish?.();
             void fire({ type: 'tool_call', session: uri, chat: chatUri, tool: definition.name, ok: true });
             return answer;
           }

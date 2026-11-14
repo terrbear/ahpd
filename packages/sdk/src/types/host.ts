@@ -63,7 +63,13 @@ export type { ResourceProvider, ResourceStore } from './resources.js';
 export type { TerminalStore } from './terminals.js';
 
 /** How to construct a host. */
+export interface SessionWork {
+  kind: string;
+  operationId: string;
+}
+
 export interface SessionLease {
+  beginWork?(work: SessionWork): Promise<() => Promise<void>>;
   claim(canonicalId: string): Promise<void>;
   release(proof: WriterExitProof | { kind: 'never-started' }): Promise<void>;
   disposed?(): Promise<void>;
