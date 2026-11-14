@@ -1582,12 +1582,13 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     settings: () => ({ ...settings }),
 
     ...(provider === 'codex' ? { setSystemInstructions: async (next: string[]): Promise<void> => {
+      await controlled(async () => {
       if (closed || active !== undefined || queued.length > 0 || steering.busy()) throw new Error('Cannot update system instructions while this chat owns active work');
       if (live === undefined && acpSessionId === undefined && start.resume === undefined) {
         instructions = next.join('\n\n');
         await open();
         touch();
-        return;
+        return true;
       }
       await open();
       if (!safelyIdle()) throw new Error('Cannot update system instructions while this chat owns active work');
@@ -1607,6 +1608,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       await stopping;
       await open();
       touch();
+      return true;
+      });
     } } : {}),
 
     setTools: async (next) => {

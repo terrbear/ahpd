@@ -117,6 +117,10 @@ it('updates instructions through the authorized host API and keeps the same chat
   const bridge = acpAgent(options);
   const host = createHost({ path: start.workingDirectory!, agents: [{ ...bridge, create: input => {
     const session = bridge.create(input);
+    const close = session.close.bind(session);
+    let closing: Promise<void> | undefined;
+    session.close = () => closing ??= Promise.resolve(close());
+    sessions.push(session);
     const update = session.setSystemInstructions!;
     session.setSystemInstructions = async instructions => { refreshed.push(instructions); await update(instructions); };
     return session;
