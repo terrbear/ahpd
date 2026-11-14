@@ -142,6 +142,7 @@ const shellInitScripts = (value: unknown): ShellInitScript[] | undefined => {
 const sourcing = (path: string): string => `{ . '${path.replaceAll("'", "'\\''")}'; } 2>/dev/null || printf 'shell init script exited %s\\n' "$?"`;
 
 interface PendingInput {
+  finish?: () => Promise<void>;
   id: string;
   entry: Bag;
   /** `AskUserQuestion` needs its own payload echoed back verbatim. */
@@ -1252,8 +1253,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const generation = claimGeneration;
     const clientGeneration = clientClaimGenerations.get(owner) ?? 0;
     if (closed) return { text: 'The session was disposed', ok: false };
-    const id = await claim(called(exposedToolName(tool, offering)), input);
     const finish = options.beginWork === undefined ? undefined : await options.beginWork({ kind: 'client-tool', operationId: crypto.randomUUID() });
+    if (closed || generation !== claimGeneration || clientGeneration !== (clientClaimGenerations.get(owner) ?? 0)) {
+      await finish?.();
+      return { text: 'The client call ended before it could be dispatched', ok: false };
+    }
+    const id = await claim(called(exposedToolName(tool, offering)), input);
     if (id === undefined || closed || generation !== claimGeneration
       || clientGeneration !== (clientClaimGenerations.get(owner) ?? 0)) {
       await finish?.();
@@ -2475,6 +2480,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
     }
     if (abortSignal?.aborted) return refuse('AHP confirmation was aborted before it was requested');
     if (closed || scanTurn !== undefined && scanScope?.turn !== scanTurn) return refuse('The tool call ended while its permission was being checked');
+    const finishInput = options.beginWork === undefined ? undefined : await options.beginWork({ kind: 'input', operationId: crypto.randomUUID() });
+    if (closed || abortSignal?.aborted || scanTurn !== undefined && scanScope?.turn !== scanTurn) {
+      await finishInput?.();
+      return refuse('The tool call ended before its permission was published');
+    }
     return await new Promise((settle) => {
       const about = bag(asked);
       /*
@@ -2538,7 +2548,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         const request = { id, message: str(raw.header) ?? 'The agent has a question', questions };
         // `chat` is required on every input request and was never sent.
         const entry: Bag = { id, chat: where, kind: 'chatInput', request };
-        pending.set(id, { id, entry, questions: list(raw.questions), asked, answers: new Map(), settle });
+        pending.set(id, { id, entry, ...(finishInput === undefined ? {} : { finish: finishInput }), questions: list(raw.questions), asked, answers: new Map(), settle });
         emitOn(scope, { type: 'chat/inputRequested', turnId: turn.id, request });
         inputNeededSet(entry);
         touch();
@@ -2612,6 +2622,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // neither was sent.
       const entry: Bag = { id, chat: where, kind: 'toolConfirmation', turnId: str(turn.id) ?? '', toolCall: call };
       const pendingInput: PendingInput = {
+        ...(finishInput === undefined ? {} : { finish: finishInput }),
         id,
         entry,
         asked: new Map(),
@@ -3612,7 +3623,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
         if (type === 'result') {
           const turn = active;
-          if (turn !== undefined && !promptCompletionUncertain) {
+          const unfinishedTools = [...parts.values()].some((part) => bag(part.toolCall).status === 'running');
+          if (turn !== undefined && !promptCompletionUncertain && !unfinishedTools) {
             const finish = promptPermits.get(String(turn.id));
             await finish?.();
             promptPermits.delete(String(turn.id));
@@ -4414,6 +4426,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         && str(bag(one.entry.toolCall).toolCallId) === toolCallId);
       if (!held) return;
       const settle = held.settle;
+      void held.finish?.().catch(() => {});
       pending.delete(held.id);
       held.clearAbort?.();
       inputNeededRemoved(held.id);
@@ -4614,6 +4627,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const held = pending.get(requestId);
       if (!held) return;
       pending.delete(requestId);
+      void held.finish?.().catch(() => {});
       held.clearAbort?.();
       inputNeededRemoved(requestId);
 

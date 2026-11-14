@@ -982,3 +982,32 @@ it('gates Claude retry admission independently from the failed prompt', async ()
   await settle();
   expect(finish).toHaveBeenCalledTimes(2);
 });
+
+it('holds a question permit beyond the native prompt result and finishes only its answer', async () => {
+  const inputFinished = vi.fn(async () => {});
+  const held = session({ beginWork: async (work) => work.kind === 'input' ? inputFinished : async () => {} });
+  held.begin('question-turn', 'hello');
+  await settle();
+  const ask = sdk.runs[0]!.options.canUseTool as (name: string, input: Record<string, unknown>, about: Record<string, unknown>) => Promise<unknown>;
+  const pending = ask('AskUserQuestion', { questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }] }, { toolUseID: 'work-question' });
+  await settle();
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', duration_ms: 1 });
+  await settle();
+  expect(inputFinished).not.toHaveBeenCalled();
+  held.answer('work-question', false, {});
+  await pending;
+  expect(inputFinished).toHaveBeenCalledOnce();
+});
+
+it('retains an unanswered question permit on disposal', async () => {
+  const inputFinished = vi.fn(async () => {});
+  const held = session({ beginWork: async (work) => work.kind === 'input' ? inputFinished : async () => {} });
+  held.begin('question-turn', 'hello');
+  await settle();
+  const ask = sdk.runs[0]!.options.canUseTool as (name: string, input: Record<string, unknown>, about: Record<string, unknown>) => Promise<unknown>;
+  const pending = ask('AskUserQuestion', { questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }] }, { toolUseID: 'work-question' });
+  await settle();
+  await held.close();
+  await pending;
+  expect(inputFinished).not.toHaveBeenCalled();
+});

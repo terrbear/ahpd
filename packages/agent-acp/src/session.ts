@@ -61,6 +61,7 @@ import { machineAsked, Status } from '@ahpd/sdk';
 import type { Bag, Chosen, ClientToolCall, MessageFrom, OpenedTerminal, Ran, Session, Spawn, Start, ToolsEndpoint } from '@ahpd/sdk';
 import { watchSession } from './catalog.js';
 import { connectAcp } from './connection.js';
+import { pendingWork } from './pending-work.js';
 import { clientTools } from './clienttools.js';
 import { elicitations } from './elicitation.js';
 import { confirmationOptions, contentBlocks, mapUpdate } from './mapping.js';
@@ -89,9 +90,11 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   const provider = options.provider ?? 'acp';
   const instructions = provider === 'codex' ? start.instructions?.join('\n\n') : undefined;
   const pendingInputs = new Map<string, Bag>();
+  const questionWork = pendingWork(start.beginWork);
   const emit: Start['emit'] = (where, action) => {
     if (where === 'session' && action.type === 'session/inputNeededSet') {
       const request = bag(action.request);
+      if (typeof bag(bag(request.request)._meta)['codex/asyncUserInput'] === 'string') questionWork.track(String(request.id));
       pendingInputs.set(String(request.id), structuredClone(request));
       scheduleIdleRetirement();
     }
@@ -209,7 +212,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   let supportsSessionLoad = false;
   /** The server's own id for this conversation, once `session/new` answered. */
   let acpSessionId: string | undefined = record?.id;
-  const inputs = elicitations(emit, start.chatUri, () => ({ sessionId: acpSessionId, turn: mapping }));
+  const inputs = elicitations(emit, start.chatUri, () => ({ sessionId: acpSessionId, turn: mapping }), start.beginWork);
   const asynchronous = asyncInputs(emit, start.chatUri, turns, (turn, id, response, answers) => {
     const watched = record?.turns.find((one) => one.turnId === turn);
     if (watched === undefined || record === undefined) throw new Error('The question transcript is unavailable');
@@ -222,7 +225,10 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       throw error;
     }
   });
-  for (const request of asynchronous.requests()) pendingInputs.set(String(request.id), request);
+  for (const request of asynchronous.requests()) {
+    questionWork.track(String(request.id));
+    pendingInputs.set(String(request.id), request);
+  }
 
   /** The one opening, shared by every caller, so one server is spawned. */
   let opening: Promise<{ connection: AcpConnection; sessionId: string }> | undefined;
@@ -257,6 +263,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     /** Every option the server offered, as the call offers them to a person. */
     offered: ConfirmationOption[];
     settle(answer: PermissionAnswer): void;
+    finish?: () => Promise<void>;
   }>();
   /** The terminals this session opened for the server, by the server's own id. */
   const terminals = new Map<string, { handle: OpenedTerminal; limit?: number }>();
@@ -584,7 +591,9 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    * kind is answered `cancelled`, because selecting an `always` is a decision
    * the person did not make.
    */
-  const askPermission = (request: RequestPermissionRequest): Promise<PermissionAnswer> => {
+  const askPermission = async (request: RequestPermissionRequest): Promise<PermissionAnswer> => {
+    const finish = await start.beginWork?.({ kind: 'input', operationId: crypto.randomUUID() });
+    if (closed) { await finish?.(); return 'cancelled'; }
     const option = (kind: PermissionOptionKind): string | undefined =>
       request.options.find((one) => one.kind === kind)?.optionId;
     const allow = option('allow_once');
@@ -595,6 +604,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
 
     const answered = new Promise<PermissionAnswer>((resolve) => {
       permissions.set(toolCallId, {
+        ...(finish === undefined ? {} : { finish }),
         requestId,
         ...(allow === undefined ? {} : { allow }),
         ...(reject === undefined ? {} : { reject }),
@@ -1074,7 +1084,9 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       if (attachments.some((part) => part.type === 'resource') && !capabilities?.embeddedContext) throw new Error('This ACP agent does not support embedded files');
       const response = await held.connection.prompt(held.sessionId, text, attachments);
       saidUsage(response.usage);
-      await completed?.();
+      await questionWork.ready();
+      const unfinishedTools = mapping?.parts.some((part) => part.kind === 'toolCall' && bag(part.toolCall).status === 'running') ?? false;
+      if (!unfinishedTools && !offered.busy()) await completed?.();
       finish(turnId, cancelRequested || response.stopReason === 'cancelled' ? 'cancelled' : 'complete');
     }
     catch (why: unknown) {
@@ -1467,14 +1479,18 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       });
       const chosen = picked?.id ?? (approved ? held.allow : held.reject);
       held.settle(chosen === undefined ? 'cancelled' : { optionId: chosen });
+      void held.finish?.().catch(() => {});
       doing(approved ? 'Running' : 'Thinking');
       touch();
     },
 
     answer: (id, accepted, answers) => {
+      const isAsync = asynchronous.has(id);
+      if (isAsync) questionWork.check(id);
       const answer = asynchronous.has(id)
         ? asynchronous.answer(id, accepted, answers)
         : inputs.answer(id, accepted, answers);
+      if (isAsync) questionWork.complete(id);
       touch();
       return answer;
     },
@@ -1587,6 +1603,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       // A turn still open has nobody left to answer it.
       if (active !== undefined) finish(String(active.id), 'cancelled');
       await Promise.all([retirement, gone, opening?.catch(() => undefined)]);
+      await questionWork.ready();
       if (retirementFailure !== undefined) throw retirementFailure;
     },
   };

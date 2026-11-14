@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { Bag, Session, Start } from '@ahpd/sdk';
+import type { Bag, Session, Start, SessionWork } from '@ahpd/sdk';
 import { acpAgent } from '../src/agent.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/acp-server.mjs', import.meta.url));
@@ -194,7 +194,10 @@ it('awaits work admission before spawning and finishes only after the ACP respon
   let admit!: () => void;
   const gate = new Promise<void>((resolve) => { admit = resolve; });
   const finish = vi.fn(async () => {});
-  const beginWork = vi.fn(async () => { await gate; return finish; });
+  const beginWork = vi.fn(async (work: SessionWork) => {
+    if (work.kind !== 'prompt') return async () => {};
+    await gate; return finish;
+  });
   const t = setup({ beginWork });
   t.session.begin('first', 'ask');
   await vi.waitFor(() => expect(beginWork).toHaveBeenCalledOnce());

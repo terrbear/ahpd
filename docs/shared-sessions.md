@@ -206,12 +206,12 @@ actual ACP prompt response, including an authoritative cancelled response.
 Transport errors and shutdown during a prompt retain the permit. Cancellation
 before opening the runtime may finish because no work was dispatched.
 
-ACP and Claude client-owned tool dispatch also await admission after matching
-the native tool call. Only a result from the expected client completes that
+ACP and Claude client-owned tool handlers await admission before waiting for
+the native call report and before dispatch. Only a result from the expected client completes that
 permit. Disconnect, turn cancellation, failed publication, and disposal retain
 any already-dispatched permit even when they settle the local request with a
 synthetic failure. Cancellation during admission completes only if dispatch
-never occurred. Waiting for the native call report is not yet counted.
+never occurred. A report wait that fails retains its permit.
 
 Claude prompts and retries await admission before sending input. The initial
 Claude runtime may already exist under its logical-session lease. An actual
@@ -220,9 +220,16 @@ unambiguous. Cancellation with an outstanding prompt makes that correlation
 uncertain for the remaining session lifetime; all prompt permits then remain
 held for task-level recovery. Startup failures similarly retain their permit.
 
-This is not a complete activity census. Report waiters,
-shell commands, native background activity, pending questions,
-approvals, and other host operations still need instrumentation. An ACP prompt
+Questions and approvals have independent permits in both providers. A human
+answer completes them; synthetic abort, cancellation, and disposal retain them.
+Codex asynchronous questions remain counted after the native prompt result and
+are readmitted from durable history on resume. Answers cannot run before that
+admission completes. Failed asynchronous question admission prevents successful
+logical disposal. Unfinished native tool reports retain the prompt permit.
+
+This is not a complete activity census. Shell commands, native background
+activity, and other host operations still need instrumentation or an enforced
+profile that disables them before side effects. An ACP prompt
 response alone does not establish that its questions or background work ended.
 Do not acknowledge a drain participant as fully instrumented or enable sealing
 based on these hooks alone. Disconnect and synthetic cancellation results are

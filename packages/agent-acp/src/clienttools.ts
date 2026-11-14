@@ -96,8 +96,12 @@ export function clientTools(beginWork?: Start['beginWork']) {
       const owner = call.tool.owner ?? '';
       const generation = generations.get(owner) ?? 0;
       generations.set(owner, generation);
-      const id = await claim(call.tool.definition.name, JSON.stringify(call.input), owner, call.callId);
       const finish = beginWork === undefined ? undefined : await beginWork({ kind: 'client-tool', operationId: crypto.randomUUID() });
+      if ((generations.get(owner) ?? 0) !== generation) {
+        await finish?.();
+        return { text: 'The client disconnected before execution was dispatched', ok: false };
+      }
+      const id = await claim(call.tool.definition.name, JSON.stringify(call.input), owner, call.callId);
       if ((generations.get(owner) ?? 0) !== generation) {
         await finish?.();
         return { text: `The client disconnected before execution was dispatched; toolCallId=${id}, client=${owner}, state=cancelled-before-dispatch; reconnect Anton and retry the read-only check`, ok: false };
