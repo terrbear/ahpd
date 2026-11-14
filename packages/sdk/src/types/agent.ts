@@ -140,6 +140,7 @@ export interface Listed {
 
 /** How the host asks a backend to start a session. */
 export interface Start {
+  workProfile?: 'local-executor-v1';
   beginWork?: SessionLease['beginWork'];
   claimSessionId?: (canonicalId: string) => Promise<void>;
   admitResume?: () => () => void;

@@ -215,3 +215,17 @@ it('refuses new work while asynchronous disposal notification is pending', async
   notification.resolve();
   await disposal;
 });
+
+it('refuses direct host mutation before side effects under the opt-in work profile', async () => {
+  const base = echo({ path: '/tmp', pace: 0 });
+  const lifecycle: SessionLifecycle = { workProfile: 'local-executor-v1', acquire: async () => ({ claim: async () => {}, release: async () => {} }) };
+  const host = createHost({ path: '/tmp', agents: [{ ...base, provider: 'claude' }], sessionLifecycle: lifecycle });
+  hosts.push(host);
+  const client = host.accept(peer);
+  await client.handle({ method: 'initialize', params: { clientId: 'anton-chat-one', protocolVersions: ['0.9.0'] } });
+  for (const method of ['createTerminal', 'resourceWrite', 'runAutomation', 'createChat']) {
+    await expect(client.handle({ method, params: { channel: 'ahp-root://', uri: 'file:///tmp/should-not-exist', content: 'forbidden' } })).rejects.toThrow('unavailable in local-executor-v1');
+  }
+  await expect(client.handle({ method: 'createSession', params: { channel: 'claude:/blocked', provider: 'claude', config: { shellInitScripts: ['touch /tmp/should-not-exist'] } } })).rejects.toThrow('unavailable');
+  await expect(client.handle({ method: 'ping', params: {} })).resolves.toEqual({});
+});

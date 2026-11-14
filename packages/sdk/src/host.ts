@@ -1,3 +1,4 @@
+import { workProfileAction, workProfileRequest } from './work-profile.js';
 import { sessionLifetimes, validWriterExitProof } from './session-lifecycle.js';
 import { admittedStart } from './admission.js';
 import { assertDiagnosticTarget, sessionExecutionDiagnostics } from './sessiondiagnostics.js';
@@ -588,6 +589,10 @@ const named = (uri: string, what: string): string => {
 };
 
 export function createHost(options: HostOptions): Host {
+  if (options.sessionLifecycle?.workProfile === 'local-executor-v1'
+    && (options.agents.some((agent) => !['claude', 'codex'].includes(agent.provider)) || options.automations !== undefined)) {
+    throw new Error('local-executor-v1 permits only Claude/Codex without host automations');
+  }
   const dir = options.path;
   /**
    * Every name this host holds or has handed out, and what it is.
@@ -3700,6 +3705,7 @@ export function createHost(options: HostOptions): Host {
     const admitSession = options.admitSession === undefined ? undefined
       : () => options.admitSession!({ activeSessions: sessions.size });
     const session = admittedStart(admitSession, () => used.create({
+      ...(options.sessionLifecycle?.workProfile === undefined ? {} : { workProfile: options.sessionLifecycle.workProfile }),
       ...(lease === undefined ? {} : { claimSessionId: (id: string) => lease.claim(id) }),
       ...(lease?.beginWork === undefined ? {} : { beginWork: (work: SessionWork) => lifetimes.beginWork(chatUri, work).then((finish) => finish!) }),
       ...(admitSession === undefined ? {} : { admitResume: admitSession }),
@@ -9527,6 +9533,10 @@ export function createHost(options: HostOptions): Host {
           ? params.action
           : {}) as Record<string, unknown>;
         const type = String(action.type ?? '');
+        if (options.sessionLifecycle?.workProfile === 'local-executor-v1') {
+          const problem = workProfileAction(action);
+          if (problem !== undefined) { refuse(connection.peer, channel, action, origin, problem); return; }
+        }
         /** Refuse this dispatch, in the words of whatever would not have it. */
         const no = (reason: string): void => refuse(connection.peer, channel, action, origin, reason);
         /*
@@ -11072,6 +11082,10 @@ export function createHost(options: HostOptions): Host {
       };
       return {
         async handle(request) {
+          if (options.sessionLifecycle?.workProfile === 'local-executor-v1' && request.method !== 'dispatchAction') {
+            const problem = workProfileRequest(request.method, (request.params ?? {}) as Bag);
+            if (problem !== undefined) throw new RpcError(METHOD_NOT_FOUND, problem);
+          }
           const notify = notifications[request.method];
           if (notify) {
             // Dropped rather than refused: a notification carries no id, so

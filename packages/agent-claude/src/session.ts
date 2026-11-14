@@ -719,6 +719,7 @@ export interface ClaudeSessionOptions extends SessionOptions {
   idleTimeoutMs?: number;
   claimSessionId?: (canonicalId: string) => Promise<void>;
   beginWork?: Start['beginWork'];
+  workProfile?: Start['workProfile'];
   admitResume?: () => () => void;
   /**
    * The presets `claude()` was configured with, by name.
@@ -744,6 +745,17 @@ export interface ClaudeSessionOptions extends SessionOptions {
 }
 
 export function createSession(options: ClaudeSessionOptions): Session {
+  if (options.workProfile === 'local-executor-v1') {
+    const settings = options.settings ?? {};
+    if (settings.builtInTools !== 'none' || settings.claudeConfigIsolation !== 'isolated' || settings.extraArgsPolicy !== 'none'
+      || settings.toolExecutionFence !== 'allowlist' || options.spawn !== undefined || options.forkAt !== undefined
+      || Object.keys(options.mcpServers ?? {}).length > 0
+      || (options.tools ?? []).some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '')
+        || !tool.definition.name.startsWith(`${tool.owner}__`))) {
+      throw new Error('local-executor-v1 requires isolated Claude with native tools disabled and only owned Anton client tools');
+    }
+    if (options.beginWork === undefined) throw new Error('local-executor-v1 requires work admission');
+  }
   if (options.idleTimeoutMs !== undefined && (!Number.isSafeInteger(options.idleTimeoutMs) || options.idleTimeoutMs < 0 || options.idleTimeoutMs > 2_147_483_647)) {
     throw new Error('idleTimeoutMs must be an integer from 0 to 2147483647 milliseconds');
   }
@@ -3752,6 +3764,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     run: (toolCallId: string) => Promise<Ran>,
     queuedMessageId?: string,
   ): void => {
+    if (options.workProfile === 'local-executor-v1') throw new Error('Use the attached Anton client tools for commands');
     const turn: Bag = {
       id: turnId,
       startedAt: new Date().toISOString(),
@@ -3953,6 +3966,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * session in a state it is not in.
      */
     setConfig: async (key, value) => {
+      if (options.workProfile === 'local-executor-v1' && !['model', 'effortLevel', 'permissionMode'].includes(key)) return 'The local executor profile is immutable';
       /*
        * The lists, which really do move on a running session.
        *
@@ -4022,6 +4036,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * nothing is worse than one that says it cannot.
      */
     setCustomizationEnabled: async (id, enabled) => {
+      if (options.workProfile === 'local-executor-v1') return false;
       const server = serverNamed(id);
       if (!server)
         return false;
@@ -4070,6 +4085,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * this host serves the gesture and not the token.
      */
     startMcpServer: async (id) => {
+      if (options.workProfile === 'local-executor-v1') return false;
       const server = serverNamed(id);
       if (!server)
         return false;
@@ -4159,6 +4175,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * to the CLI, which is the whole difference from `begin`.
      */
     ran: (turnId, command, run, queuedAs) => {
+      if (options.workProfile === 'local-executor-v1') throw new Error('Use the attached Anton client tools for commands');
       /*
        * A turn is already running, so the command waits its turn.
        *
@@ -4477,6 +4494,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * built.
      */
     setTools: async (next) => {
+      if (options.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
       if (disableContributedTools) return true;
       next = allowedContribution(next);
       const before = offering.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');

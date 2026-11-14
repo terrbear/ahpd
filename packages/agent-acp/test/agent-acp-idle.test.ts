@@ -227,3 +227,10 @@ it('retains an admitted ACP permit when shutdown interrupts an unanswered prompt
   await wait(30);
   expect(finish).not.toHaveBeenCalled();
 });
+
+it('refuses a local ACP runtime when the remote executor work profile is required', () => {
+  expect(() => acpAgent({ command: process.execPath, args: [fixture], provider: 'codex' }).create({
+    uri: 'codex:/unsafe', chatUri: 'ahp-chat:/unsafe', settings: {}, schema: () => ({}), emit: () => {},
+    workProfile: 'local-executor-v1', beginWork: async () => async () => {},
+  })).toThrow('attached Anton executor');
+});

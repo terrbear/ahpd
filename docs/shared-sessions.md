@@ -234,3 +234,34 @@ response alone does not establish that its questions or background work ended.
 Do not acknowledge a drain participant as fully instrumented or enable sealing
 based on these hooks alone. Disconnect and synthetic cancellation results are
 not definitive completion evidence.
+
+## Opt-in local executor profile
+
+`SessionLifecycle.workProfile = 'local-executor-v1'` enables a default-deny
+host protocol boundary and propagates `Start.workProfile` to the providers.
+It preserves Anton initialization/reconnect, subscriptions, turn history,
+session creation/disposal, client-tool registration, prompts/retries, normal
+model/effort/permission settings, input answers, and client-tool results.
+Read-only `ahpd-account://claude` and `ahpd-account://codex` queries remain
+available. Direct terminals, general resource access, resource watches,
+automations, worktrees, new chats/forks, directory replacement, customizations,
+MCP control, and arbitrary host configuration are refused before their handler.
+Unknown future methods/actions are refused. Only Claude and Codex providers
+are accepted; configured host automations are rejected.
+
+Claude requires isolated configuration, native tools disabled, the execution
+allowlist fence, no custom transport or external MCP servers, and exclusively
+owned Anton client tools. The provider rejects later host-tool additions,
+host shell commands (including queued shell commands), MCP startup,
+customization changes, and configuration outside model/effort/permission mode.
+Codex requires its attached Anton computer/executor profile and similarly
+rejects host tools, direct host resources/terminals, and external MCP servers.
+The deployment must supply the verified executor transport implementation.
+
+The profile is a restriction, not a drain acknowledgment. It does not certify
+remote executor descendants or arbitrary plugin background activity. A task
+that has used a Codex executor remains protected until the remote participant
+can prove its native jobs/descendants ended. A Claude-only task can use an empty
+relay acknowledgment only with a real relay admission barrier. A complete host
+participant acknowledgment still requires coordination of pending host requests,
+callbacks, and plugin inventory; this change does not emit one automatically.

@@ -1011,3 +1011,17 @@ it('retains an unanswered question permit on disposal', async () => {
   await pending;
   expect(inputFinished).not.toHaveBeenCalled();
 });
+
+it('enforces the local executor profile before Claude starts and blocks later escape routes', async () => {
+  expect(() => session({ workProfile: 'local-executor-v1', beginWork: async () => async () => {} })).toThrow('isolated Claude');
+  expect(sdk.runs).toHaveLength(0);
+  const held = session({ workProfile: 'local-executor-v1', beginWork: async () => async () => {}, settings: {
+    builtInTools: 'none', claudeConfigIsolation: 'isolated', extraArgsPolicy: 'none', toolExecutionFence: 'allowlist', toolExecutionAllowlist: [],
+  } });
+  const run = vi.fn(async () => ({ success: true, output: '', said: '', code: 0 }));
+  expect(() => held.ran!('shell', 'command', run)).toThrow('attached Anton');
+  expect(run).not.toHaveBeenCalled();
+  expect(await held.setConfig!('shellInitScripts', ['dangerous'])).toContain('immutable');
+  expect(await held.setTools!([{ definition: { name: 'local-host-tool' }, run: () => 'bad' }])).toBe(false);
+  expect(await held.startMcpServer!('external')).toBe(false);
+});

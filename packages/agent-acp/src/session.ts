@@ -80,6 +80,13 @@ const UNTITLED = 'ACP session';
  * turn, so a session somebody opened and never used costs no subprocess.
  */
 export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatalog): Session {
+  if (start.workProfile === 'local-executor-v1' && (options.provider !== 'codex' || start.settings.antonLocalExecutor !== 'stdio-v1'
+    || start.settings.computer !== 'computer://anton-cloud' || start.computers === undefined || start.beginWork === undefined
+    || start.resources !== undefined || start.terminals !== undefined || Object.keys(start.mcpServers ?? {}).length > 0
+    || (start.tools ?? []).some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '')
+      || !tool.definition.name.startsWith(`${tool.owner}__`)))) {
+    throw new Error('local-executor-v1 requires Codex with an attached Anton executor and only owned client tools');
+  }
   const requestedIdleTimeoutMs = options.idleTimeoutMs ?? 3_600_000;
   const idleTimeoutMs = start.claimSessionId === undefined ? requestedIdleTimeoutMs : 0;
   if (!Number.isSafeInteger(requestedIdleTimeoutMs) || requestedIdleTimeoutMs < 0 || requestedIdleTimeoutMs > 2_147_483_647) {
@@ -1123,6 +1130,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     run: (toolCallId: string) => Promise<Ran>,
     queuedMessageId?: string,
   ): void => {
+    if (start.workProfile === 'local-executor-v1') throw new Error('Use the attached Anton client tools for commands');
     if (closed || active !== undefined) return;
     invalidateIdleTimer();
     cancelRequested = false;
@@ -1359,6 +1367,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
      * `startNext` runs it rather than asking the server about `!ping`.
      */
     ran: (turnId, command, run, queuedAs) => {
+      if (start.workProfile === 'local-executor-v1') throw new Error('Use the attached Anton client tools for commands');
       if (active !== undefined || (queuedAs !== undefined && queued.length > 0)) {
         const id = queuedAs ?? turnId;
         const message: Bag = { text: `!${command}`, origin: { kind: 'user' } };
@@ -1505,6 +1514,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
      * naming the key, because only this backend knows what it serves.
      */
     setConfig: async (key, value): Promise<true | string> => {
+      if (start.workProfile === 'local-executor-v1' && !['model', 'permissionMode', 'effortLevel'].includes(key)) return 'The local executor profile is immutable';
       if (key === 'permissionMode') {
         if (typeof value !== 'string') return `${provider}: permissionMode takes a string`;
         try {
@@ -1557,6 +1567,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     settings: () => ({ ...settings }),
 
     setTools: async (next) => {
+      if (start.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
       offered.set(next);
       if (toolsEndpoint === undefined && next.some((tool) => tool.owner !== undefined)) {
         await open();

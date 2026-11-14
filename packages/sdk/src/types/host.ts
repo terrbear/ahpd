@@ -76,6 +76,7 @@ export interface SessionLease {
 }
 
 export interface SessionLifecycle {
+  workProfile?: 'local-executor-v1';
   acquire(context: { provider: string; sessionUri: string; chatUri: string; clientId?: string }): Promise<SessionLease>;
 }
 
