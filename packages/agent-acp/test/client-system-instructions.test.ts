@@ -95,7 +95,7 @@ it('refreshes an idle conversation at developer priority without replaying user 
   await session.setSystemInstructions!(['The user may change the default repository.']);
   const loaded = requests().filter(request => request.method === 'session/load').at(-1);
   expect(loaded?.params.sessionId).toBe(id);
-  expect(loaded?.params._meta).toEqual({ 'ahpd.clientSystemInstructions': 'The user may change the default repository.' });
+  expect(loaded?.params._meta).toEqual({ 'ahpd.clientSystemInstructions': 'The user may change the default repository.', 'ahpd.refreshClientSystemInstructions': true });
   expect(requests().filter(request => request.method === 'session/new')).toHaveLength(1);
   expect(requests().filter(request => request.method === 'session/prompt')).toHaveLength(1);
   session.begin('updated', 'Continue in the other checkout.');
