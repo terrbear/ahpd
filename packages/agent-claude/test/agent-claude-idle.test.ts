@@ -1025,3 +1025,29 @@ it('enforces the local executor profile before Claude starts and blocks later es
   expect(await held.setTools!([{ definition: { name: 'local-host-tool' }, run: () => 'bad' }])).toBe(false);
   expect(await held.startMcpServer!('external')).toBe(false);
 });
+
+it('keeps a provider control permit until the SDK acknowledges an effort change', async () => {
+  const finish = vi.fn(async () => {});
+  const held = session({ beginWork: async () => finish });
+  await settle();
+  let acknowledge!: () => void;
+  const gate = new Promise<void>((resolve) => { acknowledge = resolve; });
+  sdk.control = async (stage) => { if (stage === 'effort_application') await gate; };
+  let resolved = false;
+  const change = Promise.resolve(held.setConfig!('effortLevel', 'high')).then((result) => { resolved = true; return result; });
+  await settle();
+  expect(resolved).toBe(false);
+  expect(finish).not.toHaveBeenCalled();
+  acknowledge();
+  await expect(change).resolves.toBe(true);
+  expect(finish).toHaveBeenCalledOnce();
+});
+
+it('retains a provider control permit on an uncertain SDK failure', async () => {
+  const finish = vi.fn(async () => {});
+  const held = session({ beginWork: async () => finish });
+  await settle();
+  sdk.control = async () => { throw new Error('control channel lost'); };
+  await expect(held.setConfig!('effortLevel', 'high')).rejects.toThrow('control channel lost');
+  expect(finish).not.toHaveBeenCalled();
+});

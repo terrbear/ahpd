@@ -1124,6 +1124,15 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    * arrives meanwhile is dropped, because `mapping` is deliberately cleared
    * while a command runs - there is no model turn for it to belong to.
    */
+  const controlled = async <T extends boolean | string>(operation: () => Promise<T>): Promise<T> => {
+    if (start.beginWork === undefined) return operation();
+    const finish = await start.beginWork({ kind: 'provider-control', operationId: crypto.randomUUID() });
+    if (closed) { await finish?.(); throw new Error('The session was disposed before the control was applied'); }
+    const result = await operation();
+    if (result === true) await finish?.();
+    return result;
+  };
+
   const runCommand = (
     turnId: string,
     command: string,
@@ -1514,6 +1523,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
      * naming the key, because only this backend knows what it serves.
      */
     setConfig: async (key, value): Promise<true | string> => {
+      return controlled(async (): Promise<true | string> => {
       if (start.workProfile === 'local-executor-v1' && !['model', 'permissionMode', 'effortLevel'].includes(key)) return 'The local executor profile is immutable';
       if (key === 'permissionMode') {
         if (typeof value !== 'string') return `${provider}: permissionMode takes a string`;
@@ -1555,6 +1565,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
         }
       }
       return `${provider}: ${key} is not a config key this backend serves`;
+      });
     },
 
     // Nothing here has a runtime switch and there are no MCP servers, so all
@@ -1567,6 +1578,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     settings: () => ({ ...settings }),
 
     setTools: async (next) => {
+      return controlled(async () => {
       if (start.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
       offered.set(next);
       if (toolsEndpoint === undefined && next.some((tool) => tool.owner !== undefined)) {
@@ -1579,6 +1591,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       toolsEndpoint.setTools(next);
       scheduleIdleRetirement();
       return true;
+      });
     },
     toolCallOwner: (toolCallId) => offered.owner(toolCallId),
     completeToolCall: (toolCallId, clientId, result) => offered.complete(toolCallId, clientId, result),

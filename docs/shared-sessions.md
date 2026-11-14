@@ -265,3 +265,9 @@ can prove its native jobs/descendants ended. A Claude-only task can use an empty
 relay acknowledgment only with a real relay admission barrier. A complete host
 participant acknowledgment still requires coordination of pending host requests,
 callbacks, and plugin inventory; this change does not emit one automatically.
+
+Provider configuration and client-tool registration use independent
+`provider-control` permits. With work admission enabled, Claude effort and
+permission changes await the actual SDK acknowledgment. Successful controls
+complete their permit; uncertain failures retain it. The profile also refuses
+the host-global `shutdown` RPC; closing a client socket is independent.

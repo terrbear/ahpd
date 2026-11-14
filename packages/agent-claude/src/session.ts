@@ -3758,6 +3758,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * anything to the CLI. `queuedMessageId` names the waiting row the command
    * came from, so a client clears it the way it clears any other.
    */
+  const controlled = async <T extends boolean | string>(operation: () => Promise<T>): Promise<T> => {
+    if (options.beginWork === undefined) return operation();
+    const finish = await options.beginWork({ kind: 'provider-control', operationId: crypto.randomUUID() });
+    if (closed) { await finish?.(); throw new Error('The session was disposed before the control was applied'); }
+    const result = await operation();
+    if (result === true) await finish?.();
+    return result;
+  };
+
   const runCommand = (
     turnId: string,
     command: string,
@@ -3966,6 +3975,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * session in a state it is not in.
      */
     setConfig: async (key, value) => {
+      return controlled(async (): Promise<true | string> => {
       if (options.workProfile === 'local-executor-v1' && !['model', 'effortLevel', 'permissionMode'].includes(key)) return 'The local executor profile is immutable';
       /*
        * The lists, which really do move on a running session.
@@ -3998,7 +4008,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
         const found = EFFORTS.find((one) => one === said);
         if (!found) return `The harness has no effort level called ${said}`;
         settings.effortLevel = found;
-        void handle.applyFlagSettings({ effortLevel: found }).catch(() => {});
+        if (options.beginWork === undefined) void handle.applyFlagSettings({ effortLevel: found }).catch(() => {});
+        else await handle.applyFlagSettings({ effortLevel: found });
         return true;
       }
       /*
@@ -4019,8 +4030,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
           : `${key} is not a config key this backend takes`;
       }
       settings.permissionMode = found;
-      void handle.setPermissionMode(found).catch(() => {});
+      if (options.beginWork === undefined) void handle.setPermissionMode(found).catch(() => {});
+      else await handle.setPermissionMode(found);
       return true;
+      });
     },
 
 
@@ -4494,6 +4507,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * built.
      */
     setTools: async (next) => {
+      return controlled(async () => {
       if (options.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
       if (disableContributedTools) return true;
       next = allowedContribution(next);
@@ -4519,6 +4533,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       if (requested.ahp === undefined) delete declared.ahp;
       else declared.ahp = requested.ahp;
       return true;
+      });
     },
 
     toolCallOwner: (toolCallId) => byClient.get(toolCallId)?.owner,

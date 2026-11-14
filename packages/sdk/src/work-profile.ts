@@ -3,7 +3,7 @@ import type { Bag } from './types/common.js';
 const methods = new Set([
   'initialize', 'reconnect', 'ping', 'subscribe', 'unsubscribe', 'fetchTurns',
   'listSessions', 'createSession', 'disposeSession', 'resolveSessionConfig',
-  'sessionConfigCompletions', 'shutdown',
+  'sessionConfigCompletions',
 ]);
 const actions = new Set([
   'chat/turnStarted', 'chat/turnResume', 'chat/turnCancelled',
