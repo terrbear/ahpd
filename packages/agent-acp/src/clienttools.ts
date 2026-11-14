@@ -1,5 +1,5 @@
 import type { ToolCall } from '@agentclientprotocol/sdk';
-import type { BoundTool, ClientToolCall, ClientToolResult } from '@ahpd/sdk';
+import type { BoundTool, ClientToolCall, ClientToolResult, Start } from '@ahpd/sdk';
 
 type Answer = (answer: ClientToolResult) => void;
 type ReportWaiter = {
@@ -24,13 +24,13 @@ const argumentsOf = (raw: unknown): unknown => {
  * runs it carries no such id. The two are matched by the tool's name, then by
  * its input, and whichever arrives first waits for the other.
  */
-export function clientTools() {
+export function clientTools(beginWork?: Start['beginWork']) {
   let offering: BoundTool[] = [];
   const unclaimed = new Map<string, { id: string; input: string; owner: string }[]>();
   const early = new Map<string, ClientToolResult>();
   const expecting = new Map<string, ReportWaiter[]>();
   const generations = new Map<string, number>();
-  const byClient = new Map<string, { owner: string; settle: Answer }>();
+  const byClient = new Map<string, { owner: string; settle: Answer; finish?: () => Promise<void> }>();
 
   const providing = (call: ToolCall): BoundTool | undefined => {
     const said = [call.title, 'name' in call ? call.name : undefined]
@@ -97,16 +97,19 @@ export function clientTools() {
       const generation = generations.get(owner) ?? 0;
       generations.set(owner, generation);
       const id = await claim(call.tool.definition.name, JSON.stringify(call.input), owner, call.callId);
+      const finish = beginWork === undefined ? undefined : await beginWork({ kind: 'client-tool', operationId: crypto.randomUUID() });
       if ((generations.get(owner) ?? 0) !== generation) {
+        await finish?.();
         return { text: `The client disconnected before execution was dispatched; toolCallId=${id}, client=${owner}, state=cancelled-before-dispatch; reconnect Anton and retry the read-only check`, ok: false };
       }
       const answered = early.get(id);
       if (answered !== undefined) {
         early.delete(id);
+        await finish?.();
         return answered;
       }
       return await new Promise((settle, reject) => {
-        byClient.set(id, { owner, settle });
+        byClient.set(id, { owner, settle, ...(finish === undefined ? {} : { finish }) });
         try { started(id); }
         catch (error) {
           byClient.delete(id);
@@ -131,6 +134,7 @@ export function clientTools() {
       if (held === undefined || held.owner !== clientId) return false;
       byClient.delete(id);
       held.settle(result);
+      void held.finish?.().catch(() => {});
       return true;
     },
 

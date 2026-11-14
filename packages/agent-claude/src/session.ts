@@ -13,7 +13,7 @@ import type { ActiveTurn, McpServerState, StringOrMarkdown, ToolCallCompletedSta
 import { Status, idOf, tail, scannableBashInput, scannablePureHelpInput } from '@ahpd/sdk';
 import { attachmentContent } from './attachments.js';
 import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
-import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
+import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, Start, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
 import { pinnedModel, sdkModelId, uniqueModels } from './models.js';
 import { idleQuery } from './idle.js';
@@ -717,6 +717,7 @@ export interface ClaudeSessionOptions extends SessionOptions {
   workerStop?: 'worker' | 'session';
   idleTimeoutMs?: number;
   claimSessionId?: (canonicalId: string) => Promise<void>;
+  beginWork?: Start['beginWork'];
   admitResume?: () => () => void;
   /**
    * The presets `claude()` was configured with, by name.
@@ -1192,7 +1193,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * arrives later and from somewhere else, and anything that ends the turn has
    * to settle them itself or the CLI waits for ever on a promise nobody owns.
    */
-  const byClient = new Map<string, { owner: string; request: Bag; settle: (answer: { text: string; ok: boolean }) => void }>();
+  const byClient = new Map<string, { owner: string; request: Bag; finish?: () => Promise<void>; settle: (answer: { text: string; ok: boolean }) => void }>();
 
   /** Every outstanding client call, answered the same way and forgotten. */
   const releaseCalls = (why: string, whose?: string): void => {
@@ -1246,8 +1247,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const clientGeneration = clientClaimGenerations.get(owner) ?? 0;
     if (closed) return { text: 'The session was disposed', ok: false };
     const id = await claim(called(exposedToolName(tool, offering)), input);
+    const finish = options.beginWork === undefined ? undefined : await options.beginWork({ kind: 'client-tool', operationId: crypto.randomUUID() });
     if (id === undefined || closed || generation !== claimGeneration
       || clientGeneration !== (clientClaimGenerations.get(owner) ?? 0)) {
+      await finish?.();
       return { text: 'The client call ended before it could be dispatched', ok: false };
     }
     const scope = scopeOfCall(id) ?? mainScope;
@@ -1275,7 +1278,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     };
     try {
       return await new Promise<{ text: string; ok: boolean }>((settle) => {
-        byClient.set(id, { owner, request, settle });
+        byClient.set(id, { owner, request, settle, ...(finish === undefined ? {} : { finish }) });
         inputNeededSet(request);
         doing(`Waiting on ${owner}: ${tool.definition.title ?? tool.definition.name}`);
       });
@@ -4534,6 +4537,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       if (!held || held.owner !== clientId) return false;
       byClient.delete(toolCallId);
       held.settle(result);
+      void held.finish?.().catch(() => {});
       return true;
     },
 

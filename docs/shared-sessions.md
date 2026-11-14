@@ -206,8 +206,15 @@ actual ACP prompt response, including an authoritative cancelled response.
 Transport errors and shutdown during a prompt retain the permit. Cancellation
 before opening the runtime may finish because no work was dispatched.
 
-This is not a complete activity census. Claude operations, client-owned tools
-and replies, shell commands, native background activity, pending questions,
+ACP and Claude client-owned tool dispatch also await admission after matching
+the native tool call. Only a result from the expected client completes that
+permit. Disconnect, turn cancellation, failed publication, and disposal retain
+any already-dispatched permit even when they settle the local request with a
+synthetic failure. Cancellation during admission completes only if dispatch
+never occurred. Waiting for the native call report is not yet counted.
+
+This is not a complete activity census. Claude prompts, report waiters,
+shell commands, native background activity, pending questions,
 approvals, and other host operations still need instrumentation. An ACP prompt
 response alone does not establish that its questions or background work ended.
 Do not acknowledge a drain participant as fully instrumented or enable sealing

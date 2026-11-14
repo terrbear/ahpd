@@ -146,7 +146,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    */
   let cumulative: number | undefined;
   /** The tools offered to the server, and the calls a client runs for them. */
-  const offered = clientTools();
+  const offered = clientTools(start.beginWork);
   offered.set(start.tools ?? []);
   const runClientTool = async (call: ClientToolCall) => {
     invalidateIdleTimer();
