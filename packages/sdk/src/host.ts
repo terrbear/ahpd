@@ -1177,6 +1177,18 @@ export function createHost(options: HostOptions): Host {
   let closed = false;
   /** The one close, shared by every caller of `close`. */
   let closing: Promise<void> | undefined;
+  let quiescing: Promise<{ profile: 'local-executor-v1'; admissionClosed: true }> | undefined;
+  let admissionClosed = false;
+  const admitted = new Set<Promise<unknown>>();
+  const quiesceFailures: unknown[] = [];
+  const trackAdmission = <T>(pending: Promise<T>): Promise<T> => {
+    admitted.add(pending);
+    void pending.then(() => admitted.delete(pending), (error: unknown) => {
+      admitted.delete(pending);
+      if (admissionClosed) quiesceFailures.push(error);
+    });
+    return pending;
+  };
   /** The automation runs starting a session now, which a close waits for. */
   const starting = new Set<Promise<string>>();
   /** Where a browsed session ran, as its own catalogue reported it. */
@@ -3707,7 +3719,7 @@ export function createHost(options: HostOptions): Host {
     const session = admittedStart(admitSession, () => used.create({
       ...(options.sessionLifecycle?.workProfile === undefined ? {} : { workProfile: options.sessionLifecycle.workProfile }),
       ...(lease === undefined ? {} : { claimSessionId: (id: string) => lease.claim(id) }),
-      ...(lease?.beginWork === undefined ? {} : { beginWork: (work: SessionWork) => lifetimes.beginWork(chatUri, work).then((finish) => finish!) }),
+      ...(lease?.beginWork === undefined ? {} : { beginWork: (work: SessionWork) => admissionClosed ? Promise.reject(new Error(CLOSING)) : lifetimes.beginWork(chatUri, work).then((finish) => finish!) }),
       ...(admitSession === undefined ? {} : { admitResume: admitSession }),
       uri,
       chatUri,
@@ -5924,6 +5936,7 @@ export function createHost(options: HostOptions): Host {
         // done, so a handler knows whether it answered and not only that it
         // ran. Raising it before would report an attempt as a result.
         run: async (input: Record<string, unknown>): Promise<string> => {
+          if (admissionClosed) throw new Error(CLOSING);
           const finish = await lifetimes.beginWork(chatUri, { kind: 'host-tool', operationId: crypto.randomUUID() });
           try {
             const answer = await one.run(input, toolContext(uri, chatUri));
@@ -6928,11 +6941,32 @@ export function createHost(options: HostOptions): Host {
      * moves immediately is what a client is told the session has.
      */
     setTools: (tools) => {
+      if (admissionClosed) throw new Error(CLOSING);
       contributing = permitted(tools);
       for (const uri of sessions.keys())
         dispatch(uri, { type: 'session/serverToolsChanged', tools: toolDefinitions(uri) });
     },
     connections: () => connections.size,
+    quiesce: () => {
+      if (quiescing !== undefined) return quiescing;
+      if (options.sessionLifecycle?.workProfile !== 'local-executor-v1') return Promise.reject(new Error('Quiesce requires local-executor-v1'));
+      if (closing !== undefined) return Promise.reject(new Error('Host close already started'));
+      admissionClosed = true;
+      closed = true;
+      quiescing = (async () => {
+        while (admitted.size > 0) await Promise.all([...admitted]);
+        await Promise.all([...starting]);
+        if (quiesceFailures.length > 0) throw new AggregateError(quiesceFailures, 'Admitted host work failed');
+        for (const held of sessions.values()) {
+          for (const [uri, chat] of held.chats) {
+            await chat.close();
+            await lifetimes.dispose(uri, chat.writerExitProof?.());
+          }
+        }
+        return { profile: 'local-executor-v1' as const, admissionClosed: true as const };
+      })();
+      return quiescing;
+    },
     close: () => {
       closing ??= (async () => {
         closed = true;
@@ -6970,6 +7004,7 @@ export function createHost(options: HostOptions): Host {
     turning: () => [...sessions.keys()]
       .filter((uri) => (statusOf(uri) & (Status.InProgress | Status.InputNeeded)) !== 0),
     accept(peer: Peer, principal?: Principal, root?: boolean) {
+      if (admissionClosed) throw new Error(CLOSING);
       const connection: Connection = {
         peer, clientId: '', watching: new Set<string>(),
         tokens: new Map<string, Credential>(), aliases: new Map<string, string>(),
@@ -9498,13 +9533,15 @@ export function createHost(options: HostOptions): Host {
        * client, as any other action this host will not apply.
        */
       const behind = (params: Record<string, unknown>, origin: Origin, step: () => Promise<void> | undefined): void => {
-        const next = (waiting ?? Promise.resolve()).then(() => (connections.has(connection) ? step() : undefined)).catch((error: unknown) => {
+        const pending = trackAdmission((waiting ?? Promise.resolve()).then(() => (connections.has(connection) ? step() : undefined)));
+        const next = pending.catch((error: unknown) => {
           const reason = error instanceof Error ? error.message : String(error);
           log(`a dispatch from ${connection.clientId || 'anonymous'} failed: ${reason}`);
           if (!connections.has(connection)) return;
           const action = (typeof params.action === 'object' && params.action !== null ? params.action : {}) as Record<string, unknown>;
           refuse(connection.peer, meantBy(String(params.channel ?? '')), action, origin, reason);
         });
+        trackAdmission(next);
         waiting = next;
         void next.then(() => { if (waiting === next) waiting = undefined; });
       };
@@ -11082,6 +11119,8 @@ export function createHost(options: HostOptions): Host {
       };
       return {
         async handle(request) {
+          if (admissionClosed) throw new Error(CLOSING);
+          return trackAdmission((async () => {
           if (options.sessionLifecycle?.workProfile === 'local-executor-v1' && request.method !== 'dispatchAction') {
             const problem = workProfileRequest(request.method, (request.params ?? {}) as Bag);
             if (problem !== undefined) throw new RpcError(METHOD_NOT_FOUND, problem);
@@ -11172,6 +11211,7 @@ export function createHost(options: HostOptions): Host {
             if (away !== undefined) return away.result;
           }
           return handler(request.params);
+          })());
         },
         close() {
           const was = [...connection.watching];

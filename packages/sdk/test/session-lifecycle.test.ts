@@ -229,3 +229,78 @@ it('refuses direct host mutation before side effects under the opt-in work profi
   await expect(client.handle({ method: 'createSession', params: { channel: 'claude:/blocked', provider: 'claude', config: { shellInitScripts: ['touch /tmp/should-not-exist'] } } })).rejects.toThrow('unavailable');
   await expect(client.handle({ method: 'ping', params: {} })).resolves.toEqual({});
 });
+
+async function quiesceHost(close: () => Promise<void>) {
+  const base = echo({ path: '/tmp', pace: 0 });
+  const release = vi.fn(async () => {});
+  const disposed = vi.fn(async () => {});
+  const host = createHost({ path: '/tmp', sessionLifecycle: {
+    workProfile: 'local-executor-v1', acquire: async () => ({ claim: async () => {}, release, disposed }),
+  }, agents: [{ ...base, provider: 'claude', create: (start) => ({ ...base.create(start), close }) }] });
+  hosts.push(host);
+  const client = host.accept(peer);
+  await client.handle({ method: 'initialize', params: { clientId: 'anton-chat-one', protocolVersions: ['0.9.0'] } });
+  await client.handle({ method: 'createSession', params: { channel: 'claude:/one', provider: 'claude' } });
+  return { host, client, release, disposed };
+}
+
+it('quiesce closes admission immediately and waits for disposal without inventing writer proof', async () => {
+  const gate = deferred();
+  const t = await quiesceHost(() => gate.promise);
+  let finished = false;
+  const pending = t.host.quiesce().then((receipt) => { finished = true; return receipt; });
+  await expect(t.client.handle({ method: 'ping', params: {} })).rejects.toThrow('closing');
+  expect(() => t.host.accept(peer)).toThrow('closing');
+  await Promise.resolve();
+  expect(finished).toBe(false);
+  expect(t.release).not.toHaveBeenCalled();
+  gate.resolve();
+  expect(await pending).toEqual({ profile: 'local-executor-v1', admissionClosed: true });
+  expect(t.disposed).toHaveBeenCalledOnce();
+  expect(t.release).not.toHaveBeenCalled();
+});
+
+it('quiesce preserves close failure and retains ownership on repeated calls', async () => {
+  const t = await quiesceHost(async () => { throw new Error('writer uncertainty'); });
+  await expect(t.host.quiesce()).rejects.toThrow('writer uncertainty');
+  await expect(t.host.quiesce()).rejects.toThrow('writer uncertainty');
+  expect(t.release).not.toHaveBeenCalled();
+  expect(t.disposed).not.toHaveBeenCalled();
+});
+
+it('quiesce refuses a host without the bounded work profile', async () => {
+  const t = await setup({ acquire: async () => ({ claim: async () => {}, release: async () => {} }) });
+  await expect(t.host.quiesce()).rejects.toThrow('requires local-executor-v1');
+  await expect(t.client.handle({ method: 'ping', params: {} })).resolves.toEqual({});
+});
+
+it('quiesce cannot certify a prior best-effort close', async () => {
+  const t = await quiesceHost(async () => {});
+  await t.host.close();
+  await expect(t.host.quiesce()).rejects.toThrow('close already started');
+  expect(t.release).not.toHaveBeenCalled();
+});
+
+it('quiesce waits for admitted request completion and preserves its failure', async () => {
+  const gate = deferred();
+  const base = echo({ path: '/tmp', pace: 0 });
+  const acquire = vi.fn(async () => {
+    await gate.promise;
+    throw new Error('admission unavailable');
+  });
+  const host = createHost({ path: '/tmp', agents: [{ ...base, provider: 'claude' }], sessionLifecycle: { workProfile: 'local-executor-v1', acquire } });
+  hosts.push(host);
+  const client = host.accept(peer);
+  await client.handle({ method: 'initialize', params: { clientId: 'anton-chat-one', protocolVersions: ['0.9.0'] } });
+  const creating = client.handle({ method: 'createSession', params: { channel: 'claude:/one', provider: 'claude' } });
+  const createFailure = expect(creating).rejects.toThrow('admission unavailable');
+  await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+  let finished = false;
+  const pending = host.quiesce();
+  void pending.then(() => { finished = true; }, () => { finished = true; });
+  const quiesceFailure = expect(pending).rejects.toThrow('admission unavailable');
+  await Promise.resolve();
+  expect(finished).toBe(false);
+  gate.resolve();
+  await Promise.all([createFailure, quiesceFailure]);
+});

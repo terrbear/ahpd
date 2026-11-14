@@ -683,6 +683,7 @@ export interface Host {
   };
   /** How many clients are currently connected. */
   connections(): number;
+  quiesce(): Promise<{ profile: 'local-executor-v1'; admissionClosed: true }>;
   /**
    * The sessions with a turn running or waiting on a person, by URI.
    *

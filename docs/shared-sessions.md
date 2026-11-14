@@ -271,3 +271,21 @@ Provider configuration and client-tool registration use independent
 permission changes await the actual SDK acknowledgment. Successful controls
 complete their permit; uncertain failures retain it. The profile also refuses
 the host-global `shutdown` RPC; closing a client socket is independent.
+
+### Explicit host admission barrier
+
+`Host.quiesce()` is available only with `SessionLifecycle.workProfile` set to
+`local-executor-v1`. It immediately rejects new connections, requests, provider
+work permits, and host tool replacement. It waits for admitted request and
+queued dispatch promises, then awaits provider close and lifecycle disposal.
+There is no timeout success and errors reject the cached quiesce promise.
+Normal `Host.close()` remains a separate best-effort shutdown operation and
+cannot produce this receipt.
+
+The result `{profile: 'local-executor-v1', admissionClosed: true}` is an admission
+barrier receipt only. It is neither an isolated process scope proof nor a drain
+participant acknowledgement. Missing writer proof still retains session leases;
+uncertain prompt, approval, tool, executor and cancellation work remains in the
+external drain census. The coordinator must independently reconcile that census
+and executor admission before acknowledging participants. Current providers do
+not prove descendant exit, so this does not enable scale-in of used tasks.
