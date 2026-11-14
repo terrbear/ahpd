@@ -37,6 +37,7 @@ export type PortKey =
   | 'github'
   | 'automations'
   | 'sessions'
+  | 'sessionLifecycle'
   | 'diagnostics'
   | 'computers'
   | 'containers'
@@ -211,6 +212,7 @@ export interface PluginHost extends PluginContext {
   /** Set `HostOptions.automations`, or take the daemon's over with `'replace'`. */
   registerAutomations(store: PortOf<'automations'>, when?: 'replace'): void;
   /** Set `HostOptions.sessions`, or take the daemon's over with `'replace'`. */
+  registerSessionLifecycle(lifecycle: PortOf<'sessionLifecycle'>, when?: 'replace'): void;
   registerSessions(store: PortOf<'sessions'>, when?: 'replace'): void;
   /** Set `HostOptions.diagnostics`, or take the daemon's over with `'replace'`. */
   registerDiagnostics(diagnostics: PortOf<'diagnostics'>, when?: 'replace'): void;

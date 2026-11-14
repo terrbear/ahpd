@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { Bag, Session } from '@ahpd/sdk';
+import type { Bag, Session, Start, SessionWork } from '@ahpd/sdk';
 import { acpAgent } from '../src/agent.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/acp-server.mjs', import.meta.url));
@@ -17,7 +17,7 @@ afterEach(async () => {
   for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-function setup(options: { idleTimeoutMs?: number; asyncQuestions?: boolean; nonResumable?: boolean } = {}) {
+function setup(options: { idleTimeoutMs?: number; asyncQuestions?: boolean; nonResumable?: boolean; beginWork?: Start['beginWork'] } = {}) {
   const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-idle-'));
   paths.push(path);
   const log = join(path, 'requests.jsonl');
@@ -33,6 +33,7 @@ function setup(options: { idleTimeoutMs?: number; asyncQuestions?: boolean; nonR
   const events: Bag[] = [];
   const session = acpAgent(sessionOptions).create({
     uri: 'idle-test:/host', chatUri: 'ahp-chat:/idle-test', workingDirectory: path,
+    ...(options.beginWork === undefined ? {} : { beginWork: options.beginWork }),
     settings: {}, schema: () => ({}), emit: (_channel, action) => { events.push(action); },
   }) as Session;
   sessions.push(session);
@@ -145,4 +146,91 @@ it('refuses to start an idle timer for invalid timeout values', () => {
   for (const idleTimeoutMs of [-1, 0.5, Number.NaN, 2_147_483_648]) {
     expect(() => make(idleTimeoutMs)).toThrow('idleTimeoutMs');
   }
+});
+
+it('refuses a resumed native identity before spawning another writer', async () => {
+  const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-owned-'));
+  paths.push(path);
+  const log = join(path, 'requests.jsonl');
+  const claim = vi.fn(async () => { throw new Error('native session already owned'); });
+  const events: Bag[] = [];
+  const session = acpAgent({ command: process.execPath, args: [fixture], provider: 'codex', env: { ACP_LOG: log } }).create({
+    uri: 'codex:/alias', chatUri: 'ahp-chat:/alias', resume: 'canonical-transcript',
+    claimSessionId: claim, workingDirectory: path, settings: {}, schema: () => ({}),
+    emit: (_channel, action) => { events.push(action); },
+  });
+  sessions.push(session);
+  session.begin('blocked', 'hello');
+  await vi.waitFor(() => expect(events.some((event) => event.type === 'chat/error')).toBe(true));
+  expect(claim).toHaveBeenCalledWith('canonical-transcript');
+  expect(() => readFileSync(log)).toThrow();
+});
+
+it('claims a new native identity before prompting and retains its process without containment', async () => {
+  const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-claims-'));
+  paths.push(path);
+  const log = join(path, 'requests.jsonl');
+  const claims: string[] = [];
+  const events: Bag[] = [];
+  const session = acpAgent({ command: process.execPath, args: [fixture], provider: 'codex', idleTimeoutMs: 30, env: { ACP_LOG: log } }).create({
+    uri: 'codex:/alias', chatUri: 'ahp-chat:/alias', workingDirectory: path, settings: {}, schema: () => ({}),
+    claimSessionId: async (id) => { claims.push(id); expect(requests(log).filter((entry) => entry.method === 'session/prompt')).toHaveLength(claims.length - 1); },
+    emit: (_channel, action) => { events.push(action); },
+  });
+  sessions.push(session);
+  session.begin('first', 'hello');
+  await vi.waitFor(() => expect(completedTurns(events)).toHaveLength(1));
+  await wait(100);
+  session.begin('second', 'hello');
+  await vi.waitFor(() => expect(completedTurns(events)).toHaveLength(2));
+  expect(claims).toHaveLength(1);
+  const prompts = requests(log).filter((entry) => entry.method === 'session/prompt');
+  expect(prompts[0]!.pid).toBe(prompts[1]!.pid);
+  expect(requests(log).some((entry) => entry.method === 'session/load')).toBe(false);
+});
+
+
+it('awaits work admission before spawning and finishes only after the ACP response', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async (work: SessionWork) => {
+    if (work.kind !== 'prompt') return async () => {};
+    await gate; return finish;
+  });
+  const t = setup({ beginWork });
+  t.session.begin('first', 'ask');
+  await vi.waitFor(() => expect(beginWork).toHaveBeenCalledOnce());
+  expect(() => readFileSync(t.log)).toThrow();
+  expect(finish).not.toHaveBeenCalled();
+  admit();
+  await vi.waitFor(() => expect((t.session.sessionState() as Bag).inputNeeded).toMatchObject([{ kind: 'toolConfirmation' }]));
+  expect(finish).not.toHaveBeenCalled();
+  t.session.confirm('call-perm', true, 'yes-once');
+  await vi.waitFor(() => expect(completedTurns(t.events)).toHaveLength(1));
+  expect(finish).toHaveBeenCalledOnce();
+});
+
+it('does not spawn when work admission is rejected', async () => {
+  const t = setup({ beginWork: async () => { throw new Error('task sealed'); } });
+  t.session.begin('first', 'hello');
+  await vi.waitFor(() => expect(t.events.some((event) => event.type === 'chat/error')).toBe(true));
+  expect(() => readFileSync(t.log)).toThrow();
+});
+
+it('retains an admitted ACP permit when shutdown interrupts an unanswered prompt', async () => {
+  const finish = vi.fn(async () => {});
+  const t = setup({ beginWork: async () => finish });
+  t.session.begin('first', 'ask');
+  await vi.waitFor(() => expect((t.session.sessionState() as Bag).inputNeeded).toMatchObject([{ kind: 'toolConfirmation' }]));
+  await t.session.close();
+  await wait(30);
+  expect(finish).not.toHaveBeenCalled();
+});
+
+it('refuses a local ACP runtime when the remote executor work profile is required', () => {
+  expect(() => acpAgent({ command: process.execPath, args: [fixture], provider: 'codex' }).create({
+    uri: 'codex:/unsafe', chatUri: 'ahp-chat:/unsafe', settings: {}, schema: () => ({}), emit: () => {},
+    workProfile: 'local-executor-v1', beginWork: async () => async () => {},
+  })).toThrow('attached Anton executor');
 });
