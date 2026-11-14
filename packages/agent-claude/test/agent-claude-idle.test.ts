@@ -922,3 +922,63 @@ it('keeps a lifecycle-owned Claude process through idle time without containment
   expect(sdk.runs).toHaveLength(1);
   expect(claim).toHaveBeenCalledOnce();
 });
+
+it('awaits prompt work admission before sending to Claude and finishes on its result', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async () => { await gate; return finish; });
+  const held = session({ beginWork });
+  held.begin('gated', 'hello');
+  await settle();
+  expect(beginWork).toHaveBeenCalledOnce();
+  expect(sdk.runs[0]!.prompts).toHaveLength(0);
+  admit();
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(finish).not.toHaveBeenCalled();
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', duration_ms: 1 });
+  await settle();
+  expect(finish).toHaveBeenCalledOnce();
+});
+
+it('retains Claude prompt permits after cancellation even when a result arrives later', async () => {
+  const finish = vi.fn(async () => {});
+  const held = session({ beginWork: async () => finish });
+  held.begin('cancelled', 'hello');
+  await settle();
+  held.cancel('cancelled');
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', duration_ms: 1 });
+  await settle();
+  expect(finish).not.toHaveBeenCalled();
+});
+
+it('rejects Claude prompt admission without sending user input', async () => {
+  const held = session({ beginWork: async () => { throw new Error('task sealed'); } });
+  held.begin('rejected', 'hello');
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(0);
+  expect(JSON.stringify(held.chatState())).toContain('task sealed');
+});
+
+it('gates Claude retry admission independently from the failed prompt', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  let calls = 0;
+  const held = session({ beginWork: async () => { if (++calls > 1) await gate; return finish; } });
+  held.begin('retry', 'hello');
+  await settle();
+  sdk.runs[0]!.send({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['test error'] });
+  await settle();
+  expect(finish).toHaveBeenCalledOnce();
+  expect(held.resume!('retry')).toBe(true);
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(1);
+  admit();
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(2);
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', duration_ms: 1 });
+  await settle();
+  expect(finish).toHaveBeenCalledTimes(2);
+});

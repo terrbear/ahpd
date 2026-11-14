@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { beforeEach, expect, it, onTestFinished, vi } from 'vitest';
-import type { Bag, BoundTool } from '@ahpd/sdk';
+import type { Bag, BoundTool, SessionWork } from '@ahpd/sdk';
 
 type ToolServer = { tools: { name: string; inputSchema: Record<string, z.ZodTypeAny>; handler: (input: Bag) => Promise<Bag> }[] };
 
@@ -86,7 +86,7 @@ it('asks the owning client to execute an announced Claude tool and removes the r
   const antonTools = ['anton_codemode', 'launch_shell', 'shell_write', 'shell_read', 'spawn_teammate'];
   const session = createSession({
     uri: 'claude:/client-tools',
-    beginWork: async () => finish,
+    beginWork: async (work) => work.kind === 'client-tool' ? finish : async () => {},
     chatUri: 'ahp-chat:/client-tools',
     cwd: mkdtempSync(join(tmpdir(), 'ahpd-client-tools-')),
     emit: (channel, action) => { sent.push({ channel, action: action as Bag }); },
@@ -643,7 +643,10 @@ it('gates client dispatch and retains work after disconnect', async () => {
   let admit!: () => void;
   const gate = new Promise<void>((resolve) => { admit = resolve; });
   const finish = vi.fn(async () => {});
-  const beginWork = vi.fn(async () => { await gate; return finish; });
+  const beginWork = vi.fn(async (work: SessionWork) => {
+    if (work.kind !== 'client-tool') return async () => {};
+    await gate; return finish;
+  });
   const sent: Bag[] = [];
   const owner = 'anton-ahp_gated-owner';
   const input = { code: 'read' };
@@ -660,7 +663,7 @@ it('gates client dispatch and retains work after disconnect', async () => {
   const handler = sdk.server!.tools[0]!;
   const pending = handler.handler(input);
   sdk.push({ type: 'assistant', parent_tool_use_id: null, uuid: 'gated-assistant', message: { id: 'gated-message', role: 'assistant', content: [{ type: 'tool_use', id: 'gated-call', name: `mcp__ahp__${handler.name}`, input }] } });
-  await until(() => beginWork.mock.calls.length === 1);
+  await until(() => beginWork.mock.calls.some(([work]) => work.kind === 'client-tool'));
   expect(sent.some((action) => action.type === 'session/inputNeededSet')).toBe(false);
   admit();
   await until(() => sent.some((action) => action.type === 'session/inputNeededSet'));

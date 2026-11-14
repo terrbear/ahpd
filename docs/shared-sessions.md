@@ -213,7 +213,14 @@ any already-dispatched permit even when they settle the local request with a
 synthetic failure. Cancellation during admission completes only if dispatch
 never occurred. Waiting for the native call report is not yet counted.
 
-This is not a complete activity census. Claude prompts, report waiters,
+Claude prompts and retries await admission before sending input. The initial
+Claude runtime may already exist under its logical-session lease. An actual
+native result completes the prompt permit only while result correlation remains
+unambiguous. Cancellation with an outstanding prompt makes that correlation
+uncertain for the remaining session lifetime; all prompt permits then remain
+held for task-level recovery. Startup failures similarly retain their permit.
+
+This is not a complete activity census. Report waiters,
 shell commands, native background activity, pending questions,
 approvals, and other host operations still need instrumentation. An ACP prompt
 response alone does not establish that its questions or background work ended.

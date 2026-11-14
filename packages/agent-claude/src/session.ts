@@ -856,6 +856,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * question of whether a turn is running is asked of one thing.
    */
   let beginning: string | undefined;
+  const promptPermits = new Map<string, () => Promise<void>>();
+  let promptCompletionUncertain = false;
+  const admitPrompt = async (turnId: string): Promise<void> => {
+    const finish = await options.beginWork?.({ kind: 'prompt', operationId: crypto.randomUUID() });
+    if (finish !== undefined) promptPermits.set(turnId, finish);
+  };
   /** Whether a turn of this session is running, or is part-way into becoming one. */
   const busy = (): boolean => active !== undefined || beginning !== undefined;
   /** The config in force, by key. What `session/configChanged` merges into. */
@@ -3059,6 +3065,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
     }
     beginning = turnId;
     try {
+      if (options.beginWork !== undefined) await admitPrompt(turnId);
+      if (closed || beginning !== turnId) return;
       const previousStartupApplication = startupApplication;
       if (previousStartupApplication !== undefined) {
         timing('previous_startup_application', 'start');
@@ -3604,6 +3612,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
         if (type === 'result') {
           const turn = active;
+          if (turn !== undefined && !promptCompletionUncertain) {
+            const finish = promptPermits.get(String(turn.id));
+            await finish?.();
+            promptPermits.delete(String(turn.id));
+          }
           /*
            * Read before the turn is pushed, because the reason goes inside it.
            * `is_error` carries the words; a subtype that is not `success` is a
@@ -4283,7 +4296,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
       doing('Thinking');
       const message = bag((active as Bag).message);
       touch();
-      void idle.ready().then(() => {
+      const admitted = options.beginWork === undefined ? Promise.resolve() : admitPrompt(turnId);
+      void admitted.then(() => {
+        if (closed || str(active?.id) !== turnId) return;
+        return idle.ready();
+      }).then(() => {
         if (closed || str(active?.id) !== turnId) return;
         hasNativePrompt = true;
         nativePromptSent = true;
@@ -4312,6 +4329,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     },
 
     cancel: (turnId) => {
+      if (promptPermits.size > 0) promptCompletionUncertain = true;
       const cancelling = turnId || str(active?.id);
       if (active !== undefined) {
         interruptionPending = true;
