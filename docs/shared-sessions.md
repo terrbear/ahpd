@@ -1,7 +1,8 @@
 # Shared session storage and ownership
 
 The SDK exports two opt-in Linux building blocks. The daemon still uses
-`fileSessions` by default. These APIs do not enable horizontal cloud scaling.
+`fileSessions` by default. An optional host lifecycle port provides asynchronous
+admission and native-identity claims. These APIs do not enable horizontal cloud scaling.
 
 ```ts
 import { directorySessions, fileSessionLocks } from '@ahpd/sdk';
@@ -78,15 +79,15 @@ Keep the existing whole-home lock until all these pieces are integrated:
 - Acquire before any backend writer starts. Retain ownership across reconnect,
   idle periods, and restart. Release only after every session writer has
   completed close. A rejected or timed-out close must retain ownership until
-  the task is fenced. Current host dispose/restart paths do not all await close.
+  the task is fenced. Host dispose/restart paths now await provider close.
 - Provider credential refresh is another shared writer. Coordinate refresh and
   atomic credential publication, or use an auth lifetime lock. Copying a refresh
   token into multiple tasks does not make concurrent refresh safe.
 - Other process-wide stores, provider indexes, and automation schedulers need
   their own concurrency review. Per-session metadata does not protect them.
 
-No TTL-based cloud lease, host routing, credential refresh coordinator, server
-flag, or automatic ownership enforcement is introduced by these primitives.
+No TTL-based cloud lease, host routing, credential refresh coordinator, or
+server flag is introduced by these primitives.
 
 ## Validation
 
@@ -102,3 +103,51 @@ stripping (Node 22.18+). Run from the physical worktree path (`cd -P .`) and
 use an isolated `XDG_CONFIG_HOME`; the nested stdio daemon test otherwise reads
 the operator's existing state. The tests generate `test/fixtures/wire.jsonl`;
 do not include unrelated fixture regeneration in a storage-only change.
+
+## Host lifecycle port
+
+Plugins can call `host.registerSessionLifecycle(lifecycle)`, or embedders can
+supply `HostOptions.sessionLifecycle`. The SDK exports these types:
+
+```ts
+interface SessionLifecycle {
+  acquire(context: {
+    provider: string;
+    sessionUri: string;
+    chatUri: string;
+    clientId?: string;
+  }): Promise<SessionLease>;
+}
+interface SessionLease {
+  claim(canonicalId: string): Promise<void>;
+  release(): Promise<void>;
+}
+```
+
+Admission completes before `Agent.create`. Creation and lazy resume carry the
+connection's client ID; tool-created sessions inherit their parent's client.
+Automation admission has no client ID, and a cloud coordinator may reject it.
+Client IDs are routing identities, not authentication credentials. Admission
+must remain inside the already authenticated owner's boundary.
+
+The host retains one lease per logical chat across provider idle retirement
+and explicit restart. Native claims are idempotent for that lease and must be
+namespaced by provider. Claude claims its reserved native ID before spawning
+its query. ACP claims an existing ID before spawning the adapter for resume;
+for a new session, ACP allocates the ID, then the hook claims it before any
+prompt. An ACP allocator must guarantee that a new ID does not alias an
+existing transcript. Claude forks are refused when the lifecycle hook is
+active because their new native ID cannot be reserved through this SDK path.
+
+Disposal awaits provider close, then lease release, before removing the chat.
+Rejected closes or releases retain the lease. A synchronous provider factory
+that throws after allocating a writer leaves its lease held; generic host code
+cannot prove that factory's partial work exited. The coordinator must fence
+that task before reclaiming it. A rejected admission can be retried.
+
+**Provider close is not yet a complete process-tree fence.** Current ACP and
+Claude shutdown helpers establish direct-child exit, and nested/detached
+writers may survive. The cloud release callback must not drop registry
+ownership or task protection without an independent containment/exit proof.
+Keep shared cloud operation disabled until that proof is implemented. These
+hooks do not themselves establish ECS task death or safe credential sharing.

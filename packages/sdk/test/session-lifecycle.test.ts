@@ -1,0 +1,115 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { createHost } from '../src/host.js';
+import { sessionLifetimes } from '../src/session-lifecycle.js';
+import { echo } from '../../../examples/echo/agent.js';
+import type { Host, SessionLifecycle, SessionLease, Peer } from '../src/index.js';
+
+const hosts: Host[] = [];
+afterEach(async () => { for (const host of hosts.splice(0)) await host.close(); });
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+const peer: Peer = { send: () => {}, notify: () => {}, request: async () => ({}), answered: () => {}, close: () => {} };
+
+async function setup(lifecycle: SessionLifecycle, close: () => Promise<void> = async () => {}) {
+  const base = echo({ path: '/tmp', pace: 0 });
+  const starts = vi.fn(base.create);
+  const host = createHost({ path: '/tmp', agents: [{ ...base, multipleDirectories: true, create: (start) => {
+    const session = starts(start);
+    return { ...session, close: async () => { await close(); await session.close(); } };
+  } }], sessionLifecycle: lifecycle });
+  hosts.push(host);
+  const client = host.accept(peer);
+  await client.handle({ method: 'initialize', params: { clientId: 'anton-chat-one', protocolVersions: ['0.9.0'] } });
+  const create = () => client.handle({ method: 'createSession', params: { channel: 'echo:/one', provider: 'echo', workingDirectories: ['file:///tmp', 'file:///var/tmp'] } });
+  const dispose = () => client.handle({ method: 'disposeSession', params: { channel: 'echo:/one' } });
+  return { client, host, starts, create, dispose };
+}
+
+it('waits for admission before create and carries the authenticated connection identity', async () => {
+  const gate = deferred();
+  const release = vi.fn(async () => {});
+  const acquire = vi.fn(async (_context: Parameters<SessionLifecycle['acquire']>[0]) => { await gate.promise; return { claim: async () => {}, release }; });
+  const t = await setup({ acquire });
+  const creating = t.create();
+  await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+  expect(t.starts).not.toHaveBeenCalled();
+  expect(acquire.mock.calls[0]).toEqual([{ provider: 'echo', sessionUri: 'echo:/one', chatUri: 'ahp-chat://default/ZWNobzovb25l', clientId: 'anton-chat-one' }]);
+  gate.resolve();
+  await creating;
+  expect(t.starts).toHaveBeenCalledOnce();
+  await t.dispose();
+  expect(release).toHaveBeenCalledOnce();
+});
+
+it('retains ownership until asynchronous disposal finishes', async () => {
+  const gone = deferred();
+  const release = vi.fn(async () => {});
+  const t = await setup({ acquire: async () => ({ claim: async () => {}, release }) }, () => gone.promise);
+  await t.create();
+  let disposed = false;
+  const disposing = t.dispose().then(() => { disposed = true; });
+  await Promise.resolve();
+  expect(disposed).toBe(false);
+  expect(release).not.toHaveBeenCalled();
+  gone.resolve();
+  await disposing;
+  expect(release).toHaveBeenCalledOnce();
+});
+
+it('does not release a session whose close rejects', async () => {
+  const release = vi.fn(async () => {});
+  let failing = true;
+  const t = await setup({ acquire: async () => ({ claim: async () => {}, release }) }, async () => { if (failing) throw new Error('writer still alive'); });
+  await t.create();
+  await expect(t.dispose()).rejects.toThrow('writer still alive');
+  expect(release).not.toHaveBeenCalled();
+  failing = false;
+  await t.dispose();
+  expect(release).toHaveBeenCalledOnce();
+});
+
+it('retains a logical lease across repeated admission and failed release', async () => {
+  let failing = true;
+  const lease: SessionLease = { claim: async () => {}, release: vi.fn(async () => { if (failing) throw new Error('registry unavailable'); }) };
+  const acquire = vi.fn(async () => lease);
+  const lifetimes = sessionLifetimes({ acquire });
+  const context = { provider: 'echo', sessionUri: 'echo:/one', chatUri: 'chat:/one' };
+  expect(await lifetimes.acquire(context)).toBe(lease);
+  expect(await lifetimes.acquire(context)).toBe(lease);
+  await expect(lifetimes.release(context.chatUri)).rejects.toThrow('registry unavailable');
+  expect(await lifetimes.acquire(context)).toBe(lease);
+  expect(acquire).toHaveBeenCalledOnce();
+  failing = false;
+  await lifetimes.release(context.chatUri);
+  await lifetimes.acquire(context);
+  expect(acquire).toHaveBeenCalledTimes(2);
+});
+
+it('does not start a provider after ownership admission fails', async () => {
+  const t = await setup({ acquire: async () => { throw new Error('another task owns this session'); } });
+  await expect(t.create()).rejects.toThrow('another task owns');
+  expect(t.starts).not.toHaveBeenCalled();
+});
+
+it('waits for restart disposal while keeping the same logical lease', async () => {
+  const gone = deferred();
+  const release = vi.fn(async () => {});
+  const acquire = vi.fn(async () => ({ claim: async () => {}, release }));
+  const t = await setup({ acquire }, () => gone.promise);
+  await t.create();
+  await t.client.handle({ method: 'dispatchAction', params: {
+    channel: 'ahp-chat://default/ZWNobzovb25l',
+    action: { type: 'chat/workingDirectoryRemoved', directory: 'file:///var/tmp' },
+  } });
+  expect(t.starts).toHaveBeenCalledOnce();
+  expect(release).not.toHaveBeenCalled();
+  gone.resolve();
+  await vi.waitFor(() => expect(t.starts).toHaveBeenCalledTimes(2));
+  expect(acquire).toHaveBeenCalledOnce();
+  expect(release).not.toHaveBeenCalled();
+  await t.dispose();
+  expect(release).toHaveBeenCalledOnce();
+});

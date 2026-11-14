@@ -139,6 +139,7 @@ export interface Listed {
 
 /** How the host asks a backend to start a session. */
 export interface Start {
+  claimSessionId?: (canonicalId: string) => Promise<void>;
   admitResume?: () => () => void;
   scanPermission?: SessionOptions['scanPermission'];
   /** The session channel URI the client chose. */

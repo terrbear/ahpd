@@ -62,7 +62,17 @@ export type { ResourceProvider, ResourceStore } from './resources.js';
 export type { TerminalStore } from './terminals.js';
 
 /** How to construct a host. */
+export interface SessionLease {
+  claim(canonicalId: string): Promise<void>;
+  release(): Promise<void>;
+}
+
+export interface SessionLifecycle {
+  acquire(context: { provider: string; sessionUri: string; chatUri: string; clientId?: string }): Promise<SessionLease>;
+}
+
 export interface HostOptions {
+  sessionLifecycle?: SessionLifecycle;
   admitSession?: () => () => void;
   /**
    * The directory whose sessions this host serves, on the machine it runs on.

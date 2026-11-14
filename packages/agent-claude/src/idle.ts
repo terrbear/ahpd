@@ -13,6 +13,7 @@ export function idleQuery<Q extends ManagedQuery>(options: {
   timeout: number;
   admitResume?: () => () => void;
   eligible: () => boolean;
+  beforeCreate?: () => Promise<void>;
   create: (generation: number) => IdleRuntime<Q>;
   prepare?: (query: Q, generation: number) => Promise<void>;
   completed?: (key: PropertyKey, args: unknown[]) => void;
@@ -22,7 +23,9 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     try { options.timing?.(stage, outcome); } catch {}
   };
   let generation = 0;
-  let runtime: IdleRuntime<Q> | undefined = options.create(generation);
+  let runtime: IdleRuntime<Q> | undefined = options.beforeCreate === undefined ? options.create(generation) : undefined;
+  let creating: Promise<void> | undefined;
+  let everCreated = runtime !== undefined;
   let stopping: Promise<void> | undefined;
   let initializing: Promise<void> | undefined;
   let failure: Error | undefined;
@@ -63,18 +66,25 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     if (closed) throw new Error('The Claude session was disposed');
     if (failure) throw failure;
     if (!runtime) {
-      const cancel = options.admitResume?.();
-      try {
-        runtime = options.create(generation + 1);
-        generation++;
-      } catch (error) {
-        cancel?.();
-        throw error;
-      }
-      initializing = undefined;
-      notify();
+      creating ??= (async () => {
+        await options.beforeCreate?.();
+        if (closed) throw new Error('The Claude session was disposed');
+        const cancel = everCreated ? options.admitResume?.() : undefined;
+        try {
+          const next = everCreated ? generation + 1 : generation;
+          runtime = options.create(next);
+          generation = next;
+          everCreated = true;
+        } catch (error) {
+          cancel?.();
+          throw error;
+        }
+        initializing = undefined;
+        notify();
+      })().finally(() => { creating = undefined; });
+      await creating;
     }
-    const held = runtime;
+    const held = runtime!;
     initializing ??= new Promise<void>((resolve, reject) => {
       let pendingStage: 'initialization' | 'prepare' = 'initialization';
       let timedOut = false;
@@ -126,6 +136,7 @@ export function idleQuery<Q extends ManagedQuery>(options: {
     closed = true;
     invalidate();
     notify();
+    if (creating) await creating.catch(() => undefined);
     if (stopping) await stopping;
     const held = runtime;
     if (!held) return;

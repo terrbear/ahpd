@@ -715,6 +715,7 @@ export interface ClaudeSessionOptions extends SessionOptions {
    */
   workerStop?: 'worker' | 'session';
   idleTimeoutMs?: number;
+  claimSessionId?: (canonicalId: string) => Promise<void>;
   admitResume?: () => () => void;
   /**
    * The presets `claude()` was configured with, by name.
@@ -2706,6 +2707,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const dependencies = new Set<string>();
   const disabledServers = new Set<string>();
   const idle = idleQuery<ReturnType<typeof query>>({
+    ...(options.claimSessionId === undefined ? {} : { beforeCreate: async () => {
+      if (options.forkAt !== undefined) throw new Error('Forking with shared session ownership is not supported');
+      await options.claimSessionId!(agentId ?? reservedNativeId);
+    } }),
     ...(options.admitResume === undefined ? {} : { admitResume: options.admitResume }),
     timeout: options.spawn === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
     timing,
@@ -3392,7 +3397,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
           }
         }
         if (said) {
-          if (idle.generation() > 0 && expectedNativeId !== said) {
+          if ((idle.generation() > 0 || options.claimSessionId !== undefined) && expectedNativeId !== said) {
             const error = new Error('Claude resumed a different native session; refusing to continue');
             throw error;
           }

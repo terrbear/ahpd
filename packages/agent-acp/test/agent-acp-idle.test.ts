@@ -146,3 +146,42 @@ it('refuses to start an idle timer for invalid timeout values', () => {
     expect(() => make(idleTimeoutMs)).toThrow('idleTimeoutMs');
   }
 });
+
+it('refuses a resumed native identity before spawning another writer', async () => {
+  const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-owned-'));
+  paths.push(path);
+  const log = join(path, 'requests.jsonl');
+  const claim = vi.fn(async () => { throw new Error('native session already owned'); });
+  const events: Bag[] = [];
+  const session = acpAgent({ command: process.execPath, args: [fixture], provider: 'codex', env: { ACP_LOG: log } }).create({
+    uri: 'codex:/alias', chatUri: 'ahp-chat:/alias', resume: 'canonical-transcript',
+    claimSessionId: claim, workingDirectory: path, settings: {}, schema: () => ({}),
+    emit: (_channel, action) => { events.push(action); },
+  });
+  sessions.push(session);
+  session.begin('blocked', 'hello');
+  await vi.waitFor(() => expect(events.some((event) => event.type === 'chat/error')).toBe(true));
+  expect(claim).toHaveBeenCalledWith('canonical-transcript');
+  expect(() => readFileSync(log)).toThrow();
+});
+
+it('claims a newly allocated native identity before prompting and again before idle reload', async () => {
+  const path = mkdtempSync(join(tmpdir(), 'ahpd-acp-claims-'));
+  paths.push(path);
+  const log = join(path, 'requests.jsonl');
+  const claims: string[] = [];
+  const events: Bag[] = [];
+  const session = acpAgent({ command: process.execPath, args: [fixture], provider: 'codex', idleTimeoutMs: 30, env: { ACP_LOG: log } }).create({
+    uri: 'codex:/alias', chatUri: 'ahp-chat:/alias', workingDirectory: path, settings: {}, schema: () => ({}),
+    claimSessionId: async (id) => { claims.push(id); expect(requests(log).filter((entry) => entry.method === 'session/prompt')).toHaveLength(claims.length - 1); },
+    emit: (_channel, action) => { events.push(action); },
+  });
+  sessions.push(session);
+  session.begin('first', 'hello');
+  await vi.waitFor(() => expect(completedTurns(events)).toHaveLength(1));
+  await wait(100);
+  session.begin('second', 'hello');
+  await vi.waitFor(() => expect(completedTurns(events)).toHaveLength(2));
+  expect(claims).toHaveLength(2);
+  expect(claims[0]).toBe(claims[1]);
+});

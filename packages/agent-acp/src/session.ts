@@ -742,6 +742,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       await retirement;
       if (retirementFailure !== undefined) throw retirementFailure;
       if (closed) throw new Error(`${provider}: the session is closed`);
+      const claimedId = acpSessionId ?? start.resume;
+      if (claimedId !== undefined) await start.claimSessionId?.(claimedId);
       const moved = await placed();
       if (closed) throw new Error(`${provider}: the session is closed`);
       const connection = connectAcp({
@@ -815,6 +817,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
           mcpServers,
           ...extra,
         });
+        await start.claimSessionId?.(created.sessionId);
+        if (closed) throw new Error(`${provider}: the session closed while claiming its identity`);
         acpSessionId = created.sessionId;
         learnModes(created.modes);
         learnOffers(created.configOptions);
@@ -1076,7 +1080,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       const connection = live;
       live = undefined;
       inputs.cancel();
-      connection?.close();
+      try { await connection?.close(); }
+      catch (error: unknown) { retirementFailure = new Error(`${provider}: ACP shutdown failed: ${messageOf(error)}`); }
       finish(turnId, 'error', messageOf(why));
     }
   };
@@ -1550,7 +1555,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       scheduleIdleRetirement();
     },
 
-    close: () => {
+    close: async () => {
       closed = true;
       invalidateIdleTimer();
       inputs.cancel();
@@ -1576,7 +1581,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       // record of it. Only the live connection goes.
       // A turn still open has nobody left to answer it.
       if (active !== undefined) finish(String(active.id), 'cancelled');
-      return retirement ?? gone;
+      await Promise.all([retirement, gone, opening?.catch(() => undefined)]);
+      if (retirementFailure !== undefined) throw retirementFailure;
     },
   };
 }

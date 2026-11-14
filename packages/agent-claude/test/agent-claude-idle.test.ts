@@ -823,3 +823,27 @@ it('reports memory backpressure without spawning or replaying and resumes after 
   expect(JSON.stringify(sdk.runs[1]!.prompts)).toContain('Retry explicitly');
   expect(JSON.stringify(sdk.runs[1]!.prompts)).not.toContain('Do not lose this request');
 });
+
+it('claims the reserved Claude native ID before the query is created', async () => {
+  let allow!: () => void;
+  const blocked = new Promise<void>((resolve) => { allow = resolve; });
+  const claim = vi.fn(() => blocked);
+  const held = session({ claimSessionId: claim });
+  held.begin('first', 'hello');
+  await settle();
+  expect(claim).toHaveBeenCalledWith(sdk.nativeId);
+  expect(sdk.runs).toHaveLength(0);
+  allow();
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(sdk.runs[0]!.options.sessionId).toBe(sdk.nativeId);
+});
+
+it('refuses an owned Claude resume before starting a query', async () => {
+  const claim = vi.fn(async () => { throw new Error('another task owns this native session'); });
+  const held = session({ resume: 'saved-native', claimSessionId: claim });
+  held.begin('first', 'hello');
+  await settle();
+  expect(claim).toHaveBeenCalledWith('saved-native');
+  expect(sdk.runs).toHaveLength(0);
+});

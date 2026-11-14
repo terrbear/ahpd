@@ -219,3 +219,31 @@ it('bounds the initial SDK handshake instead of leaving its lease alive forever'
   expect(query.closed).toBe(true);
   await idle.dispose();
 });
+
+it('waits for canonical ownership before spawning and on each idle resume', async () => {
+  let allow!: () => void;
+  let blocked = new Promise<void>((resolve) => { allow = resolve; });
+  const claim = vi.fn(() => blocked);
+  const create = vi.fn(() => {
+    const query = new Query();
+    return { query, signal: new AbortController(), stop: async () => { query.close(); } };
+  });
+  const idle = idleQuery({ timeout: 100, eligible: () => true, beforeCreate: claim, create });
+  const first = idle.ready();
+  const concurrent = idle.ready();
+  await settle();
+  expect(create).not.toHaveBeenCalled();
+  allow();
+  await Promise.all([first, concurrent]);
+  expect(create).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(100);
+  blocked = new Promise<void>((resolve) => { allow = resolve; });
+  const resumed = idle.ready();
+  await settle();
+  expect(create).toHaveBeenCalledOnce();
+  allow();
+  await resumed;
+  expect(create).toHaveBeenCalledTimes(2);
+  expect(claim).toHaveBeenCalledTimes(2);
+  await idle.dispose();
+});
