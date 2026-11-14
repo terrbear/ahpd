@@ -171,3 +171,5 @@ extra adapter arguments, and adapter-specific `CODEX_CONFIG`, `MODEL_PROVIDER`
 or `DEFAULT_AUTH_REQUEST` overrides retain session-based discovery because a
 standalone CLI query cannot reliably reproduce those adapter settings. Other
 ACP providers also retain session-based discovery.
+
+The Codex bridge forwards `ahpd.clientSystemInstructions` on both `session/new` and `session/load`. A pinned adapter must advertise `resume: true` for the latter. Authorized session writers may call `ahpd/updateSessionInstructions` with `{channel, instructions}` to replace host-provided instructions on an idle, single-chat Codex session. The host waits for the existing thread to reload at developer priority before acknowledging `{applied: true}`; it rejects active work and never inserts the update into a user message. Initial instructions and refreshed instructions both retain the host contribution prefix.

@@ -426,6 +426,7 @@ export interface Session {
    * announcement it will not act on.
    */
   setTools?(tools: BoundTool[]): Promise<boolean>;
+  setSystemInstructions?(instructions: string[]): Promise<void>;
   /**
    * The client running a tool call, for a call that is one client's to run.
    *

@@ -86,7 +86,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   const hostId = idOf(start.uri);
   let record = catalog?.get(start.resume ?? hostId);
   const provider = options.provider ?? 'acp';
-  const instructions = provider === 'codex' ? start.instructions?.join('\n\n') : undefined;
+  let instructions = provider === 'codex' ? start.instructions?.join('\n\n') : undefined;
   const pendingInputs = new Map<string, Bag>();
   const emit: Start['emit'] = (where, action) => {
     if (where === 'session' && action.type === 'session/inputNeededSet') {
@@ -798,6 +798,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
           throw new Error(`${provider}: this ACP server cannot load a session, so "${resume}" cannot be resumed`);
         }
         const loaded = await connection.loadSession({
+          ...customInstructionsMeta(instructions, handshake, true),
           sessionId: resume,
           cwd: where,
           mcpServers,
@@ -1529,6 +1530,33 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     stopMcpServer: async () => false,
 
     settings: () => ({ ...settings }),
+
+    ...(provider === 'codex' ? { setSystemInstructions: async (next: string[]): Promise<void> => {
+      if (closed || active !== undefined || queued.length > 0 || steering.busy()) throw new Error('Cannot update system instructions while this chat owns active work');
+      if (live === undefined && acpSessionId === undefined && start.resume === undefined) {
+        instructions = next.join('\n\n');
+        await open();
+        touch();
+        return;
+      }
+      await open();
+      if (!safelyIdle()) throw new Error('Cannot update system instructions while this chat owns active work');
+      invalidateIdleTimer();
+      const connection = live!;
+      live = undefined;
+      opening = undefined;
+      toolsEndpoint?.close();
+      toolsEndpoint = undefined;
+      instructions = next.join('\n\n');
+      const stopping = Promise.resolve().then(() => connection.close()).catch((error: unknown) => {
+        retirementFailure = new Error(`ACP shutdown failed while updating instructions: ${messageOf(error)}`);
+        throw retirementFailure;
+      });
+      retirement = stopping;
+      await stopping;
+      await open();
+      touch();
+    } } : {}),
 
     setTools: async (next) => {
       offered.set(next);
