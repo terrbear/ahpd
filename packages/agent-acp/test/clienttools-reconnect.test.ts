@@ -149,3 +149,57 @@ it('reports dispatch failure with the call ID and releases the result handler', 
   expect(bridge.owner('call-dispatch-failed')).toBeUndefined();
   expect(bridge.complete('call-dispatch-failed', tool.owner!, { text: 'late', ok: true })).toBe(false);
 });
+
+it('awaits client-tool admission and releases only an authenticated result', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async () => { await gate; return finish; });
+  const bridge = clientTools(beginWork);
+  bridge.set([tool]);
+  bridge.clientOf(report('gated'));
+  const started = vi.fn();
+  const pending = bridge.run({ tool, input }, started);
+  await vi.waitFor(() => expect(beginWork).toHaveBeenCalledOnce());
+  expect(started).not.toHaveBeenCalled();
+  admit();
+  await vi.waitFor(() => expect(started).toHaveBeenCalledOnce());
+  expect(bridge.complete('gated', 'wrong-owner', { text: 'wrong', ok: true })).toBe(false);
+  expect(finish).not.toHaveBeenCalled();
+  expect(bridge.complete('gated', tool.owner!, { text: 'done', ok: false })).toBe(true);
+  await expect(pending).resolves.toMatchObject({ text: 'done' });
+  expect(finish).toHaveBeenCalledOnce();
+});
+
+it('retains dispatched client work on disconnect despite synthetic failure settlement', async () => {
+  const finish = vi.fn(async () => {});
+  const bridge = clientTools(async () => finish);
+  bridge.set([tool]);
+  bridge.clientOf(report('disconnected-permit'));
+  const started = vi.fn();
+  const pending = bridge.run({ tool, input }, started);
+  await vi.waitFor(() => expect(started).toHaveBeenCalledOnce());
+  bridge.release('client disconnected', tool.owner);
+  await expect(pending).resolves.toMatchObject({ ok: false });
+  expect(finish).not.toHaveBeenCalled();
+  expect(bridge.complete('disconnected-permit', tool.owner!, { text: 'late', ok: true })).toBe(false);
+  expect(finish).not.toHaveBeenCalled();
+});
+
+it('releases safely when disconnect occurs during admission before dispatch', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async () => { await gate; return finish; });
+  const bridge = clientTools(beginWork);
+  bridge.set([tool]);
+  bridge.clientOf(report('pre-dispatch'));
+  const started = vi.fn();
+  const pending = bridge.run({ tool, input }, started);
+  await vi.waitFor(() => expect(beginWork).toHaveBeenCalledOnce());
+  bridge.release('client disconnected', tool.owner);
+  admit();
+  await expect(pending).resolves.toMatchObject({ ok: false });
+  expect(started).not.toHaveBeenCalled();
+  expect(finish).toHaveBeenCalledOnce();
+});

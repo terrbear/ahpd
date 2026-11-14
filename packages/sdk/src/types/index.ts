@@ -16,8 +16,8 @@ export type { Bag } from './common.js';
 export type { OnWire, WireTurn } from './wire.js';
 export type { Request, Wire, Peer, Handler, OutboundClose, OutboundCloseReason } from './rpc.js';
 export type { Summary } from './catalog.js';
-export type { Emit, SessionOptions, Session, Ran, Chosen, MessageFrom, SubagentChat, SubagentRequest } from './session.js';
-export type { HostOptions, Connection, Credential, Host, Diagnostics, HostTool, ToolCall } from './host.js';
+export type { Emit, SessionOptions, Session, WriterExitProof, Ran, Chosen, MessageFrom, SubagentChat, SubagentRequest } from './session.js';
+export type { HostOptions, SessionWork, SessionLifecycle, SessionLease, Connection, Credential, Host, Diagnostics, HostTool, ToolCall } from './host.js';
 export type { Loaded, Plugin, PluginContext, PluginHost, PluginSpec, Contribution, PortContribution, PortKey, PortOf } from './plugin.js';
 export type {
   AuthenticatedEvent, AutomationFireEvent, ClientConnectEvent, ClientDisconnectEvent, EventHandler, EventListener,

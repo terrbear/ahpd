@@ -51,6 +51,8 @@ export { githubPullRequests } from './github.js';
 export { memoryAutomations } from './automations.js';
 export { scheduledAutomations } from './scheduled.js';
 export { fileSessions, memorySessions } from './sessions.js';
+export { directorySessions, type DirectorySessionOptions } from './directory-sessions.js';
+export { fileSessionLocks, SessionBusyError, type SessionLocks } from './session-locks.js';
 export type { FileSessionOptions } from './sessions.js';
 export { fileUsage, usageProvider } from './usage.js';
 export type { FileUsageOptions, UsageProvider, UsageProviderOptions } from './usage.js';

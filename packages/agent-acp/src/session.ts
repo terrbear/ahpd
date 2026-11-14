@@ -61,6 +61,7 @@ import { machineAsked, Status } from '@ahpd/sdk';
 import type { Bag, Chosen, ClientToolCall, MessageFrom, OpenedTerminal, Ran, Session, Spawn, Start, ToolsEndpoint } from '@ahpd/sdk';
 import { watchSession } from './catalog.js';
 import { connectAcp } from './connection.js';
+import { pendingWork } from './pending-work.js';
 import { clientTools } from './clienttools.js';
 import { elicitations } from './elicitation.js';
 import { confirmationOptions, contentBlocks, mapUpdate } from './mapping.js';
@@ -79,8 +80,16 @@ const UNTITLED = 'ACP session';
  * turn, so a session somebody opened and never used costs no subprocess.
  */
 export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatalog): Session {
-  const idleTimeoutMs = options.idleTimeoutMs ?? 3_600_000;
-  if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 0 || idleTimeoutMs > 2_147_483_647) {
+  if (start.workProfile === 'local-executor-v1' && (options.provider !== 'codex' || start.settings.antonLocalExecutor !== 'stdio-v1'
+    || start.settings.computer !== 'computer://anton-cloud' || start.computers === undefined || start.beginWork === undefined
+    || start.resources !== undefined || start.terminals !== undefined || Object.keys(start.mcpServers ?? {}).length > 0
+    || (start.tools ?? []).some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '')
+      || !tool.definition.name.startsWith(`${tool.owner}__`)))) {
+    throw new Error('local-executor-v1 requires Codex with an attached Anton executor and only owned client tools');
+  }
+  const requestedIdleTimeoutMs = options.idleTimeoutMs ?? 3_600_000;
+  const idleTimeoutMs = start.claimSessionId === undefined ? requestedIdleTimeoutMs : 0;
+  if (!Number.isSafeInteger(requestedIdleTimeoutMs) || requestedIdleTimeoutMs < 0 || requestedIdleTimeoutMs > 2_147_483_647) {
     throw new Error('idleTimeoutMs must be an integer from 0 to 2147483647 milliseconds');
   }
   const hostId = idOf(start.uri);
@@ -88,9 +97,11 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   const provider = options.provider ?? 'acp';
   const instructions = provider === 'codex' ? start.instructions?.join('\n\n') : undefined;
   const pendingInputs = new Map<string, Bag>();
+  const questionWork = pendingWork(start.beginWork);
   const emit: Start['emit'] = (where, action) => {
     if (where === 'session' && action.type === 'session/inputNeededSet') {
       const request = bag(action.request);
+      if (typeof bag(bag(request.request)._meta)['codex/asyncUserInput'] === 'string') questionWork.track(String(request.id));
       pendingInputs.set(String(request.id), structuredClone(request));
       scheduleIdleRetirement();
     }
@@ -145,7 +156,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    */
   let cumulative: number | undefined;
   /** The tools offered to the server, and the calls a client runs for them. */
-  const offered = clientTools();
+  const offered = clientTools(start.beginWork);
   offered.set(start.tools ?? []);
   const runClientTool = async (call: ClientToolCall) => {
     invalidateIdleTimer();
@@ -208,7 +219,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   let supportsSessionLoad = false;
   /** The server's own id for this conversation, once `session/new` answered. */
   let acpSessionId: string | undefined = record?.id;
-  const inputs = elicitations(emit, start.chatUri, () => ({ sessionId: acpSessionId, turn: mapping }));
+  const inputs = elicitations(emit, start.chatUri, () => ({ sessionId: acpSessionId, turn: mapping }), start.beginWork);
   const asynchronous = asyncInputs(emit, start.chatUri, turns, (turn, id, response, answers) => {
     const watched = record?.turns.find((one) => one.turnId === turn);
     if (watched === undefined || record === undefined) throw new Error('The question transcript is unavailable');
@@ -221,7 +232,10 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       throw error;
     }
   });
-  for (const request of asynchronous.requests()) pendingInputs.set(String(request.id), request);
+  for (const request of asynchronous.requests()) {
+    questionWork.track(String(request.id));
+    pendingInputs.set(String(request.id), request);
+  }
 
   /** The one opening, shared by every caller, so one server is spawned. */
   let opening: Promise<{ connection: AcpConnection; sessionId: string }> | undefined;
@@ -256,6 +270,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     /** Every option the server offered, as the call offers them to a person. */
     offered: ConfirmationOption[];
     settle(answer: PermissionAnswer): void;
+    finish?: () => Promise<void>;
   }>();
   /** The terminals this session opened for the server, by the server's own id. */
   const terminals = new Map<string, { handle: OpenedTerminal; limit?: number }>();
@@ -583,7 +598,9 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    * kind is answered `cancelled`, because selecting an `always` is a decision
    * the person did not make.
    */
-  const askPermission = (request: RequestPermissionRequest): Promise<PermissionAnswer> => {
+  const askPermission = async (request: RequestPermissionRequest): Promise<PermissionAnswer> => {
+    const finish = await start.beginWork?.({ kind: 'input', operationId: crypto.randomUUID() });
+    if (closed) { await finish?.(); return 'cancelled'; }
     const option = (kind: PermissionOptionKind): string | undefined =>
       request.options.find((one) => one.kind === kind)?.optionId;
     const allow = option('allow_once');
@@ -594,6 +611,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
 
     const answered = new Promise<PermissionAnswer>((resolve) => {
       permissions.set(toolCallId, {
+        ...(finish === undefined ? {} : { finish }),
         requestId,
         ...(allow === undefined ? {} : { allow }),
         ...(reject === undefined ? {} : { reject }),
@@ -742,6 +760,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       await retirement;
       if (retirementFailure !== undefined) throw retirementFailure;
       if (closed) throw new Error(`${provider}: the session is closed`);
+      const claimedId = acpSessionId ?? start.resume;
+      if (claimedId !== undefined) await start.claimSessionId?.(claimedId);
       const moved = await placed();
       if (closed) throw new Error(`${provider}: the session is closed`);
       const connection = connectAcp({
@@ -815,6 +835,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
           mcpServers,
           ...extra,
         });
+        await start.claimSessionId?.(created.sessionId);
+        if (closed) throw new Error(`${provider}: the session closed while claiming its identity`);
         acpSessionId = created.sessionId;
         learnModes(created.modes);
         learnOffers(created.configOptions);
@@ -1052,9 +1074,12 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    */
   const run = async (turnId: string, text: string, chosen: Chosen | undefined): Promise<void> => {
     try {
+      const completed = await start.beginWork?.({ kind: 'prompt', operationId: crypto.randomUUID() });
+      if (closed || active === undefined || String(active.id) !== turnId) { await completed?.(); return; }
       const held = await open();
       if (closed || active === undefined || String(active.id) !== turnId) return;
       if (cancelRequested) {
+        await completed?.();
         finish(turnId, 'cancelled');
         return;
       }
@@ -1066,6 +1091,9 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       if (attachments.some((part) => part.type === 'resource') && !capabilities?.embeddedContext) throw new Error('This ACP agent does not support embedded files');
       const response = await held.connection.prompt(held.sessionId, text, attachments);
       saidUsage(response.usage);
+      await questionWork.ready();
+      const unfinishedTools = mapping?.parts.some((part) => part.kind === 'toolCall' && bag(part.toolCall).status === 'running') ?? false;
+      if (!unfinishedTools && !offered.busy()) await completed?.();
       finish(turnId, cancelRequested || response.stopReason === 'cancelled' ? 'cancelled' : 'complete');
     }
     catch (why: unknown) {
@@ -1076,7 +1104,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       const connection = live;
       live = undefined;
       inputs.cancel();
-      connection?.close();
+      try { await connection?.close(); }
+      catch (error: unknown) { retirementFailure = new Error(`${provider}: ACP shutdown failed: ${messageOf(error)}`); }
       finish(turnId, 'error', messageOf(why));
     }
   };
@@ -1095,12 +1124,22 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    * arrives meanwhile is dropped, because `mapping` is deliberately cleared
    * while a command runs - there is no model turn for it to belong to.
    */
+  const controlled = async <T extends boolean | string>(operation: () => Promise<T>): Promise<T> => {
+    if (start.beginWork === undefined) return operation();
+    const finish = await start.beginWork({ kind: 'provider-control', operationId: crypto.randomUUID() });
+    if (closed) { await finish?.(); throw new Error('The session was disposed before the control was applied'); }
+    const result = await operation();
+    if (result === true) await finish?.();
+    return result;
+  };
+
   const runCommand = (
     turnId: string,
     command: string,
     run: (toolCallId: string) => Promise<Ran>,
     queuedMessageId?: string,
   ): void => {
+    if (start.workProfile === 'local-executor-v1') throw new Error('Use the attached Anton client tools for commands');
     if (closed || active !== undefined) return;
     invalidateIdleTimer();
     cancelRequested = false;
@@ -1337,6 +1376,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
      * `startNext` runs it rather than asking the server about `!ping`.
      */
     ran: (turnId, command, run, queuedAs) => {
+      if (start.workProfile === 'local-executor-v1') throw new Error('Use the attached Anton client tools for commands');
       if (active !== undefined || (queuedAs !== undefined && queued.length > 0)) {
         const id = queuedAs ?? turnId;
         const message: Bag = { text: `!${command}`, origin: { kind: 'user' } };
@@ -1457,14 +1497,18 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       });
       const chosen = picked?.id ?? (approved ? held.allow : held.reject);
       held.settle(chosen === undefined ? 'cancelled' : { optionId: chosen });
+      void held.finish?.().catch(() => {});
       doing(approved ? 'Running' : 'Thinking');
       touch();
     },
 
     answer: (id, accepted, answers) => {
+      const isAsync = asynchronous.has(id);
+      if (isAsync) questionWork.check(id);
       const answer = asynchronous.has(id)
         ? asynchronous.answer(id, accepted, answers)
         : inputs.answer(id, accepted, answers);
+      if (isAsync) questionWork.complete(id);
       touch();
       return answer;
     },
@@ -1479,6 +1523,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
      * naming the key, because only this backend knows what it serves.
      */
     setConfig: async (key, value): Promise<true | string> => {
+      return controlled(async (): Promise<true | string> => {
+      if (start.workProfile === 'local-executor-v1' && !['model', 'permissionMode', 'effortLevel'].includes(key)) return 'The local executor profile is immutable';
       if (key === 'permissionMode') {
         if (typeof value !== 'string') return `${provider}: permissionMode takes a string`;
         try {
@@ -1519,6 +1565,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
         }
       }
       return `${provider}: ${key} is not a config key this backend serves`;
+      });
     },
 
     // Nothing here has a runtime switch and there are no MCP servers, so all
@@ -1531,6 +1578,8 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     settings: () => ({ ...settings }),
 
     setTools: async (next) => {
+      return controlled(async () => {
+      if (start.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
       offered.set(next);
       if (toolsEndpoint === undefined && next.some((tool) => tool.owner !== undefined)) {
         await open();
@@ -1542,6 +1591,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       toolsEndpoint.setTools(next);
       scheduleIdleRetirement();
       return true;
+      });
     },
     toolCallOwner: (toolCallId) => offered.owner(toolCallId),
     completeToolCall: (toolCallId, clientId, result) => offered.complete(toolCallId, clientId, result),
@@ -1550,7 +1600,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       scheduleIdleRetirement();
     },
 
-    close: () => {
+    close: async () => {
       closed = true;
       invalidateIdleTimer();
       inputs.cancel();
@@ -1576,7 +1626,9 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       // record of it. Only the live connection goes.
       // A turn still open has nobody left to answer it.
       if (active !== undefined) finish(String(active.id), 'cancelled');
-      return retirement ?? gone;
+      await Promise.all([retirement, gone, opening?.catch(() => undefined)]);
+      await questionWork.ready();
+      if (retirementFailure !== undefined) throw retirementFailure;
     },
   };
 }
