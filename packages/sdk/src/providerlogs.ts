@@ -27,7 +27,7 @@ export function matchesProviderLog(content: Buffer, provider: string, id: string
 }
 
 export async function collectProviderLog(logs: DebugLogs, file: string | undefined, provider: string, id: string, owner: object) {
-  if (file === undefined) return { status: 'unavailable' as const, reason: 'missing' };
+  if (file === undefined) return { status: 'unavailable' as const, reason: 'source-unavailable' };
   let snapshot: Buffer;
   try {
     const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);

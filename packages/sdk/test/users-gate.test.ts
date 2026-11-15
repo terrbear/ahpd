@@ -1514,7 +1514,7 @@ it('provider-only diagnostics require the session owner and diagnostics grant', 
     await denied.handle({ method: 'initialize', params: { clientId: 'denied-client', protocolVersions: ['0.9.0'] } });
     await expect(denied.handle({ method: 'vscode/collectAgentHostDebugLogs', params })).rejects.toMatchObject({ code: -32009 });
     expect(reads).toBe(0);
-    expect(await owner.handle({ method: 'vscode/collectAgentHostDebugLogs', params })).toMatchObject({ status: 'unavailable', reason: 'missing' });
+    expect(await owner.handle({ method: 'vscode/collectAgentHostDebugLogs', params })).toMatchObject({ status: 'unavailable', reason: 'source-unavailable' });
     expect(reads).toBe(1);
   } finally { await host.close(); }
 });

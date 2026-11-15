@@ -15,7 +15,9 @@ expansion, or daemon-log selection is accepted in this mode.
 
 The reply echoes `version`, `session`, `chat`, and `provider`. An unavailable
 reply has `status:"unavailable"` and a bounded reason: `missing`, `unsupported`,
-`unreadable`, `oversized`, `changed`, or `invalid-log`. An included reply adds
+`unreadable`, `oversized`, `changed`, `invalid-log`, or `source-unavailable`.
+`source-unavailable` means the provider could not resolve a native log path; it
+does not prove that the underlying file is missing. An included reply adds
 `status:"included"`, `coverage:"snapshot"`, `nativeSessionId`, and the existing
 collection fields (`kind`, `resource`, `size`, `uncompressedSize`, `entries`,
 `providerLogsIncluded`). Its only ZIP entry is `events.jsonl`.
