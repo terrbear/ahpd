@@ -15,9 +15,10 @@ import { attachmentContent } from './attachments.js';
 import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
 import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
-import { pinnedModel, pinnedModels } from './models.js';
+import { pinnedModel, sdkModelId, uniqueModels } from './models.js';
 import { idleQuery } from './idle.js';
 import { executionFenceOf } from './tool-execution-fence.js';
+import { toolProfileOf } from './tool-profile.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
 import type { Asked, Spawned } from './spawn.js';
 
@@ -897,6 +898,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
   // Keep the resolved value in session state so an absent selector is explicit.
   settings.claudeConfigIsolation = configIsolation;
   const isolateClaudeConfig = configIsolation === 'isolated';
+  const toolProfile = toolProfileOf(settings.claudeToolProfile);
+  settings.claudeToolProfile = toolProfile.profile;
+  const profileRemoved: ReadonlySet<string> = new Set(toolProfile.removed);
   const manifestCapture = settings.captureSdkInitToolManifest === undefined ? 'disabled' : settings.captureSdkInitToolManifest;
   if (manifestCapture !== 'disabled' && manifestCapture !== 'enabled') {
     throw new Error('captureSdkInitToolManifest must be one of disabled, enabled');
@@ -2398,7 +2402,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * tool in both is one somebody has forbidden and also once approved.
    */
   const settled = (toolName: string): 'allow' | 'deny' | undefined => {
-    if (allowed.deny.includes(toolName)) return 'deny';
+    if (allowed.deny.includes(toolName) || profileRemoved.has(toolName)) return 'deny';
     if (allowed.allow.includes(toolName)) return 'allow';
     return undefined;
   };
@@ -2753,6 +2757,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
       }
       const presetQuery = { ...fromPreset };
       if (extraArgsPolicy === 'none') delete presetQuery.extraArgs;
+      const querySettings = {
+        ...(fromPreset.settings as Bag | undefined),
+        disableClaudeAiConnectors: true,
+      };
       const handle = query({
         prompt: input(signal.signal),
         options: {
@@ -2855,7 +2863,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * before this and how an automation's still does.
            */
           ...presetQuery,
-          settings: { ...(fromPreset.settings as Bag | undefined), disableClaudeAiConnectors: true },
+          settings: querySettings,
           ...(options.env ? { env: { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env } } : {}),
           // From the settings, which is where it lives: it is a config key like
           // the others, and a second way in was a second thing to keep in step.
@@ -2881,7 +2889,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * call and that is what makes one set mid-session take effect.
            */
           ...(allowed.allow.length > 0 ? { allowedTools: [...allowed.allow] } : {}),
-          ...(allowed.deny.length > 0 ? { disallowedTools: [...allowed.deny] } : {}),
+          ...(allowed.deny.length > 0 || profileRemoved.size > 0
+            ? { disallowedTools: [...new Set([...allowed.deny, ...profileRemoved])] }
+            : {}),
           // Resumed, not replayed: the agent picks up the context it built - the
           // files it read, the decisions it made - rather than being handed a
           // transcript of them and asked to infer the rest.
@@ -3353,13 +3363,13 @@ export function createSession(options: ClaudeSessionOptions): Session {
     offered = list(init.models)
       .map((raw) => {
         const model = bag(raw);
-        // `value`, not `id`. Reading the wrong name costs every model there
-        // is and leaves a picker that offers nothing.
-        return { id: str(model.value) ?? '', name: str(model.displayName) ?? str(model.value) ?? '' };
+        // `value` can be an alias. `resolvedModel` is the exact dispatch id;
+        // keep the `default` selector special.
+        return { id: sdkModelId(model.value, model.resolvedModel), name: str(model.displayName) ?? str(model.value) ?? '' };
       })
       .filter((model) => model.id !== '');
     if (options.offerModels) offered = await options.offerModels(offered);
-    else offered = pinnedModels(offered, { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env });
+    else offered = uniqueModels(offered);
     /*
      * The style the preset names, applied once the CLI is there to take it.
      *

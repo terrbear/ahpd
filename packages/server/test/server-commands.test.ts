@@ -196,7 +196,7 @@ describe('the command registry', () => {
 
 describe('the update check', () => {
   it('loads validated admission budgets from the configuration', () => {
-    const admission = { memoryLimitMb: 4096, minimumFreeMb: 1024, startupReservationMb: 384, startupReservationMs: 30000 };
+    const admission = { enabled: true, memoryLimitMb: 4096, minimumFreeMb: 1024, startupReservationMb: 384, startupReservationMs: 30000 };
     writeFileSync(config, JSON.stringify({ admission }));
     expect(optionsFrom({ configFile: config }).admission).toEqual(admission);
   });

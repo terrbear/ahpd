@@ -232,6 +232,7 @@ const NEEDS: Record<string, Grant> = {
 
   // session:write
   createSession: 'session:write',
+  'ahpd/updateSessionInstructions': 'session:write',
   createChat: 'session:write',
   disposeChat: 'session:write',
   disposeSession: 'session:write',
@@ -7441,6 +7442,7 @@ export function createHost(options: HostOptions): Host {
               'ahpd.pureHelpScanner': { version: 1 },
               'ahpd.activeClientSetReceipts': true,
               'ahpd.messageAttachments': true,
+              'ahpd.updateClientSystemInstructions': Array.from(agents.values()).filter(agent => agent.updatesSystemInstructions === true).map(agent => agent.provider),
               'ahpd.humanSteering': { version: 1, providers: ['codex', 'claude'] },
               ...(Array.from(agents.values()).some((agent) => agent.acceptsSystemInstructions === true)
                 ? { [CLIENT_SYSTEM_INSTRUCTIONS]: Array.from(agents.values())
@@ -8558,6 +8560,31 @@ export function createHost(options: HostOptions): Host {
          * connection subscribed under it is answered in its spelling -
          * decision `a-session-is-held-under-its-providers-name`.
          */
+        'ahpd/updateSessionInstructions': async (params) => {
+          const uri = heldAs(String(params.channel ?? ''));
+          const held = sessions.get(uri);
+          if (!held) throw new RpcError(-32001, `No session at ${uri}`);
+          if (restarting.has(uri)) throw new RpcError(-32602, 'Session instructions are already changing');
+          const text = params.instructions;
+          if (typeof text !== 'string' || text.trim() === '' || new TextEncoder().encode(text).byteLength > MAX_CLIENT_SYSTEM_INSTRUCTIONS_BYTES)
+            throw new RpcError(-32602, 'Client system instructions must be nonempty text within 128 KiB');
+          const chat = leadOf(held);
+          if (held.agent.updatesSystemInstructions !== true || chat?.setSystemInstructions === undefined)
+            throw new RpcError(-32602, 'This provider cannot update system instructions');
+          if (held.chats.size !== 1 || (chat.chatState() as { activeTurn?: unknown }).activeTurn !== undefined)
+            throw new RpcError(-32602, 'System instructions can only be updated for an idle session with one chat');
+          const work = Promise.resolve().then(async () => {
+            await chat.setSystemInstructions!([...instructions(uri), text]);
+            held.clientSystemInstructions = text;
+          });
+          restarting.set(uri, work);
+          try {
+            await work;
+          } finally {
+            if (restarting.get(uri) === work) restarting.delete(uri);
+          }
+          return { applied: true };
+        },
         createSession: async (params) => {
           if (closed) throw new RpcError(INTERNAL_ERROR, CLOSING);
           const given = named(String(params.channel ?? ''), 'session');

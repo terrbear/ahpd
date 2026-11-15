@@ -486,7 +486,7 @@ const onLine = (line) => {
     case 'initialize':
       respond(message.id, {
         protocolVersion: 1,
-        ...(process.env.ACP_CUSTOM_INSTRUCTIONS === '1' ? { _meta: { 'ahpd.clientSystemInstructions': { version: 1 } } } : {}),
+        ...(process.env.ACP_CUSTOM_INSTRUCTIONS === '1' ? { _meta: { 'ahpd.clientSystemInstructions': { version: 1, resume: true } } } : {}),
         agentCapabilities: {
           ...(process.env.ACP_NO_LOAD_SESSION === '1' ? {} : { loadSession: true }),
           ...(process.env.ACP_ATTACHMENTS === '1' ? { promptCapabilities: { image: true, embeddedContext: true } } : {}),

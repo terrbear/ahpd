@@ -4,12 +4,25 @@ import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createHost, type Peer } from '@ahpd/sdk';
 import { echo } from '../../../examples/echo/agent.js';
-import { memoryAdmission } from '../src/admission.js';
+import { memoryAdmission as createMemoryAdmission } from '../src/admission.js';
 import { cgroupHeadroom, memorySnapshot, processTreeBytes } from '../src/memory-snapshot.js';
+
+const memoryAdmission = (settings: Parameters<typeof createMemoryAdmission>[0] = {}, dependencies: Parameters<typeof createMemoryAdmission>[1] = {}) =>
+  createMemoryAdmission({ enabled: true, ...settings }, dependencies);
 
 const MB = 1024 * 1024;
 const folders: string[] = [];
 afterEach(() => { for (const path of folders.splice(0)) rmSync(path, { recursive: true, force: true }); });
+
+it('does not block sessions or sample memory unless admission is enabled', () => {
+  for (const settings of [{}, { enabled: false, memoryLimitMb: 64 }]) {
+    const sample = vi.fn(() => ({ used: 900 * MB, available: 0, total: 1024 * MB }));
+    const gate = createMemoryAdmission(settings, { sample });
+    expect(() => gate.reserve({ activeSessions: 3 })).not.toThrow();
+    expect(sample).not.toHaveBeenCalled();
+    expect(gate.status()).toEqual({ blocked: false, reason: '', starting: 0 });
+  }
+});
 
 it.skipIf(process.platform !== 'linux' && process.platform !== 'darwin')('reads the current process tree and effective memory budget', () => {
   const snapshot = memorySnapshot();

@@ -347,6 +347,7 @@ export interface Agent {
   /** One line about what this backend is. */
   description?: string;
   acceptsSystemInstructions?: boolean;
+  updatesSystemInstructions?: boolean;
 
   /**
    * What a second chat in one session can be made from.
