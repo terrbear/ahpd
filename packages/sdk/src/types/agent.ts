@@ -477,6 +477,7 @@ export interface Agent {
    * is no such file, which is a real answer for a backend that writes none.
    */
   stateFile?(id: string, directory: string): string | undefined;
+  harnessLogFile?(id: string, directory: string): Promise<string | undefined>;
 
   /**
    * Endpoints worth probing when the network is in question.

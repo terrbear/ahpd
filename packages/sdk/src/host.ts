@@ -41,6 +41,7 @@ import type { ScopeAnswer } from './scopes.js';
 import { accepts } from './configvalues.js';
 import { ARTIFACTS_META, artifactsIn, isGitHubLink, recordArtifact } from './artifacttools.js';
 import { debugLogs, hostLogPath } from './debuglogs.js';
+import { collectProviderLog, PROVIDER_LOG_LIMIT } from './providerlogs.js';
 import type { LogFile } from './debuglogs.js';
 import { lookup } from 'node:dns/promises';
 import type { Claim, StartTerminals, Terminal, TerminalStore } from './types/terminals.js';
@@ -7449,6 +7450,7 @@ export function createHost(options: HostOptions): Host {
               'vscode.removeSessionArtifact': true,
               'vscode.detachedWorktrees': true,
               'vscode.getAgentHostSessionStateFile.chat': true,
+              'ahpd.providerDebugLogs': { version: 1, maxBytes: PROVIDER_LOG_LIMIT },
               ...(Array.from(agents.values()).some((agent) => agent.historicalTurnStatus !== undefined)
                 ? { 'vscode.getAgentHostTurnMetadata.v1': true }
                 : {}),
@@ -9054,6 +9056,36 @@ export function createHost(options: HostOptions): Host {
          * where it is.
          */
         'vscode/collectAgentHostDebugLogs': async (params) => {
+          if (params.providerOnly !== undefined) {
+            if (params.providerOnly !== true || params.version !== 1 || params.kind !== 'archive'
+              || typeof params.session !== 'string' || typeof params.chat !== 'string'
+              || Object.keys(params).some(key => !['providerOnly', 'version', 'kind', 'session', 'chat'].includes(key))) {
+              throw new RpcError(-32602, 'Invalid provider log selection');
+            }
+            const uri = params.session;
+            const agent = sessions.get(uri)?.agent ?? owners.get(uri);
+            const chosen = byChat.get(chatOf(params.chat));
+            if (agent === undefined || uri !== `${agent.provider}:/${idOf(uri)}` || chosen?.uri !== uri || chosen.chat.chatUri !== params.chat) {
+              throw new RpcError(-32602, 'Provider logs require an exact session and chat');
+            }
+            if (options.users !== undefined && connection.root !== true && (ownerFor(connection) === undefined || ownerFor(connection) !== kept.owner(idOf(uri)))) {
+              throw new RpcError(-32009, 'Provider log access denied');
+            }
+            const metadata = { version: 1, session: uri, chat: params.chat, provider: agent.provider };
+            if (agent.provider !== 'claude' && agent.provider !== 'codex') return { ...metadata, status: 'unavailable', reason: 'unsupported' };
+            const dir = dirOf(uri);
+            const native = chosen.chat.agentId();
+            if (dir === undefined || native === undefined) return { ...metadata, status: 'unavailable', reason: 'missing' };
+            try {
+              let file: string | undefined;
+              if (agent.harnessLogFile !== undefined) file = await agent.harnessLogFile(native, dir);
+              else if (agent.provider === 'claude') file = agent.stateFile?.(native, dir);
+              if (agent.provider === 'codex' && agent.harnessLogFile === undefined) return { ...metadata, status: 'unavailable', reason: 'unsupported' };
+              if (byChat.get(chatOf(params.chat)) !== chosen || chosen.chat.agentId() !== native) return { ...metadata, status: 'unavailable', reason: 'changed' };
+              const result = await collectProviderLog(logs, file, agent.provider, native, connection);
+              return { ...metadata, nativeSessionId: native, ...result };
+            } catch { return { ...metadata, status: 'unavailable', reason: 'unreadable' }; }
+          }
           const kind = params.kind;
           if (kind !== 'archive' && kind !== 'directory') throw new RpcError(-32602, 'kind must be archive or directory');
           if (params.session !== undefined && typeof params.session !== 'string') throw new RpcError(-32602, 'session must be a URI string');
@@ -9067,7 +9099,7 @@ export function createHost(options: HostOptions): Host {
         'vscode/readAgentHostDebugLogsChunk': async (params) => {
           if (typeof params.resource !== 'string') throw new RpcError(-32602, 'resource must be a URI string');
           if (typeof params.position !== 'number') throw new RpcError(-32602, 'position must be a number');
-          try { return await logs.read(params.resource, params.position); }
+          try { return await logs.read(params.resource, params.position, connection); }
           catch (error) { throw new RpcError(-32602, error instanceof Error ? error.message : String(error)); }
         },
         /**
