@@ -1,5 +1,6 @@
 /** An agent backend, and everything the host asks one for. */
 
+import type { SessionLease } from './host.js';
 import type { Turn } from '@microsoft/agent-host-protocol';
 import type { Bag } from './common.js';
 import type { WireTurn } from './wire.js';
@@ -139,6 +140,9 @@ export interface Listed {
 
 /** How the host asks a backend to start a session. */
 export interface Start {
+  workProfile?: 'local-executor-v1';
+  beginWork?: SessionLease['beginWork'];
+  claimSessionId?: (canonicalId: string) => Promise<void>;
   admitResume?: () => () => void;
   scanPermission?: SessionOptions['scanPermission'];
   /** The session channel URI the client chose. */

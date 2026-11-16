@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { beforeEach, expect, it, onTestFinished, vi } from 'vitest';
-import type { Bag, BoundTool } from '@ahpd/sdk';
+import type { Bag, BoundTool, SessionWork } from '@ahpd/sdk';
 
 type ToolServer = { tools: { name: string; inputSchema: Record<string, z.ZodTypeAny>; handler: (input: Bag) => Promise<Bag> }[] };
 
@@ -78,6 +78,7 @@ beforeEach(() => {
 });
 
 it('asks the owning client to execute an announced Claude tool and removes the request after completion', async () => {
+  const finish = vi.fn(async () => {});
   const sent: { channel: string; action: Bag }[] = [];
   const owner = 'anton-ahp_0ujtsYcgvSTl8PAuAdqWYSMnLOv';
   const unrelatedOwner = 'anton-unrelated-client';
@@ -85,6 +86,7 @@ it('asks the owning client to execute an announced Claude tool and removes the r
   const antonTools = ['anton_codemode', 'launch_shell', 'shell_write', 'shell_read', 'spawn_teammate'];
   const session = createSession({
     uri: 'claude:/client-tools',
+    beginWork: async (work) => work.kind === 'client-tool' ? finish : async () => {},
     chatUri: 'ahp-chat:/client-tools',
     cwd: mkdtempSync(join(tmpdir(), 'ahpd-client-tools-')),
     emit: (channel, action) => { sent.push({ channel, action: action as Bag }); },
@@ -123,6 +125,7 @@ it('asks the owning client to execute an announced Claude tool and removes the r
   expect(session.completeToolCall?.('call-1', 'someone-else', { text: 'wrong', ok: true })).toBe(false);
   expect(session.completeToolCall?.('call-1', owner, { text: 'help available', ok: true })).toBe(true);
   expect(session.sessionState().inputNeeded ?? []).toEqual([]);
+  expect(finish).toHaveBeenCalledOnce();
   expect(await result).toMatchObject({ content: [{ type: 'text', text: 'help available' }] });
   expect(sent.some(({ action }) => action.type === 'session/inputNeededRemoved' && action.id === 'call-1:client')).toBe(true);
 });
@@ -634,4 +637,39 @@ it('preserves a real permission denial when the turn is subsequently stopped', a
   expect(sent.find((action) => action.type === 'chat/toolCallComplete' && action.toolCallId === 'denied-call')).toMatchObject({
     result: { success: false, content: [{ text: rejectedToolText }] },
   });
+});
+
+it('gates client dispatch and retains work after disconnect', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async (work: SessionWork) => {
+    if (work.kind !== 'client-tool') return async () => {};
+    await gate; return finish;
+  });
+  const sent: Bag[] = [];
+  const owner = 'anton-ahp_gated-owner';
+  const input = { code: 'read' };
+  const session = createSession({
+    uri: 'claude:/gated-client', chatUri: 'ahp-chat:/gated-client',
+    cwd: mkdtempSync(join(tmpdir(), 'ahpd-gated-client-')),
+    emit: (_channel, action) => { sent.push(action as Bag); },
+    beginWork,
+    tools: [{ owner, definition: { name: `${owner}__read`, inputSchema: { type: 'object', properties: { code: { type: 'string' } } } } }],
+  });
+  onTestFinished(() => session.close());
+  session.begin('turn', 'read');
+  await until(() => (sdk.server?.tools.length ?? 0) > 0);
+  const handler = sdk.server!.tools[0]!;
+  const pending = handler.handler(input);
+  sdk.push({ type: 'assistant', parent_tool_use_id: null, uuid: 'gated-assistant', message: { id: 'gated-message', role: 'assistant', content: [{ type: 'tool_use', id: 'gated-call', name: `mcp__ahp__${handler.name}`, input }] } });
+  await until(() => beginWork.mock.calls.some(([work]) => work.kind === 'client-tool'));
+  expect(sent.some((action) => action.type === 'session/inputNeededSet')).toBe(false);
+  admit();
+  await until(() => sent.some((action) => action.type === 'session/inputNeededSet'));
+  expect(session.completeToolCall!('gated-call', 'wrong-owner', { text: 'wrong', ok: true })).toBe(false);
+  expect(finish).not.toHaveBeenCalled();
+  session.clientGone!(owner);
+  await pending;
+  expect(finish).not.toHaveBeenCalled();
 });

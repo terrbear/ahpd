@@ -220,6 +220,34 @@ it('bounds the initial SDK handshake instead of leaving its lease alive forever'
   await idle.dispose();
 });
 
+it('waits for canonical ownership before spawning and on each idle resume', async () => {
+  let allow!: () => void;
+  let blocked = new Promise<void>((resolve) => { allow = resolve; });
+  const claim = vi.fn(() => blocked);
+  const create = vi.fn(() => {
+    const query = new Query();
+    return { query, signal: new AbortController(), stop: async () => { query.close(); } };
+  });
+  const idle = idleQuery({ timeout: 100, eligible: () => true, beforeCreate: claim, create });
+  const first = idle.ready();
+  const concurrent = idle.ready();
+  await settle();
+  expect(create).not.toHaveBeenCalled();
+  allow();
+  await Promise.all([first, concurrent]);
+  expect(create).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(100);
+  blocked = new Promise<void>((resolve) => { allow = resolve; });
+  const resumed = idle.ready();
+  await settle();
+  expect(create).toHaveBeenCalledOnce();
+  allow();
+  await resumed;
+  expect(create).toHaveBeenCalledTimes(2);
+  expect(claim).toHaveBeenCalledTimes(2);
+  await idle.dispose();
+});
+
 it('bounds timeout cleanup, reports its stage, and refuses an unsafe replacement', async () => {
   const records: { stage: string; outcome: string; metadata: unknown }[] = [];
   let starts = 0;
@@ -266,4 +294,19 @@ it('leaves another runtime available while a model request times out', async () 
   await healthy.handle.setModel();
   expect(healthy.generation()).toBe(0);
   await Promise.all([stalled.dispose(), healthy.dispose()]);
+});
+
+it('never replaces a timed-out runtime without containment permission', async () => {
+  const create = vi.fn(() => ({
+    query: Object.assign(new Query(), { setModel: () => new Promise<void>(() => {}) }),
+    signal: new AbortController(),
+    stop: async () => {},
+  }));
+  const idle = idleQuery({ timeout: 0, eligible: () => true, replacementAllowed: false, create });
+  const changing = idle.handle.setModel().catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(await changing).toEqual(expect.objectContaining({ message: expect.stringContaining('writer containment') }));
+  await expect(idle.ready()).rejects.toThrow('writer containment');
+  expect(create).toHaveBeenCalledOnce();
+  await idle.dispose();
 });

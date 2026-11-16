@@ -136,6 +136,7 @@ const PORT_MEMBERS: Record<PortKey, Record<string, Kind>> = {
     list: 'function', get: 'function', triggers: 'function', create: 'function', update: 'function',
     remove: 'function', run: 'function', runOf: 'function', runs: 'function',
   },
+  sessionLifecycle: { acquire: 'function' },
   sessions: {
     flags: 'function', setFlags: 'function', config: 'function', setConfig: 'function',
     artifacts: 'function', setArtifacts: 'function', pullRequests: 'function', setPullRequests: 'function',
@@ -158,6 +159,7 @@ export const PORT_METHOD: Record<PortKey, string> = {
   worktrees: 'registerWorktrees',
   github: 'registerGithub',
   automations: 'registerAutomations',
+  sessionLifecycle: 'registerSessionLifecycle',
   sessions: 'registerSessions',
   diagnostics: 'registerDiagnostics',
   computers: 'registerComputers',

@@ -3,7 +3,7 @@ import type {
   CreateElicitationRequest,
   CreateElicitationResponse,
 } from "@agentclientprotocol/sdk";
-import type { Bag, Emit } from "@ahpd/sdk";
+import type { Bag, Emit, Start } from "@ahpd/sdk";
 import type { AcpTurn } from "./types.js";
 
 const bag = (value: unknown): Bag =>
@@ -113,6 +113,7 @@ export function elicitations(
   emit: Emit,
   chat: string,
   current: () => { sessionId: string | undefined; turn: AcpTurn | undefined },
+  beginWork?: Start["beginWork"],
 ) {
   const pending = new Map<
     string,
@@ -120,6 +121,7 @@ export function elicitations(
       turn: string;
       part: Bag;
       questions: Bag[];
+      finish?: () => Promise<void>;
       settle: (response: CreateElicitationResponse) => void;
     }
   >();
@@ -163,12 +165,15 @@ export function elicitations(
         throw new Error(`Unsupported ACP elicitation mode: ${request.mode}`);
       const questions = questionsOf(bag(request.requestedSchema));
       const id = `elicitation-${randomUUID()}`;
+      const finish = beginWork === undefined ? undefined : await beginWork({ kind: "input", operationId: randomUUID() });
+      if (signal.aborted) { await finish?.(); return { action: "cancel" }; }
       const input = { id, message: request.message, questions };
       const part: Bag = { kind: "inputRequest", request: input };
       const turn = context.turn;
       return await new Promise((resolve) => {
         pending.set(id, {
           turn: turn.turnId,
+          ...(finish === undefined ? {} : { finish }),
           part,
           questions,
           settle: resolve,
@@ -199,10 +204,12 @@ export function elicitations(
         );
       if (!accepted) {
         settle(id, { action: "decline" });
+        void held.finish?.().catch(() => {});
         return;
       }
       const content = contentOf(held.questions, answers);
       settle(id, { action: "accept", content }, answers);
+      void held.finish?.().catch(() => {});
     },
     cancel: (turn?: string): void => {
       for (const [id, held] of [...pending]) {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { Bag, Session } from '@ahpd/sdk';
+import type { Bag, Session, Start } from '@ahpd/sdk';
 import { acpAgent } from '../src/agent.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/acp-async-question.mjs', import.meta.url));
@@ -15,13 +15,13 @@ afterEach(async () => {
   for (const session of sessions.splice(0)) await session.close();
   for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true });
 });
-function setup() {
+function setup(beginWork?: Start['beginWork']) {
   const path = mkdtempSync(join(tmpdir(), 'ahpd-codex-async-'));
   paths.push(path);
   const log = join(path, 'requests.jsonl');
   const options = { command: process.execPath, args: [fixture], provider: 'codex', stateDirectory: join(path, 'state'), hostTools: false, env: { ACP_LOG: log } };
   const events: Bag[] = [];
-  const start = { uri: 'codex:/async-host', chatUri: 'ahp-chat:/async-host', workingDirectory: path, settings: {}, schema: () => ({}), emit: (_: string, action: Bag) => { events.push(action); } };
+  const start = { ...(beginWork === undefined ? {} : { beginWork }), uri: 'codex:/async-host', chatUri: 'ahp-chat:/async-host', workingDirectory: path, settings: {}, schema: () => ({}), emit: (_: string, action: Bag) => { events.push(action); } };
   const open = (resume = false) => {
     const session = acpAgent(options).create({ ...start, ...(resume ? { resume: 'async-host' } : {}) });
     sessions.push(session);
@@ -111,3 +111,30 @@ for (const accepted of [true, false]) {
     expect(session.sessionState()).toMatchObject({ inputNeeded: [] });
   });
 }
+
+
+it('retains an async question permit beyond turn completion until the user answers', async () => {
+  const finish = vi.fn(async () => {});
+  const { events, open } = setup(async (work) => work.kind === 'async-input' ? finish : async () => {});
+  const held = open();
+  held.begin('ask-turn', 'ask');
+  await vi.waitFor(() => expect(events.some((event) => event.type === 'chat/turnComplete')).toBe(true));
+  expect(finish).not.toHaveBeenCalled();
+  held.answer('codex-async-question-1', true, answers);
+  await vi.waitFor(() => expect(finish).toHaveBeenCalledOnce());
+});
+
+it('retains async question work on cancellation and admits restored pending questions', async () => {
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async (work: Parameters<NonNullable<Start['beginWork']>>[0]) => work.kind === 'async-input' ? finish : async () => {});
+  const { events, open } = setup(beginWork);
+  const held = open();
+  held.begin('ask-turn', 'ask');
+  await vi.waitFor(() => expect(events.some((event) => event.type === 'chat/turnComplete')).toBe(true));
+  await held.close();
+  expect(finish).not.toHaveBeenCalled();
+  const restored = open(true);
+  await vi.waitFor(() => expect(beginWork.mock.calls.filter(([work]) => work.kind === 'async-input')).toHaveLength(2));
+  restored.cancel('ask-turn');
+  expect(finish).not.toHaveBeenCalled();
+});

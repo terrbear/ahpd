@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createHost, type Peer } from '@ahpd/sdk';
 import { echo } from '../../../examples/echo/agent.js';
 import { memoryAdmission as createMemoryAdmission } from '../src/admission.js';
-import { cgroupHeadroom, memorySnapshot, processTreeBytes } from '../src/memory-snapshot.js';
+import { cgroupHeadroom, memorySnapshot, mountedMemoryHeadroom, processTreeBytes } from '../src/memory-snapshot.js';
 
 const memoryAdmission = (settings: Parameters<typeof createMemoryAdmission>[0] = {}, dependencies: Parameters<typeof createMemoryAdmission>[1] = {}) =>
   createMemoryAdmission({ enabled: true, ...settings }, dependencies);
@@ -307,4 +307,52 @@ it('ignores saved catalogue rows and applies the threshold to restored sessions'
     expect(create).toHaveBeenCalledTimes(3);
     expect(create.mock.calls.map(([start]) => start.resume)).toEqual(['saved-0', 'saved-1', 'saved-2']);
   } finally { host.close(); }
+});
+
+
+function legacyMemoryFixture(limit: number, inherited = limit) {
+  const root = mkdtempSync(join(tmpdir(), 'ahpd-memory-v1-'));
+  folders.push(root);
+  writeFileSync(join(root, 'memory.limit_in_bytes'), String(limit));
+  writeFileSync(join(root, 'memory.usage_in_bytes'), String(1465 * MB));
+  writeFileSync(join(root, 'memory.stat'), `hierarchical_memory_limit ${inherited}\n`);
+  return root;
+}
+
+it('selects mounted v1 memory accounting on a hybrid host instead of the empty unified hierarchy', () => {
+  const root = legacyMemoryFixture(2048 * MB);
+  const snapshot = mountedMemoryHeadroom('3:memory:/ecs/task/container\n0::/ecs/task/container',
+    `31 20 0:29 /ecs/task/container ${root} rw - cgroup cgroup rw,memory\n32 20 0:30 / /nonexistent rw - cgroup2 cgroup rw`,
+    { used: 1700 * MB, available: 1856 * MB, total: 3822 * MB });
+  expect(snapshot).toEqual({ used: 1700 * MB, available: 583 * MB, total: 2048 * MB });
+  const gate = memoryAdmission({}, { sample: () => snapshot });
+  expect(() => gate.reserve({ activeSessions: 8 })).toThrow(/memory pressure/u);
+});
+
+it('fails closed for a hidden tighter v1 ancestor rather than subtracting child usage from its limit', () => {
+  const root = legacyMemoryFixture(9223372036854771712, 2048 * MB);
+  expect(() => mountedMemoryHeadroom('3:memory:/ecs/task/container\n0::/ecs/task/container',
+    `31 20 0:29 /ecs/task/container ${root} rw - cgroup cgroup rw,memory`,
+    { used: 1700 * MB, available: 1856 * MB, total: 3822 * MB })).toThrow('inherited cgroup memory usage is unavailable');
+});
+
+it('uses visible v1 ancestor usage including sibling charges', () => {
+  const root = legacyMemoryFixture(2048 * MB);
+  writeFileSync(join(root, 'memory.usage_in_bytes'), String(1900 * MB));
+  const child = join(root, 'container');
+  mkdirSync(child);
+  writeFileSync(join(child, 'memory.limit_in_bytes'), '9223372036854771712');
+  writeFileSync(join(child, 'memory.usage_in_bytes'), String(1465 * MB));
+  writeFileSync(join(child, 'memory.stat'), `hierarchical_memory_limit ${2048 * MB}\n`);
+  const snapshot = mountedMemoryHeadroom('3:memory:/ecs/task/container',
+    `31 20 0:29 /ecs/task ${root} rw - cgroup cgroup rw,memory`,
+    { used: 1700 * MB, available: 1856 * MB, total: 3822 * MB });
+  expect(snapshot.available).toBe(148 * MB);
+  expect(snapshot.total).toBe(2048 * MB);
+});
+
+it('does not fall back to host memory when the mounted controller is absent', () => {
+  expect(() => mountedMemoryHeadroom('3:memory:/ecs/task\n0::/ecs/task',
+    '31 20 0:29 / /nonexistent rw - cgroup2 cgroup rw',
+    { used: MB, available: 1856 * MB, total: 3822 * MB })).toThrow('mounted cgroup memory controller is unavailable');
 });
