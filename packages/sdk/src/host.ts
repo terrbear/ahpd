@@ -3993,6 +3993,9 @@ export function createHost(options: HostOptions): Host {
     births.set(uri, held.createdAt);
     held.chats.set(chatUri, session);
     sessions.set(uri, held);
+    for (const clientId of retainedClients.get(idOf(uri))?.keys() ?? []) {
+      if (!presence.get(idOf(uri))?.has(clientId)) session.clientGone?.(clientId);
+    }
     /*
      * The name it had before, when it is being created again.
      *

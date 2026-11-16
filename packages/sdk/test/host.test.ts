@@ -5824,6 +5824,13 @@ describe('tools a client contributes', () => {
     }[];
   }> | undefined)?.ahp?.tools ?? [];
 
+  it('removes a catalog when its owner explicitly unsubscribes', async () => {
+    const { client, uri } = await providing();
+    await client.handle({ method: 'unsubscribe', params: { channel: uri } });
+    await settle(8);
+    expect(offered().map((tool) => tool.name)).not.toContain('probe__openFile');
+  });
+
   it('retains the accepted catalog while its client is disconnected', async () => {
     const { client } = await providing();
     expect(offered().map((tool) => tool.name)).toContain('probe__openFile');
