@@ -1187,6 +1187,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * arrives later and from somewhere else, and anything that ends the turn has
    * to settle them itself or the CLI waits for ever on a promise nobody owns.
    */
+  const disconnectedClients = new Set<string>();
   const byClient = new Map<string, { owner: string; request: Bag; settle: (answer: { text: string; ok: boolean }) => void }>();
 
   /** Every outstanding client call, answered the same way and forgotten. */
@@ -1237,6 +1238,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
   const ranByClient = async (tool: BoundTool, input: Bag): Promise<{ text: string; ok: boolean }> => {
     const owner = tool.owner ?? '';
+    if (disconnectedClients.has(owner)) return { text: 'The Anton tool connection is temporarily disconnected. Wait for reconnection before trying this tool again.', ok: false };
     const generation = claimGeneration;
     const clientGeneration = clientClaimGenerations.get(owner) ?? 0;
     if (closed) return { text: 'The session was disposed', ok: false };
@@ -4522,7 +4524,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
       return true;
     },
 
+    clientConnected: (clientId) => { disconnectedClients.delete(clientId); },
     clientGone: (clientId) => {
+      disconnectedClients.add(clientId);
       clientToolsRevision++;
       // A tool call whose client has gone is a turn waiting on a promise
       // nothing will settle. The agent is told it failed, which is true, and

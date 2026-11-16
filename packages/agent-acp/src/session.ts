@@ -1545,7 +1545,9 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     },
     toolCallOwner: (toolCallId) => offered.owner(toolCallId),
     completeToolCall: (toolCallId, clientId, result) => offered.complete(toolCallId, clientId, result),
+    clientConnected: (clientId) => { offered.connected(clientId, true); },
     clientGone: (clientId) => {
+      offered.connected(clientId, false);
       offered.release('The client that provides this tool is no longer here', clientId);
       scheduleIdleRetirement();
     },

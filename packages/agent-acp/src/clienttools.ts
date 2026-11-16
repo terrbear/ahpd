@@ -26,6 +26,7 @@ const argumentsOf = (raw: unknown): unknown => {
  */
 export function clientTools() {
   let offering: BoundTool[] = [];
+  const disconnected = new Set<string>();
   const unclaimed = new Map<string, { id: string; input: string; owner: string }[]>();
   const early = new Map<string, ClientToolResult>();
   const expecting = new Map<string, ReportWaiter[]>();
@@ -78,6 +79,10 @@ export function clientTools() {
   return {
     set: (tools: BoundTool[]): void => { offering = [...tools]; },
     tools: (): BoundTool[] => offering,
+    connected: (owner: string, online: boolean): void => {
+      if (online) disconnected.delete(owner);
+      else disconnected.add(owner);
+    },
 
     /** The client a reported call belongs to, remembering the call for the request that runs it. */
     clientOf: (call: ToolCall): string | undefined => {
@@ -99,6 +104,10 @@ export function clientTools() {
       const id = await claim(call.tool.definition.name, JSON.stringify(call.input), owner, call.callId);
       if ((generations.get(owner) ?? 0) !== generation) {
         return { text: `The client disconnected before execution was dispatched; toolCallId=${id}, client=${owner}, state=cancelled-before-dispatch; reconnect Anton and retry the read-only check`, ok: false };
+      }
+      if (disconnected.has(owner)) {
+        early.delete(id);
+        return { text: `The Anton tool connection is temporarily disconnected; toolCallId=${id}, client=${owner}, state=cancelled-before-dispatch. Wait for reconnection before trying this tool again.`, ok: false };
       }
       const answered = early.get(id);
       if (answered !== undefined) {
