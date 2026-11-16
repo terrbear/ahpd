@@ -149,3 +149,26 @@ it('reports dispatch failure with the call ID and releases the result handler', 
   expect(bridge.owner('call-dispatch-failed')).toBeUndefined();
   expect(bridge.complete('call-dispatch-failed', tool.owner!, { text: 'late', ok: true })).toBe(false);
 });
+
+it('keeps the catalog offline but dispatches only after its owner reconnects', async () => {
+  const bridge = clientTools();
+  bridge.set([tool]);
+  bridge.connected(tool.owner!, false);
+  expect(bridge.tools()).toEqual([tool]);
+  bridge.clientOf(report('offline'));
+  const started = vi.fn();
+  await expect(bridge.run({ tool, input }, started)).resolves.toMatchObject({ ok: false, text: expect.stringContaining('temporarily disconnected') });
+  expect(started).not.toHaveBeenCalled();
+  expect(bridge.busy()).toBe(false);
+  bridge.connected('another-client', true);
+  bridge.clientOf(report('still-offline'));
+  await expect(bridge.run({ tool, input }, started)).resolves.toMatchObject({ ok: false });
+  bridge.connected(tool.owner!, true);
+  bridge.clientOf(report('reconnected'));
+  const answer = bridge.run({ tool, input }, started);
+  await Promise.resolve();
+  expect(started).toHaveBeenCalledExactlyOnceWith('reconnected');
+  expect(bridge.complete('reconnected', 'another-client', { text: 'wrong', ok: true })).toBe(false);
+  expect(bridge.complete('reconnected', tool.owner!, { text: 'restored', ok: true })).toBe(true);
+  await expect(answer).resolves.toEqual({ text: 'restored', ok: true });
+});

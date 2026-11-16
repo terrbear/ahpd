@@ -5824,6 +5824,17 @@ describe('tools a client contributes', () => {
     }[];
   }> | undefined)?.ahp?.tools ?? [];
 
+  it('retains the accepted catalog while its client is disconnected', async () => {
+    const { client } = await providing();
+    expect(offered().map((tool) => tool.name)).toContain('probe__openFile');
+    client.close();
+    await settle(8);
+    expect(offered().map((tool) => tool.name)).toContain('probe__openFile');
+    const reply = await offered().find((tool) => tool.name === 'probe__openFile')?.handler({ path: '/offline.txt' });
+    expect(reply?.isError).toBe(true);
+    expect(reply?.content[0]?.text).toMatch(/connection|disconnected/i);
+  });
+
   it('keeps reannounced client tools after an in-flight disconnect update', async () => {
     const { host, client, uri, chatUri } = await providing();
     let release: () => void = () => {};

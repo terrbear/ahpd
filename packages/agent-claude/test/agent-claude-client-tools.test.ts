@@ -361,6 +361,7 @@ const claimFixture = async (definition = shellTool(shellOwner), onAction?: (acti
     && (action.request as Bag).kind === 'toolClientExecution').map((action) => action.request as Bag);
   const reconnect = async () => {
     expect(await session.setTools?.([definition])).toBe(true);
+    session.clientConnected?.(definition.owner!);
     return sdk.server!.tools.find((one) => one.name === 'launch_shell')!;
   };
   return { session, tool, canonical, approve, executions, reconnect, sent };
