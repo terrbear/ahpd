@@ -10,6 +10,7 @@ import type { ChangesetSource } from './changes.js';
 import type { Worktrees } from './worktrees.js';
 import type { PullRequests } from './github.js';
 import type { AutomationStore } from './automations.js';
+import type { WriterExitProof } from './session.js';
 import type { SessionStore } from './sessions.js';
 import type { ComputerPort } from './computers.js';
 import type { ContainerPort } from './containers.js';
@@ -62,8 +63,25 @@ export type { ResourceProvider, ResourceStore } from './resources.js';
 export type { TerminalStore } from './terminals.js';
 
 /** How to construct a host. */
+export interface SessionWork {
+  kind: string;
+  operationId: string;
+}
+
+export interface SessionLease {
+  beginWork?(work: SessionWork): Promise<() => Promise<void>>;
+  claim(canonicalId: string): Promise<void>;
+  release(proof: WriterExitProof | { kind: 'never-started' }): Promise<void>;
+  disposed?(): Promise<void>;
+}
+
+export interface SessionLifecycle {
+  workProfile?: 'local-executor-v1';
+  acquire(context: { provider: string; sessionUri: string; chatUri: string; clientId?: string }): Promise<SessionLease>;
+}
+
 export interface HostOptions {
-  /** Called before a backend starts, with the current non-disposed session count. */
+  sessionLifecycle?: SessionLifecycle;
   admitSession?: (context: { activeSessions: number }) => () => void;
   /**
    * The directory whose sessions this host serves, on the machine it runs on.
@@ -665,6 +683,7 @@ export interface Host {
   };
   /** How many clients are currently connected. */
   connections(): number;
+  quiesce(): Promise<{ profile: 'local-executor-v1'; admissionClosed: true }>;
   /**
    * The sessions with a turn running or waiting on a person, by URI.
    *

@@ -75,7 +75,7 @@ export function acpAgent(options: AcpOptions): Agent {
 
   return {
     provider,
-    ...(provider === 'codex' ? { acceptsSystemInstructions: true } : {}),
+    ...(provider === 'codex' ? { acceptsSystemInstructions: true, updatesSystemInstructions: true } : {}),
     displayName,
     ...(options.description !== undefined ? { description: options.description } : {}),
     schema,
@@ -134,6 +134,11 @@ export function acpAgent(options: AcpOptions): Agent {
 
     externalHistory: (id, signal) => readExternalHistory(options, provider, id, signal),
     stateFile,
+    harnessLogFile: async (id) => {
+      const result = await readExternalHistory(options, provider, id);
+      const path = result?.history.path;
+      return typeof path === 'string' && isAbsolute(path) && path.endsWith('.jsonl') && !path.includes('\0') ? path : undefined;
+    },
     create: (start) => acpSession(options, start, catalog),
   };
 }

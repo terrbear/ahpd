@@ -29,7 +29,7 @@ import { checkAgent, checkPort, checkResourceProvider, checkScheme, checkTool, m
  */
 const PORT_KEYS = [
   'resources', 'terminals', 'changes', 'directories', 'worktrees',
-  'github', 'automations', 'sessions', 'diagnostics', 'computers', 'containers', 'usage',
+  'github', 'automations', 'sessions', 'sessionLifecycle', 'diagnostics', 'computers', 'containers', 'usage',
 ] as const satisfies readonly PortKey[];
 
 /*
@@ -388,6 +388,7 @@ export function pluginHost(by: string, context: PluginContext, options: HostReco
     registerWorktrees: (worktrees, when) => { setPort('worktrees', 'registerWorktrees', worktrees, when); },
     registerGithub: (pullRequests, when) => { setPort('github', 'registerGithub', pullRequests, when); },
     registerAutomations: (store, when) => { setPort('automations', 'registerAutomations', store, when); },
+    registerSessionLifecycle: (lifecycle, when) => { setPort('sessionLifecycle', 'registerSessionLifecycle', lifecycle, when); },
     registerSessions: (store, when) => { setPort('sessions', 'registerSessions', store, when); },
     registerDiagnostics: (diagnostics, when) => { setPort('diagnostics', 'registerDiagnostics', diagnostics, when); },
     registerComputers: (computers, when) => { setPort('computers', 'registerComputers', computers, when); },

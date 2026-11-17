@@ -1,3 +1,5 @@
+import { workProfileAction, workProfileRequest } from './work-profile.js';
+import { sessionLifetimes, validWriterExitProof } from './session-lifecycle.js';
 import { admittedStart } from './admission.js';
 import { assertDiagnosticTarget, sessionExecutionDiagnostics } from './sessiondiagnostics.js';
 /**
@@ -41,6 +43,7 @@ import type { ScopeAnswer } from './scopes.js';
 import { accepts } from './configvalues.js';
 import { ARTIFACTS_META, artifactsIn, isGitHubLink, recordArtifact } from './artifacttools.js';
 import { debugLogs, hostLogPath } from './debuglogs.js';
+import { collectProviderLog, PROVIDER_LOG_LIMIT } from './providerlogs.js';
 import type { LogFile } from './debuglogs.js';
 import { lookup } from 'node:dns/promises';
 import type { Claim, StartTerminals, Terminal, TerminalStore } from './types/terminals.js';
@@ -49,7 +52,7 @@ import type { SessionConfigAnswerer, SessionConfigAsk } from './types/completion
 import type { MessageFrom, Ran } from './types/session.js';
 import type { WriteMode } from './types/resources.js';
 import type { ChangesetOperationContext, ChangesetState } from './types/changes.js';
-import type { Clients, Connection, Credential, Host, HostOptions, HostTool, TitleStrategy, ToolCall } from './types/host.js';
+import type { Clients, Connection, Credential, Host, HostOptions, HostTool, SessionWork, TitleStrategy, ToolCall } from './types/host.js';
 import type { HostEvent } from './types/events.js';
 import { raise } from './plugins.js';
 import type { Grant, Principal } from './types/users.js';
@@ -231,6 +234,7 @@ const NEEDS: Record<string, Grant> = {
 
   // session:write
   createSession: 'session:write',
+  'ahpd/updateSessionInstructions': 'session:write',
   createChat: 'session:write',
   disposeChat: 'session:write',
   disposeSession: 'session:write',
@@ -587,6 +591,10 @@ const named = (uri: string, what: string): string => {
 };
 
 export function createHost(options: HostOptions): Host {
+  if (options.sessionLifecycle?.workProfile === 'local-executor-v1'
+    && (options.agents.some((agent) => !['claude', 'codex'].includes(agent.provider)) || options.automations !== undefined)) {
+    throw new Error('local-executor-v1 permits only Claude/Codex without host automations');
+  }
   const dir = options.path;
   /**
    * Every name this host holds or has handed out, and what it is.
@@ -1172,6 +1180,18 @@ export function createHost(options: HostOptions): Host {
   let closed = false;
   /** The one close, shared by every caller of `close`. */
   let closing: Promise<void> | undefined;
+  let quiescing: Promise<{ profile: 'local-executor-v1'; admissionClosed: true }> | undefined;
+  let admissionClosed = false;
+  const admitted = new Set<Promise<unknown>>();
+  const quiesceFailures: unknown[] = [];
+  const trackAdmission = <T>(pending: Promise<T>): Promise<T> => {
+    admitted.add(pending);
+    void pending.then(() => admitted.delete(pending), (error: unknown) => {
+      admitted.delete(pending);
+      if (admissionClosed) quiesceFailures.push(error);
+    });
+    return pending;
+  };
   /** The automation runs starting a session now, which a close waits for. */
   const starting = new Set<Promise<string>>();
   /** Where a browsed session ran, as its own catalogue reported it. */
@@ -3620,7 +3640,21 @@ export function createHost(options: HostOptions): Host {
     if (own !== undefined && own !== '') kept.setProvider(own, agent.provider);
   };
 
-  const spawn = (
+  const lifetimes = sessionLifetimes(options.sessionLifecycle);
+  const sessionClients = new Map<string, string>();
+  const requireRestartContainment = (chat: Session): void => {
+    if (options.sessionLifecycle !== undefined && chat.writerExitProof === undefined) {
+      throw new Error('Session restart requires writer containment; dispose and fence the owner task first');
+    }
+  };
+  const stopForRestart = async (chat: Session): Promise<void> => {
+    requireRestartContainment(chat);
+    await chat.close();
+    if (options.sessionLifecycle !== undefined && !validWriterExitProof(chat.writerExitProof?.())) {
+      throw new Error('Session writers have not been proven stopped; retaining ownership');
+    }
+  };
+  const spawnHeld = async (
     agent: Agent,
     uri: string,
     chatUri: string,
@@ -3630,7 +3664,7 @@ export function createHost(options: HostOptions): Host {
     credentials?: Record<string, string>,
     additional?: string[],
     clientSystemInstructions?: string,
-  ): Session => {
+  ): Promise<Session> => {
     /*
      * The backend that actually runs this session.
      *
@@ -3674,11 +3708,18 @@ export function createHost(options: HostOptions): Host {
       ...(receivedInstructions === undefined ? [] : [receivedInstructions]),
     ];
     let deliveryOwner: Session | undefined;
-    // Read the live count on each call, including a later idle-process resume.
-    // Side chats share one AHP session; saved catalogue rows are not loaded sessions.
+    const lease = await lifetimes.acquire({ provider: agent.provider, sessionUri: uri, chatUri, ...(sessionClients.has(uri) ? { clientId: sessionClients.get(uri)! } : {}) });
+    if (closed) {
+      await lifetimes.cancelUnstarted(chatUri);
+      throw new RpcError(INTERNAL_ERROR, CLOSING);
+    }
+    lifetimes.started(chatUri);
     const admitSession = options.admitSession === undefined ? undefined
       : () => options.admitSession!({ activeSessions: sessions.size });
     const session = admittedStart(admitSession, () => used.create({
+      ...(options.sessionLifecycle?.workProfile === undefined ? {} : { workProfile: options.sessionLifecycle.workProfile }),
+      ...(lease === undefined ? {} : { claimSessionId: (id: string) => lease.claim(id) }),
+      ...(lease?.beginWork === undefined ? {} : { beginWork: (work: SessionWork) => admissionClosed ? Promise.reject(new Error(CLOSING)) : lifetimes.beginWork(chatUri, work).then((finish) => finish!) }),
       ...(admitSession === undefined ? {} : { admitResume: admitSession }),
       uri,
       chatUri,
@@ -4025,6 +4066,14 @@ export function createHost(options: HostOptions): Host {
     }
     owners.set(uri, agent);
     return session;
+  };
+  const startingChats = new Set<string>();
+  const spawn = async (...args: Parameters<typeof spawnHeld>): Promise<Session> => {
+    const chatUri = args[2];
+    if (startingChats.has(chatUri)) throw new RpcError(-32003, `${chatUri} is starting`);
+    startingChats.add(chatUri);
+    try { return await spawnHeld(...args); }
+    finally { startingChats.delete(chatUri); }
   };
   /**
    * Every backend, as the root channel advertises them.
@@ -4864,12 +4913,13 @@ export function createHost(options: HostOptions): Host {
    * killed, the worktree removed if clean, the run that started it unlinked,
    * and every client told.
    */
-  const removeSession = (uri: string): void => {
+  const removeSession = async (uri: string): Promise<void> => {
     const held = sessions.get(uri);
     if (!held)
       throw new RpcError(-32001, `No agent for session ${uri}`);
     for (const [chatUri, chat] of held.chats) {
-      chat.close();
+      await chat.close();
+      await lifetimes.dispose(chatUri, chat.writerExitProof?.());
       byChat.delete(chatUri);
       drafts.delete(chatUri);
       madeFrom.delete(chatUri);
@@ -5013,6 +5063,7 @@ export function createHost(options: HostOptions): Host {
   ): Promise<void> => {
     const held = sessions.get(uri);
     if (!held) return;
+    for (const chat of held.chats.values()) requireRestartContainment(chat);
     const mine = decided.get(uri) ?? {};
     // The repository rather than the worktree: the choice is made against the
     // directory somebody asked for, and a worktree is only where a previous
@@ -5033,7 +5084,7 @@ export function createHost(options: HostOptions): Host {
     const before = held.workingDirectory;
     // Their names stay the session's while it starts again.
     for (const [chatUri, chat] of held.chats) {
-      chat.close();
+      await stopForRestart(chat);
       byChat.drop(chatUri);
     }
     /*
@@ -5054,6 +5105,7 @@ export function createHost(options: HostOptions): Host {
      * place: the clients watching it there still watch it.
      */
     const previous = dirOf(uri);
+    if (sessions.get(uri) !== held) throw new Error(`${uri} changed during restart`);
     deliveries.forget(uri);
     sessions.delete(uri);
     if (previous !== undefined && previous !== to) stopUnwatched(previous);
@@ -5068,7 +5120,7 @@ export function createHost(options: HostOptions): Host {
        * machine is left exactly as it was.
        */
       await placedIn(uri, held.agent.provider, held.config, to, kept.owner(idOf(uri)));
-      spawn(
+      await spawn(
         held.agent,
         uri,
         held.defaultChat,
@@ -5164,17 +5216,18 @@ export function createHost(options: HostOptions): Host {
    * conversation - a chat that lost its history because a directory was added
    * to it would be a worse answer than refusing.
    */
-  const restartChat = (uri: string, chatUri: string, credentials: Record<string, string>): void => {
+  const restartChat = async (uri: string, chatUri: string, credentials: Record<string, string>): Promise<void> => {
     const held = sessions.get(uri);
     const chat = held?.chats.get(chatUri);
     if (held === undefined || chat === undefined) return;
     const talking = chat.agentId() !== undefined
       ? { resume: chat.agentId() as string, seed: chat.allTurns() }
       : undefined;
-    chat.close();
+    await stopForRestart(chat);
+    if (byChat.get(chatUri)?.chat !== chat) throw new Error(`${chatUri} changed during restart`);
     held.chats.delete(chatUri);
     byChat.drop(chatUri);
-    spawn(
+    await spawn(
       held.agent,
       uri,
       chatUri,
@@ -5826,6 +5879,8 @@ export function createHost(options: HostOptions): Host {
       const provider = asked.provider ?? sessions.get(uri)?.agent.provider ?? first.provider;
       // Held under its provider's name, as a client's `createSession` is.
       const made = `${provider}:/${crypto.randomUUID()}`;
+      const parentClient = sessionClients.get(uri);
+      if (parentClient !== undefined) sessionClients.set(made, parentClient);
       const config: Record<string, unknown> = {
         ...(asked.isolation !== undefined ? { isolation: asked.isolation } : {}),
         ...(asked.model !== undefined ? { model: asked.model } : {}),
@@ -5838,7 +5893,7 @@ export function createHost(options: HostOptions): Host {
       // The owner of the session this one was made inside, which is what a
       // tool acting for somebody means: the work is theirs whichever session
       // it ends up running in.
-      openSession(made, provider, backendsOwn(config), where, undefined, undefined, undefined, asked.title,
+      await openSession(made, provider, backendsOwn(config), where, undefined, undefined, undefined, asked.title,
         forWhom(kept.owner(idOf(uri))));
       const lead = byChat.get(chatUriFor(made));
       if (lead === undefined) throw new Error(`${made} did not start`);
@@ -5850,7 +5905,7 @@ export function createHost(options: HostOptions): Host {
       const held = sessions.get(at);
       if (!held) throw new Error(`${session} is not a session this host is running`);
       const chatUri = `ahp-chat:/${crypto.randomUUID()}`;
-      const chat = spawn(held.agent, at, chatUri, backendsOwn(held.config), undefined, held.workingDirectory, undefined, held.additional);
+      const chat = await spawn(held.agent, at, chatUri, backendsOwn(held.config), undefined, held.workingDirectory, undefined, held.additional);
       log(`opened ${chatUri} in ${at}`);
       if (asked.title !== undefined) { chat.setTitle?.(asked.title); keepTitle(at, chatUri, asked.title); }
       dispatch(at, { type: 'session/chatAdded', summary: chatSummary(at, chatUri, chat) });
@@ -5858,7 +5913,7 @@ export function createHost(options: HostOptions): Host {
       return { chat: chatUri };
     },
     rename: (session, chat, title) => { renameChat(heldAs(session), chat, title); },
-    remove: async (session) => { removeSession(heldAs(session)); },
+    remove: async (session) => { await removeSession(heldAs(session)); },
     setWorkspace: (directory, isolation) => {
       moving.set(uri, { chat: chatUri, directory: directory.replace(/^file:\/\//, ''), isolation });
     },
@@ -5898,8 +5953,11 @@ export function createHost(options: HostOptions): Host {
         // done, so a handler knows whether it answered and not only that it
         // ran. Raising it before would report an attempt as a result.
         run: async (input: Record<string, unknown>): Promise<string> => {
+          if (admissionClosed) throw new Error(CLOSING);
+          const finish = await lifetimes.beginWork(chatUri, { kind: 'host-tool', operationId: crypto.randomUUID() });
           try {
             const answer = await one.run(input, toolContext(uri, chatUri));
+            await finish?.();
             void fire({ type: 'tool_call', session: uri, chat: chatUri, tool: definition.name, ok: true });
             return answer;
           }
@@ -6711,7 +6769,7 @@ export function createHost(options: HostOptions): Host {
    * automation carries a name rather than a connection, so it passes the first
    * and leaves the second to the directory.
    */
-  const openSession = (
+  const openSession = async (
     uri: string,
     provider: string,
     config: Record<string, unknown>,
@@ -6722,7 +6780,7 @@ export function createHost(options: HostOptions): Host {
     title?: string,
     by?: { owner?: Owner; principal?: Principal },
     clientSystemInstructions?: string,
-  ): void => {
+  ): Promise<void> => {
     named(uri, 'session');
     if (sessions.has(uri))
       throw new RpcError(-32003, `${uri} already exists`);
@@ -6742,7 +6800,7 @@ export function createHost(options: HostOptions): Host {
     // moment and a later root change waits for the next session.
     strategies.set(uri, strategyOf(uri));
     try {
-      const lead = spawn(agent, uri, chatUriFor(uri), config, undefined, where, credentials, additional, clientSystemInstructions);
+      const lead = await spawn(agent, uri, chatUriFor(uri), config, undefined, where, credentials, additional, clientSystemInstructions);
       // Named before it is announced, when the maker had a name for it: a
       // row that appears as "New session" and is renamed a moment later is
       // two rows to a client that lists once. Written down for the same
@@ -6821,7 +6879,7 @@ export function createHost(options: HostOptions): Host {
     // A source in the config is made into a machine before anything runs, the
     // same step a client's `createSession` takes.
     await placedIn(uri, provider, config, where, wanted.owner);
-    openSession(
+    await openSession(
       uri,
       provider,
       backendsOwn(config),
@@ -6900,11 +6958,32 @@ export function createHost(options: HostOptions): Host {
      * moves immediately is what a client is told the session has.
      */
     setTools: (tools) => {
+      if (admissionClosed) throw new Error(CLOSING);
       contributing = permitted(tools);
       for (const uri of sessions.keys())
         dispatch(uri, { type: 'session/serverToolsChanged', tools: toolDefinitions(uri) });
     },
     connections: () => connections.size,
+    quiesce: () => {
+      if (quiescing !== undefined) return quiescing;
+      if (options.sessionLifecycle?.workProfile !== 'local-executor-v1') return Promise.reject(new Error('Quiesce requires local-executor-v1'));
+      if (closing !== undefined) return Promise.reject(new Error('Host close already started'));
+      admissionClosed = true;
+      closed = true;
+      quiescing = (async () => {
+        while (admitted.size > 0) await Promise.all([...admitted]);
+        await Promise.all([...starting]);
+        if (quiesceFailures.length > 0) throw new AggregateError(quiesceFailures, 'Admitted host work failed');
+        for (const held of sessions.values()) {
+          for (const [uri, chat] of held.chats) {
+            await chat.close();
+            await lifetimes.dispose(uri, chat.writerExitProof?.());
+          }
+        }
+        return { profile: 'local-executor-v1' as const, admissionClosed: true as const };
+      })();
+      return quiescing;
+    },
     close: () => {
       closing ??= (async () => {
         closed = true;
@@ -6916,7 +6995,7 @@ export function createHost(options: HostOptions): Host {
         };
         const going: Promise<void>[] = [];
         for (const held of sessions.values()) {
-          for (const [uri, chat] of held.chats) going.push(step(uri, () => chat.close()));
+          for (const [uri, chat] of held.chats) going.push(step(uri, async () => { await chat.close(); await lifetimes.dispose(uri, chat.writerExitProof?.()); }));
         }
         // A run already past its guard ends here, refused at `spawn` or started
         // and so among the sessions; its outcome is the run's to report.
@@ -6942,6 +7021,7 @@ export function createHost(options: HostOptions): Host {
     turning: () => [...sessions.keys()]
       .filter((uri) => (statusOf(uri) & (Status.InProgress | Status.InputNeeded)) !== 0),
     accept(peer: Peer, principal?: Principal, root?: boolean) {
+      if (admissionClosed) throw new Error(CLOSING);
       const connection: Connection = {
         peer, clientId: '', watching: new Set<string>(),
         tokens: new Map<string, Credential>(), aliases: new Map<string, string>(),
@@ -7455,6 +7535,7 @@ export function createHost(options: HostOptions): Host {
               'ahpd.pureHelpScanner': { version: 1 },
               'ahpd.activeClientSetReceipts': true,
               'ahpd.messageAttachments': true,
+              'ahpd.updateClientSystemInstructions': Array.from(agents.values()).filter(agent => agent.updatesSystemInstructions === true).map(agent => agent.provider),
               'ahpd.humanSteering': { version: 1, providers: ['codex', 'claude'] },
               ...(Array.from(agents.values()).some((agent) => agent.acceptsSystemInstructions === true)
                 ? { [CLIENT_SYSTEM_INSTRUCTIONS]: Array.from(agents.values())
@@ -7464,6 +7545,7 @@ export function createHost(options: HostOptions): Host {
               'vscode.removeSessionArtifact': true,
               'vscode.detachedWorktrees': true,
               'vscode.getAgentHostSessionStateFile.chat': true,
+              'ahpd.providerDebugLogs': { version: 1, maxBytes: PROVIDER_LOG_LIMIT },
               ...(Array.from(agents.values()).some((agent) => agent.historicalTurnStatus !== undefined)
                 ? { 'vscode.getAgentHostTurnMetadata.v1': true }
                 : {}),
@@ -8571,6 +8653,31 @@ export function createHost(options: HostOptions): Host {
          * connection subscribed under it is answered in its spelling -
          * decision `a-session-is-held-under-its-providers-name`.
          */
+        'ahpd/updateSessionInstructions': async (params) => {
+          const uri = heldAs(String(params.channel ?? ''));
+          const held = sessions.get(uri);
+          if (!held) throw new RpcError(-32001, `No session at ${uri}`);
+          if (restarting.has(uri)) throw new RpcError(-32602, 'Session instructions are already changing');
+          const text = params.instructions;
+          if (typeof text !== 'string' || text.trim() === '' || new TextEncoder().encode(text).byteLength > MAX_CLIENT_SYSTEM_INSTRUCTIONS_BYTES)
+            throw new RpcError(-32602, 'Client system instructions must be nonempty text within 128 KiB');
+          const chat = leadOf(held);
+          if (held.agent.updatesSystemInstructions !== true || chat?.setSystemInstructions === undefined)
+            throw new RpcError(-32602, 'This provider cannot update system instructions');
+          if (held.chats.size !== 1 || (chat.chatState() as { activeTurn?: unknown }).activeTurn !== undefined)
+            throw new RpcError(-32602, 'System instructions can only be updated for an idle session with one chat');
+          const work = Promise.resolve().then(async () => {
+            await chat.setSystemInstructions!([...instructions(uri), text]);
+            held.clientSystemInstructions = text;
+          });
+          restarting.set(uri, work);
+          try {
+            await work;
+          } finally {
+            if (restarting.get(uri) === work) restarting.delete(uri);
+          }
+          return { applied: true };
+        },
         createSession: async (params) => {
           if (closed) throw new RpcError(INTERNAL_ERROR, CLOSING);
           const given = named(String(params.channel ?? ''), 'session');
@@ -8675,7 +8782,8 @@ export function createHost(options: HostOptions): Host {
             // owns the work rather than against whoever sent it.
             if (permissionScannerRequested(params._meta)) scanners.register(uri, connection, pureHelpScannerRequested(params._meta));
             try {
-              openSession(uri, provider, backendsOwn(config), running, undefined, tokensFor(provider), peers, undefined,
+              sessionClients.set(uri, connection.clientId);
+              await openSession(uri, provider, backendsOwn(config), running, undefined, tokensFor(provider), peers, undefined,
                 forWhom(ownerFor(connection), connection.principal), clientSystemInstructions);
             }
             catch (error) {
@@ -8817,7 +8925,7 @@ export function createHost(options: HostOptions): Host {
             ? asked.filter((one) => one !== held.workingDirectory)
             : held.additional;
           if (asked.length > 0) beside.set(chatUri, peers ?? []);
-          const chat = spawn(held.agent, uri, chatUri, backendsOwn(held.config), made, held.workingDirectory, undefined, peers);
+          const chat = await spawn(held.agent, uri, chatUri, backendsOwn(held.config), made, held.workingDirectory, undefined, peers);
           if (origin !== undefined) madeFrom.set(chatUri, origin);
           log(`opened ${chatUri} in ${uri}`);
           // `summary`, not `chat`: the reducer reads `action.summary.resource`,
@@ -8848,7 +8956,8 @@ export function createHost(options: HostOptions): Host {
             throw new RpcError(-32602, `${chatUri} is the only chat in ${found.uri}; dispose the session instead`);
           }
           deliveries.forgetChat(chatUri, found.chat);
-          found.chat.close();
+          await found.chat.close();
+          await lifetimes.dispose(chatUri, found.chat.writerExitProof?.());
           byChat.delete(chatUri);
           drafts.delete(chatUri);
           madeFrom.delete(chatUri);
@@ -8863,7 +8972,7 @@ export function createHost(options: HostOptions): Host {
           return {};
         },
         disposeSession: async (params) => {
-          removeSession(heldAs(String(params.channel ?? '')));
+          await removeSession(heldAs(String(params.channel ?? '')));
           return {};
         },
         /**
@@ -9070,6 +9179,36 @@ export function createHost(options: HostOptions): Host {
          * where it is.
          */
         'vscode/collectAgentHostDebugLogs': async (params) => {
+          if (params.providerOnly !== undefined) {
+            if (params.providerOnly !== true || params.version !== 1 || params.kind !== 'archive'
+              || typeof params.session !== 'string' || typeof params.chat !== 'string'
+              || Object.keys(params).some(key => !['providerOnly', 'version', 'kind', 'session', 'chat'].includes(key))) {
+              throw new RpcError(-32602, 'Invalid provider log selection');
+            }
+            const uri = params.session;
+            const agent = sessions.get(uri)?.agent ?? owners.get(uri);
+            const chosen = byChat.get(chatOf(params.chat));
+            if (agent === undefined || uri !== `${agent.provider}:/${idOf(uri)}` || chosen?.uri !== uri || chosen.chat.chatUri !== params.chat) {
+              throw new RpcError(-32602, 'Provider logs require an exact session and chat');
+            }
+            if (options.users !== undefined && connection.root !== true && (ownerFor(connection) === undefined || ownerFor(connection) !== kept.owner(idOf(uri)))) {
+              throw new RpcError(-32009, 'Provider log access denied');
+            }
+            const metadata = { version: 1, session: uri, chat: params.chat, provider: agent.provider };
+            if (agent.provider !== 'claude' && agent.provider !== 'codex') return { ...metadata, status: 'unavailable', reason: 'unsupported' };
+            const dir = dirOf(uri);
+            const native = chosen.chat.agentId();
+            if (dir === undefined || native === undefined) return { ...metadata, status: 'unavailable', reason: 'missing' };
+            try {
+              let file: string | undefined;
+              if (agent.harnessLogFile !== undefined) file = await agent.harnessLogFile(native, dir);
+              else if (agent.provider === 'claude') file = agent.stateFile?.(native, dir);
+              if (agent.provider === 'codex' && agent.harnessLogFile === undefined) return { ...metadata, status: 'unavailable', reason: 'unsupported' };
+              if (byChat.get(chatOf(params.chat)) !== chosen || chosen.chat.agentId() !== native) return { ...metadata, status: 'unavailable', reason: 'changed' };
+              const result = await collectProviderLog(logs, file, agent.provider, native, connection);
+              return { ...metadata, nativeSessionId: native, ...result };
+            } catch { return { ...metadata, status: 'unavailable', reason: 'unreadable' }; }
+          }
           const kind = params.kind;
           if (kind !== 'archive' && kind !== 'directory') throw new RpcError(-32602, 'kind must be archive or directory');
           if (params.session !== undefined && typeof params.session !== 'string') throw new RpcError(-32602, 'session must be a URI string');
@@ -9083,7 +9222,7 @@ export function createHost(options: HostOptions): Host {
         'vscode/readAgentHostDebugLogsChunk': async (params) => {
           if (typeof params.resource !== 'string') throw new RpcError(-32602, 'resource must be a URI string');
           if (typeof params.position !== 'number') throw new RpcError(-32602, 'position must be a number');
-          try { return await logs.read(params.resource, params.position); }
+          try { return await logs.read(params.resource, params.position, connection); }
           catch (error) { throw new RpcError(-32602, error instanceof Error ? error.message : String(error)); }
         },
         /**
@@ -9469,13 +9608,15 @@ export function createHost(options: HostOptions): Host {
        * client, as any other action this host will not apply.
        */
       const behind = (params: Record<string, unknown>, origin: Origin, step: () => Promise<void> | undefined): void => {
-        const next = (waiting ?? Promise.resolve()).then(() => (connections.has(connection) ? step() : undefined)).catch((error: unknown) => {
+        const pending = trackAdmission((waiting ?? Promise.resolve()).then(() => (connections.has(connection) ? step() : undefined)));
+        const next = pending.catch((error: unknown) => {
           const reason = error instanceof Error ? error.message : String(error);
           log(`a dispatch from ${connection.clientId || 'anonymous'} failed: ${reason}`);
           if (!connections.has(connection)) return;
           const action = (typeof params.action === 'object' && params.action !== null ? params.action : {}) as Record<string, unknown>;
           refuse(connection.peer, meantBy(String(params.channel ?? '')), action, origin, reason);
         });
+        trackAdmission(next);
         waiting = next;
         void next.then(() => { if (waiting === next) waiting = undefined; });
       };
@@ -9504,6 +9645,10 @@ export function createHost(options: HostOptions): Host {
           ? params.action
           : {}) as Record<string, unknown>;
         const type = String(action.type ?? '');
+        if (options.sessionLifecycle?.workProfile === 'local-executor-v1') {
+          const problem = workProfileAction(action);
+          if (problem !== undefined) { refuse(connection.peer, channel, action, origin, problem); return; }
+        }
         /** Refuse this dispatch, in the words of whatever would not have it. */
         const no = (reason: string): void => refuse(connection.peer, channel, action, origin, reason);
         /*
@@ -10092,7 +10237,8 @@ export function createHost(options: HostOptions): Host {
             if (was === null) charged.set(named, undefined);
             else if (was !== undefined) charged.set(named, { scope: was });
             else charge(named, connection.principal, typeof restored.scope === 'string' ? restored.scope : undefined);
-            const session = spawn(owner, named, chatUriFor(named), restored, { resume: id, seed }, ran);
+            sessionClients.set(named, connection.clientId);
+            const session = await spawn(owner, named, chatUriFor(named), restored, { resume: id, seed }, ran);
             keepProvider(named, owner, session);
             log(`resumed ${named}`);
             dispatch(named, { type: 'session/ready' });
@@ -10617,9 +10763,7 @@ export function createHost(options: HostOptions): Host {
               next = had.filter((other) => other !== one);
             }
             beside.set(channel, next);
-            restartChat(owner.uri, channel, tokensFor(held.agent.provider));
-            dispatch(channel, action, origin);
-            break;
+            return restartChat(owner.uri, channel, tokensFor(held.agent.provider)).then(() => { dispatch(channel, action, origin); });
           }
           case 'chat/turnResume': {
             if (session.resume === undefined) {
@@ -10870,23 +11014,26 @@ export function createHost(options: HostOptions): Host {
              * be told to cut it, which is the same end state reached by
              * showing somebody the turns they asked to be rid of.
              */
+            requireRestartContainment(session);
             dispatch(session.chatUri, action);
-            session.close();
-            // So the next thing the new session says about itself is reported
-            // rather than compared against what the old one last said.
-            described.delete(session.chatUri);
-            spawn(
-              owner.agent,
-              session.uri,
-              session.chatUri,
-              owner.config,
-              { resume: started, rewindAt: point, seed: all.slice(0, at + 1) as Bag[] },
-              owner.workingDirectory,
-              undefined,
-              beside.get(session.chatUri) ?? owner.additional,
-            );
-            log(`truncated ${session.chatUri} to ${turnId}`);
-            break;
+            return (async () => {
+              await stopForRestart(session);
+              if (byChat.get(session.chatUri)?.chat !== session) throw new Error(`${session.chatUri} changed during rewind`);
+              // So the next thing the new session says about itself is reported
+              // rather than compared against what the old one last said.
+              described.delete(session.chatUri);
+              await spawn(
+                owner.agent,
+                session.uri,
+                session.chatUri,
+                owner.config,
+                { resume: started, rewindAt: point, seed: all.slice(0, at + 1) as Bag[] },
+                owner.workingDirectory,
+                undefined,
+                beside.get(session.chatUri) ?? owner.additional,
+              );
+              log(`truncated ${session.chatUri} to ${turnId}`);
+            })();
           }
           /*
            * Somebody's half-typed answer, kept for whoever else is looking.
@@ -11049,6 +11196,12 @@ export function createHost(options: HostOptions): Host {
       };
       return {
         async handle(request) {
+          if (admissionClosed) throw new Error(CLOSING);
+          return trackAdmission((async () => {
+          if (options.sessionLifecycle?.workProfile === 'local-executor-v1' && request.method !== 'dispatchAction') {
+            const problem = workProfileRequest(request.method, (request.params ?? {}) as Bag);
+            if (problem !== undefined) throw new RpcError(METHOD_NOT_FOUND, problem);
+          }
           const notify = notifications[request.method];
           if (notify) {
             // Dropped rather than refused: a notification carries no id, so
@@ -11135,6 +11288,7 @@ export function createHost(options: HostOptions): Host {
             if (away !== undefined) return away.result;
           }
           return handler(request.params);
+          })());
         },
         close() {
           const was = [...connection.watching];

@@ -29,8 +29,8 @@ export interface Collected {
 export interface LogFile { path: string; from: string; provider?: boolean }
 
 export interface DebugLogs {
-  collect(files: LogFile[], kind: 'archive' | 'directory'): Promise<Collected>;
-  read(resource: string, position: number): Promise<{ data: string; eof: boolean }>;
+  collect(files: LogFile[], kind: 'archive' | 'directory', owner?: object): Promise<Collected>;
+  read(resource: string, position: number, owner?: object): Promise<{ data: string; eof: boolean }>;
   /** Take back everything still lent. */
   close(): Promise<void>;
 }
@@ -49,6 +49,8 @@ export function debugLogs(options: { tmp?: string; lease?: number } = {}): Debug
   const lent = new Map<string, { recursive: boolean; timer: ReturnType<typeof setTimeout> }>();
   /** The archives the chunk reader may open. */
   const readable = new Set<string>();
+  const owners = new Map<string, object>();
+  const preparing = new Map<object, number>();
 
   const release = async (path: string): Promise<void> => {
     const held = lent.get(path);
@@ -56,6 +58,7 @@ export function debugLogs(options: { tmp?: string; lease?: number } = {}): Debug
     clearTimeout(held.timer);
     lent.delete(path);
     readable.delete(path);
+    owners.delete(path);
     await rm(path, { recursive: held.recursive, force: true }).catch(() => {});
   };
 
@@ -66,44 +69,55 @@ export function debugLogs(options: { tmp?: string; lease?: number } = {}): Debug
   };
 
   return {
-    collect: async (files, kind) => {
-      const id = crypto.randomUUID();
-      const staging = join(tmp, `agent-host-debug-logs-${id}`);
-      await mkdir(staging, { recursive: true });
-      const entries: { path: string; size: number }[] = [];
-      const packed: { path: string; from: string }[] = [];
-      let providerLogsIncluded = false;
-      let uncompressedSize = 0;
+    collect: async (files, kind, owner) => {
+      if (owner !== undefined && [...owners.values()].filter(value => value === owner).length + (preparing.get(owner) ?? 0) >= 4) throw new Error('Too many pending provider logs');
+      if (owner !== undefined) preparing.set(owner, (preparing.get(owner) ?? 0) + 1);
       try {
-        for (const file of files) {
-          // A log that is not there is nothing to pack, not a failure.
-          const found = await stat(file.from).catch(() => undefined);
-          if (found === undefined || !found.isFile()) continue;
-          const to = join(staging, file.path);
-          await mkdir(join(to, '..'), { recursive: true });
-          await copyFile(file.from, to);
-          entries.push({ path: file.path, size: found.size });
-          packed.push({ path: file.path, from: to });
-          uncompressedSize += found.size;
-          if (file.provider) providerLogsIncluded = true;
+        const id = crypto.randomUUID();
+        const staging = join(tmp, `agent-host-debug-logs-${id}`);
+        await mkdir(staging, { recursive: true, mode: 0o700 });
+        const entries: { path: string; size: number }[] = [];
+        const packed: { path: string; from: string }[] = [];
+        let providerLogsIncluded = false;
+        let uncompressedSize = 0;
+        try {
+          for (const file of files) {
+            // A log that is not there is nothing to pack, not a failure.
+            const found = await stat(file.from).catch(() => undefined);
+            if (found === undefined || !found.isFile()) continue;
+            const to = join(staging, file.path);
+            await mkdir(join(to, '..'), { recursive: true });
+            await copyFile(file.from, to);
+            entries.push({ path: file.path, size: found.size });
+            packed.push({ path: file.path, from: to });
+            uncompressedSize += found.size;
+            if (file.provider) providerLogsIncluded = true;
+          }
+          if (kind === 'directory') {
+            lend(staging, true);
+            return { kind, resource: `file://${staging}`, providerLogsIncluded, size: uncompressedSize, uncompressedSize, entries };
+          }
+          const archive = join(tmp, `agent-host-debug-logs-${id}.zip`);
+          const size = await zip(archive, packed);
+          lend(archive, false);
+          readable.add(archive);
+          if (owner !== undefined) owners.set(archive, owner);
+          return { kind, resource: `file://${archive}`, providerLogsIncluded, size, uncompressedSize, entries };
         }
-        if (kind === 'directory') {
-          lend(staging, true);
-          return { kind, resource: `file://${staging}`, providerLogsIncluded, size: uncompressedSize, uncompressedSize, entries };
+        finally {
+          if (kind !== 'directory') await rm(staging, { recursive: true, force: true }).catch(() => {});
         }
-        const archive = join(tmp, `agent-host-debug-logs-${id}.zip`);
-        const size = await zip(archive, packed);
-        lend(archive, false);
-        readable.add(archive);
-        return { kind, resource: `file://${archive}`, providerLogsIncluded, size, uncompressedSize, entries };
-      }
-      finally {
-        if (kind !== 'directory') await rm(staging, { recursive: true, force: true }).catch(() => {});
+      } finally {
+        if (owner !== undefined) {
+          const remaining = (preparing.get(owner) ?? 1) - 1;
+          if (remaining === 0) preparing.delete(owner);
+          else preparing.set(owner, remaining);
+        }
       }
     },
-    read: async (resource, position) => {
+    read: async (resource, position, owner) => {
       const path = asPath(resource);
-      if (!readable.has(path)) throw new Error('Unknown or expired Agent Host debug-log artifact');
+      if (!readable.has(path) || owners.has(path) && owners.get(path) !== owner) throw new Error('Unknown or expired Agent Host debug-log artifact');
       if (!Number.isSafeInteger(position) || position < 0) throw new Error(`Invalid debug-log artifact position: ${position}`);
       const handle = await open(path, 'r');
       try {

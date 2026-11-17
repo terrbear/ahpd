@@ -1496,3 +1496,25 @@ it('gates historical turn metadata with session:read and never broadcasts it', a
   expect(historicalTurnStatus).toHaveBeenCalledOnce();
   expect(readerWire.seen).toHaveLength(before);
 });
+
+it('provider-only diagnostics require the session owner and diagnostics grant', async () => {
+  let reads = 0;
+  const agent = { ...echo({ path: root, pace: 0 }), provider: 'claude', stateFile: () => { reads++; return undefined; } };
+  const host = createHost({ path: root, agents: [agent], users: directory({}) });
+  try {
+    const owner = host.accept(peer(), { id: 'alice', roles: [], can: () => true });
+    await owner.handle({ method: 'initialize', params: { clientId: 'alice-client', protocolVersions: ['0.9.0'] } });
+    await owner.handle({ method: 'createSession', params: { channel: 'claude:/owned', provider: 'claude' } });
+    const state = (await owner.handle({ method: 'subscribe', params: { channel: 'claude:/owned' } }) as Bag).snapshot.state;
+    const params = { version: 1, providerOnly: true, kind: 'archive', session: 'claude:/owned', chat: state.defaultChat };
+    const stranger = host.accept(peer(), { id: 'bob', roles: [], can: () => true });
+    await stranger.handle({ method: 'initialize', params: { clientId: 'bob-client', protocolVersions: ['0.9.0'] } });
+    await expect(stranger.handle({ method: 'vscode/collectAgentHostDebugLogs', params })).rejects.toMatchObject({ code: -32009 });
+    const denied = host.accept(peer(), { id: 'alice', roles: [], can: grant => grant !== 'diagnostics:read' });
+    await denied.handle({ method: 'initialize', params: { clientId: 'denied-client', protocolVersions: ['0.9.0'] } });
+    await expect(denied.handle({ method: 'vscode/collectAgentHostDebugLogs', params })).rejects.toMatchObject({ code: -32009 });
+    expect(reads).toBe(0);
+    expect(await owner.handle({ method: 'vscode/collectAgentHostDebugLogs', params })).toMatchObject({ status: 'unavailable', reason: 'source-unavailable' });
+    expect(reads).toBe(1);
+  } finally { await host.close(); }
+});
