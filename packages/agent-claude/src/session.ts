@@ -3977,8 +3977,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * session in a state it is not in.
      */
     setConfig: async (key, value) => {
-      return controlled(async (): Promise<true | string> => {
       if (options.workProfile === 'local-executor-v1' && !['model', 'effortLevel', 'permissionMode'].includes(key)) return 'The local executor profile is immutable';
+      if (!['permissions', 'shellInitScripts', 'model', 'effortLevel', 'permissionMode', 'autoApprove', 'mode'].includes(key)) return `${key} is not a config key this backend takes`;
+      return controlled(async (): Promise<true | string> => {
       /*
        * The lists, which really do move on a running session.
        *
@@ -4509,7 +4510,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * built.
      */
     setTools: async (next) => {
-      return controlled(async () => {
       if (options.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
       if (disableContributedTools) return true;
       next = allowedContribution(next);
@@ -4517,6 +4517,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const after = next.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const revision = clientToolsRevision;
       if (before === after && publishedToolsRevision === revision) return true;
+      return controlled(async () => {
       const requested = { ...declared };
       if (next.length > 0) requested.ahp = contributed(next, clientRunner(), contributedWork) as Bag;
       else delete requested.ahp;

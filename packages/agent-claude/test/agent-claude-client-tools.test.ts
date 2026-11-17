@@ -674,3 +674,20 @@ it('gates client dispatch and retains work after disconnect', async () => {
   await pending;
   expect(finish).not.toHaveBeenCalled();
 });
+
+it('does not renew work admission when an unchanged client catalog is published', async () => {
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async () => finish);
+  const definition = shellTool(shellOwner);
+  const session = createSession({
+    uri: 'claude:/catalog-idle', chatUri: 'ahp-chat:/catalog-idle',
+    cwd: mkdtempSync(join(tmpdir(), 'ahpd-catalog-idle-')),
+    emit: () => {}, beginWork,
+  });
+  onTestFinished(() => session.close());
+  expect(await session.setTools?.([definition])).toBe(true);
+  expect(beginWork).toHaveBeenCalledOnce();
+  expect(finish).toHaveBeenCalledOnce();
+  expect(await session.setTools?.([definition])).toBe(true);
+  expect(beginWork).toHaveBeenCalledOnce();
+});
