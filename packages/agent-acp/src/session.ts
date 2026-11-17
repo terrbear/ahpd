@@ -1527,8 +1527,10 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
      * naming the key, because only this backend knows what it serves.
      */
     setConfig: async (key, value): Promise<true | string> => {
-      return controlled(async (): Promise<true | string> => {
       if (start.workProfile === 'local-executor-v1' && !['model', 'permissionMode', 'effortLevel'].includes(key)) return 'The local executor profile is immutable';
+      if (!['model', 'permissionMode'].includes(key)) return `${provider}: ${key} is not a config key this backend serves`;
+      if (typeof value !== 'string') return `${provider}: ${key} takes a string`;
+      return controlled(async (): Promise<true | string> => {
       if (key === 'permissionMode') {
         if (typeof value !== 'string') return `${provider}: permissionMode takes a string`;
         try {
@@ -1610,8 +1612,12 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     } } : {}),
 
     setTools: async (next) => {
-      return controlled(async () => {
       if (start.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
+      const previous = offered.tools();
+      const unchanged = previous.length === next.length && next.every((tool, index) => tool.owner === previous[index]!.owner
+        && tool.run === previous[index]!.run && JSON.stringify(tool.definition) === JSON.stringify(previous[index]!.definition));
+      if (unchanged && (toolsEndpoint !== undefined || !next.some((tool) => tool.owner !== undefined))) return true;
+      return controlled(async () => {
       offered.set(next);
       if (toolsEndpoint === undefined && next.some((tool) => tool.owner !== undefined)) {
         await open();

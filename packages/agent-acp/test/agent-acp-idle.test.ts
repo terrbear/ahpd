@@ -234,3 +234,30 @@ it('refuses a local ACP runtime when the remote executor work profile is require
     workProfile: 'local-executor-v1', beginWork: async () => async () => {},
   })).toThrow('attached Anton executor');
 });
+
+it('does not admit work for unchanged ACP tools but admits changed definitions and runners', async () => {
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async () => finish);
+  const { session } = setup({ beginWork });
+  await expect(session.setTools!([])).resolves.toBe(true);
+  expect(beginWork).not.toHaveBeenCalled();
+  const tool = { definition: { name: 'fixture', description: 'original' }, run: async () => 'ok' };
+  await expect(session.setTools!([tool])).resolves.toBe(true);
+  expect(beginWork).toHaveBeenCalledOnce();
+  await expect(session.setTools!([{ ...tool, definition: { ...tool.definition } }])).resolves.toBe(true);
+  expect(beginWork).toHaveBeenCalledOnce();
+  const changed = { ...tool, definition: { ...tool.definition, description: 'changed' } };
+  await expect(session.setTools!([changed])).resolves.toBe(true);
+  expect(beginWork).toHaveBeenCalledTimes(2);
+  await expect(session.setTools!([{ ...changed, run: async () => 'new runner' }])).resolves.toBe(true);
+  expect(beginWork).toHaveBeenCalledTimes(3);
+  expect(finish).toHaveBeenCalledTimes(3);
+});
+
+it('rejects unsupported ACP settings without retaining provider work', async () => {
+  const beginWork = vi.fn(async () => async () => {});
+  const { session } = setup({ beginWork });
+  await expect(session.setConfig!('unknown', 'value')).resolves.toContain('not a config key');
+  await expect(session.setConfig!('model', 42)).resolves.toContain('takes a string');
+  expect(beginWork).not.toHaveBeenCalled();
+});
