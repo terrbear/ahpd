@@ -53,3 +53,17 @@ it.each(['initialize', 'history'])('cancels the owned bridge during stalled %s w
   await rm(directory,{recursive:true,force:true});
  }
 });
+
+it('resolves the raw Codex log only from the matching app-server thread path', async () => {
+ const directory = await mkdtemp(join(tmpdir(), 'cli-log-'));
+ try {
+  const receipt = join(directory, 'methods');
+  const expected = join(directory, 'native-rollout.jsonl');
+  const options = { command:process.execPath, args:[fixture], provider:'codex', env:{CLI_HISTORY_TEST_RECEIPT:receipt, CLI_HISTORY_TEST_PATH:expected} };
+  expect(await acpAgent(options).harnessLogFile?.(id, directory)).toBe(expected);
+  expect(await readFile(receipt, 'utf8')).toBe('initialize\n_session/read_history\n');
+  expect(await acpAgent({...options,args:[fixture,'--wrong-id']}).harnessLogFile?.(id, directory)).toBeUndefined();
+  expect(await acpAgent({...options,args:[fixture,'--old']}).harnessLogFile?.(id, directory)).toBeUndefined();
+  expect(await acpAgent({...options,env:{...options.env,CLI_HISTORY_TEST_PATH:'../other.jsonl'}}).harnessLogFile?.(id, directory)).toBeUndefined();
+ } finally { await rm(directory,{recursive:true,force:true}); }
+});

@@ -13,11 +13,12 @@ import type { ActiveTurn, McpServerState, StringOrMarkdown, ToolCallCompletedSta
 import { Status, idOf, tail, scannableBashInput, scannablePureHelpInput } from '@ahpd/sdk';
 import { attachmentContent } from './attachments.js';
 import { interruptionNotice, interruptedToolText, rejectedToolText } from './interruption.js';
-import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
+import type { Bag, BoundTool, Chosen, MessageFrom, OnWire, Ran, Session, SessionOptions, Start, SubagentChat, SubagentRequest, WireTurn } from '@ahpd/sdk';
 import { spawnFailure } from './spawn.js';
-import { pinnedModel, pinnedModels } from './models.js';
+import { pinnedModel, sdkModelId, uniqueModels } from './models.js';
 import { idleQuery } from './idle.js';
 import { executionFenceOf } from './tool-execution-fence.js';
+import { toolProfileOf } from './tool-profile.js';
 import { processExit, spawnLocal, stopQuery } from './shutdown.js';
 import type { Asked, Spawned } from './spawn.js';
 
@@ -141,6 +142,7 @@ const shellInitScripts = (value: unknown): ShellInitScript[] | undefined => {
 const sourcing = (path: string): string => `{ . '${path.replaceAll("'", "'\\''")}'; } 2>/dev/null || printf 'shell init script exited %s\\n' "$?"`;
 
 interface PendingInput {
+  finish?: () => Promise<void>;
   id: string;
   entry: Bag;
   /** `AskUserQuestion` needs its own payload echoed back verbatim. */
@@ -715,6 +717,9 @@ export interface ClaudeSessionOptions extends SessionOptions {
    */
   workerStop?: 'worker' | 'session';
   idleTimeoutMs?: number;
+  claimSessionId?: (canonicalId: string) => Promise<void>;
+  beginWork?: Start['beginWork'];
+  workProfile?: Start['workProfile'];
   admitResume?: () => () => void;
   /**
    * The presets `claude()` was configured with, by name.
@@ -740,6 +745,17 @@ export interface ClaudeSessionOptions extends SessionOptions {
 }
 
 export function createSession(options: ClaudeSessionOptions): Session {
+  if (options.workProfile === 'local-executor-v1') {
+    const settings = options.settings ?? {};
+    if (settings.builtInTools !== 'none' || settings.claudeConfigIsolation !== 'isolated' || settings.extraArgsPolicy !== 'none'
+      || settings.toolExecutionFence !== 'allowlist' || options.spawn !== undefined || options.forkAt !== undefined
+      || Object.keys(options.mcpServers ?? {}).length > 0
+      || (options.tools ?? []).some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '')
+        || !tool.definition.name.startsWith(`${tool.owner}__`))) {
+      throw new Error('local-executor-v1 requires isolated Claude with native tools disabled and only owned Anton client tools');
+    }
+    if (options.beginWork === undefined) throw new Error('local-executor-v1 requires work admission');
+  }
   if (options.idleTimeoutMs !== undefined && (!Number.isSafeInteger(options.idleTimeoutMs) || options.idleTimeoutMs < 0 || options.idleTimeoutMs > 2_147_483_647)) {
     throw new Error('idleTimeoutMs must be an integer from 0 to 2147483647 milliseconds');
   }
@@ -853,6 +869,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * question of whether a turn is running is asked of one thing.
    */
   let beginning: string | undefined;
+  const promptPermits = new Map<string, () => Promise<void>>();
+  let promptCompletionUncertain = false;
+  const admitPrompt = async (turnId: string): Promise<void> => {
+    const finish = await options.beginWork?.({ kind: 'prompt', operationId: crypto.randomUUID() });
+    if (finish !== undefined) promptPermits.set(turnId, finish);
+  };
   /** Whether a turn of this session is running, or is part-way into becoming one. */
   const busy = (): boolean => active !== undefined || beginning !== undefined;
   /** The config in force, by key. What `session/configChanged` merges into. */
@@ -897,6 +919,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
   // Keep the resolved value in session state so an absent selector is explicit.
   settings.claudeConfigIsolation = configIsolation;
   const isolateClaudeConfig = configIsolation === 'isolated';
+  const toolProfile = toolProfileOf(settings.claudeToolProfile);
+  settings.claudeToolProfile = toolProfile.profile;
+  const profileRemoved: ReadonlySet<string> = new Set(toolProfile.removed);
   const manifestCapture = settings.captureSdkInitToolManifest === undefined ? 'disabled' : settings.captureSdkInitToolManifest;
   if (manifestCapture !== 'disabled' && manifestCapture !== 'enabled') {
     throw new Error('captureSdkInitToolManifest must be one of disabled, enabled');
@@ -1188,7 +1213,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * to settle them itself or the CLI waits for ever on a promise nobody owns.
    */
   const disconnectedClients = new Set<string>();
-  const byClient = new Map<string, { owner: string; request: Bag; settle: (answer: { text: string; ok: boolean }) => void }>();
+  const byClient = new Map<string, { owner: string; request: Bag; finish?: () => Promise<void>; settle: (answer: { text: string; ok: boolean }) => void }>();
 
   /** Every outstanding client call, answered the same way and forgotten. */
   const releaseCalls = (why: string, whose?: string): void => {
@@ -1242,9 +1267,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
     const generation = claimGeneration;
     const clientGeneration = clientClaimGenerations.get(owner) ?? 0;
     if (closed) return { text: 'The session was disposed', ok: false };
+    const finish = options.beginWork === undefined ? undefined : await options.beginWork({ kind: 'client-tool', operationId: crypto.randomUUID() });
+    if (closed || generation !== claimGeneration || clientGeneration !== (clientClaimGenerations.get(owner) ?? 0)) {
+      await finish?.();
+      return { text: 'The client call ended before it could be dispatched', ok: false };
+    }
     const id = await claim(called(exposedToolName(tool, offering)), input);
     if (id === undefined || closed || generation !== claimGeneration
       || clientGeneration !== (clientClaimGenerations.get(owner) ?? 0)) {
+      await finish?.();
       return { text: 'The client call ended before it could be dispatched', ok: false };
     }
     const scope = scopeOfCall(id) ?? mainScope;
@@ -1272,7 +1303,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     };
     try {
       return await new Promise<{ text: string; ok: boolean }>((settle) => {
-        byClient.set(id, { owner, request, settle });
+        byClient.set(id, { owner, request, settle, ...(finish === undefined ? {} : { finish }) });
         inputNeededSet(request);
         doing(`Waiting on ${owner}: ${tool.definition.title ?? tool.definition.name}`);
       });
@@ -2400,7 +2431,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * tool in both is one somebody has forbidden and also once approved.
    */
   const settled = (toolName: string): 'allow' | 'deny' | undefined => {
-    if (allowed.deny.includes(toolName)) return 'deny';
+    if (allowed.deny.includes(toolName) || profileRemoved.has(toolName)) return 'deny';
     if (allowed.allow.includes(toolName)) return 'allow';
     return undefined;
   };
@@ -2463,6 +2494,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
     }
     if (abortSignal?.aborted) return refuse('AHP confirmation was aborted before it was requested');
     if (closed || scanTurn !== undefined && scanScope?.turn !== scanTurn) return refuse('The tool call ended while its permission was being checked');
+    const finishInput = options.beginWork === undefined ? undefined : await options.beginWork({ kind: 'input', operationId: crypto.randomUUID() });
+    if (closed || abortSignal?.aborted || scanTurn !== undefined && scanScope?.turn !== scanTurn) {
+      await finishInput?.();
+      return refuse('The tool call ended before its permission was published');
+    }
     return await new Promise((settle) => {
       const about = bag(asked);
       /*
@@ -2526,7 +2562,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         const request = { id, message: str(raw.header) ?? 'The agent has a question', questions };
         // `chat` is required on every input request and was never sent.
         const entry: Bag = { id, chat: where, kind: 'chatInput', request };
-        pending.set(id, { id, entry, questions: list(raw.questions), asked, answers: new Map(), settle });
+        pending.set(id, { id, entry, ...(finishInput === undefined ? {} : { finish: finishInput }), questions: list(raw.questions), asked, answers: new Map(), settle });
         emitOn(scope, { type: 'chat/inputRequested', turnId: turn.id, request });
         inputNeededSet(entry);
         touch();
@@ -2600,6 +2636,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // neither was sent.
       const entry: Bag = { id, chat: where, kind: 'toolConfirmation', turnId: str(turn.id) ?? '', toolCall: call };
       const pendingInput: PendingInput = {
+        ...(finishInput === undefined ? {} : { finish: finishInput }),
         id,
         entry,
         asked: new Map(),
@@ -2705,8 +2742,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
   const dependencies = new Set<string>();
   const disabledServers = new Set<string>();
   const idle = idleQuery<ReturnType<typeof query>>({
+    ...(options.claimSessionId === undefined ? {} : { replacementAllowed: false, beforeCreate: async () => {
+      if (options.forkAt !== undefined) throw new Error('Forking with shared session ownership is not supported');
+      await options.claimSessionId!(agentId ?? reservedNativeId);
+    } }),
     ...(options.admitResume === undefined ? {} : { admitResume: options.admitResume }),
-    timeout: options.spawn === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
+    timeout: options.spawn === undefined && options.claimSessionId === undefined ? options.idleTimeoutMs ?? 3_600_000 : 0,
     timing,
     context: () => beginning === undefined ? {} : { turn_id: beginning.slice(0, 128) },
     eligible: () => !closed && gone === undefined && !busy()
@@ -2755,6 +2796,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
       }
       const presetQuery = { ...fromPreset };
       if (extraArgsPolicy === 'none') delete presetQuery.extraArgs;
+      const querySettings = {
+        ...(fromPreset.settings as Bag | undefined),
+        disableClaudeAiConnectors: true,
+      };
       const handle = query({
         prompt: input(signal.signal),
         options: {
@@ -2857,7 +2902,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * before this and how an automation's still does.
            */
           ...presetQuery,
-          settings: { ...(fromPreset.settings as Bag | undefined), disableClaudeAiConnectors: true },
+          settings: querySettings,
           ...(options.env ? { env: { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env } } : {}),
           // From the settings, which is where it lives: it is a config key like
           // the others, and a second way in was a second thing to keep in step.
@@ -2883,7 +2928,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
            * call and that is what makes one set mid-session take effect.
            */
           ...(allowed.allow.length > 0 ? { allowedTools: [...allowed.allow] } : {}),
-          ...(allowed.deny.length > 0 ? { disallowedTools: [...allowed.deny] } : {}),
+          ...(allowed.deny.length > 0 || profileRemoved.size > 0
+            ? { disallowedTools: [...new Set([...allowed.deny, ...profileRemoved])] }
+            : {}),
           // Resumed, not replayed: the agent picks up the context it built - the
           // files it read, the decisions it made - rather than being handed a
           // transcript of them and asked to infer the rest.
@@ -3043,6 +3090,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
     }
     beginning = turnId;
     try {
+      if (options.beginWork !== undefined) await admitPrompt(turnId);
+      if (closed || beginning !== turnId) return;
       const previousStartupApplication = startupApplication;
       if (previousStartupApplication !== undefined) {
         timing('previous_startup_application', 'start');
@@ -3355,13 +3404,13 @@ export function createSession(options: ClaudeSessionOptions): Session {
     offered = list(init.models)
       .map((raw) => {
         const model = bag(raw);
-        // `value`, not `id`. Reading the wrong name costs every model there
-        // is and leaves a picker that offers nothing.
-        return { id: str(model.value) ?? '', name: str(model.displayName) ?? str(model.value) ?? '' };
+        // `value` can be an alias. `resolvedModel` is the exact dispatch id;
+        // keep the `default` selector special.
+        return { id: sdkModelId(model.value, model.resolvedModel), name: str(model.displayName) ?? str(model.value) ?? '' };
       })
       .filter((model) => model.id !== '');
     if (options.offerModels) offered = await options.offerModels(offered);
-    else offered = pinnedModels(offered, { ...(fromPreset.env as Bag | undefined ?? process.env), ...options.env });
+    else offered = uniqueModels(offered);
     /*
      * The style the preset names, applied once the CLI is there to take it.
      *
@@ -3410,7 +3459,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
           }
         }
         if (said) {
-          if (idle.generation() > 0 && expectedNativeId !== said) {
+          if ((idle.generation() > 0 || options.claimSessionId !== undefined) && expectedNativeId !== said) {
             const error = new Error('Claude resumed a different native session; refusing to continue');
             throw error;
           }
@@ -3588,6 +3637,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
         if (type === 'result') {
           const turn = active;
+          const unfinishedTools = [...parts.values()].some((part) => bag(part.toolCall).status === 'running');
+          if (turn !== undefined && !promptCompletionUncertain && !unfinishedTools) {
+            const finish = promptPermits.get(String(turn.id));
+            await finish?.();
+            promptPermits.delete(String(turn.id));
+          }
           /*
            * Read before the turn is pushed, because the reason goes inside it.
            * `is_error` carries the words; a subtype that is not `success` is a
@@ -3705,12 +3760,22 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * anything to the CLI. `queuedMessageId` names the waiting row the command
    * came from, so a client clears it the way it clears any other.
    */
+  const controlled = async <T extends boolean | string>(operation: () => Promise<T>): Promise<T> => {
+    if (options.beginWork === undefined) return operation();
+    const finish = await options.beginWork({ kind: 'provider-control', operationId: crypto.randomUUID() });
+    if (closed) { await finish?.(); throw new Error('The session was disposed before the control was applied'); }
+    const result = await operation();
+    if (result === true) await finish?.();
+    return result;
+  };
+
   const runCommand = (
     turnId: string,
     command: string,
     run: (toolCallId: string) => Promise<Ran>,
     queuedMessageId?: string,
   ): void => {
+    if (options.workProfile === 'local-executor-v1') throw new Error('Use the attached Anton client tools for commands');
     const turn: Bag = {
       id: turnId,
       startedAt: new Date().toISOString(),
@@ -3912,6 +3977,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * session in a state it is not in.
      */
     setConfig: async (key, value) => {
+      return controlled(async (): Promise<true | string> => {
+      if (options.workProfile === 'local-executor-v1' && !['model', 'effortLevel', 'permissionMode'].includes(key)) return 'The local executor profile is immutable';
       /*
        * The lists, which really do move on a running session.
        *
@@ -3943,7 +4010,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
         const found = EFFORTS.find((one) => one === said);
         if (!found) return `The harness has no effort level called ${said}`;
         settings.effortLevel = found;
-        void handle.applyFlagSettings({ effortLevel: found }).catch(() => {});
+        if (options.beginWork === undefined) void handle.applyFlagSettings({ effortLevel: found }).catch(() => {});
+        else await handle.applyFlagSettings({ effortLevel: found });
         return true;
       }
       /*
@@ -3964,8 +4032,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
           : `${key} is not a config key this backend takes`;
       }
       settings.permissionMode = found;
-      void handle.setPermissionMode(found).catch(() => {});
+      if (options.beginWork === undefined) void handle.setPermissionMode(found).catch(() => {});
+      else await handle.setPermissionMode(found);
       return true;
+      });
     },
 
 
@@ -3981,6 +4051,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * nothing is worse than one that says it cannot.
      */
     setCustomizationEnabled: async (id, enabled) => {
+      if (options.workProfile === 'local-executor-v1') return false;
       const server = serverNamed(id);
       if (!server)
         return false;
@@ -4029,6 +4100,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * this host serves the gesture and not the token.
      */
     startMcpServer: async (id) => {
+      if (options.workProfile === 'local-executor-v1') return false;
       const server = serverNamed(id);
       if (!server)
         return false;
@@ -4118,6 +4190,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * to the CLI, which is the whole difference from `begin`.
      */
     ran: (turnId, command, run, queuedAs) => {
+      if (options.workProfile === 'local-executor-v1') throw new Error('Use the attached Anton client tools for commands');
       /*
        * A turn is already running, so the command waits its turn.
        *
@@ -4267,7 +4340,11 @@ export function createSession(options: ClaudeSessionOptions): Session {
       doing('Thinking');
       const message = bag((active as Bag).message);
       touch();
-      void idle.ready().then(() => {
+      const admitted = options.beginWork === undefined ? Promise.resolve() : admitPrompt(turnId);
+      void admitted.then(() => {
+        if (closed || str(active?.id) !== turnId) return;
+        return idle.ready();
+      }).then(() => {
         if (closed || str(active?.id) !== turnId) return;
         hasNativePrompt = true;
         nativePromptSent = true;
@@ -4296,6 +4373,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     },
 
     cancel: (turnId) => {
+      if (promptPermits.size > 0) promptCompletionUncertain = true;
       const cancelling = turnId || str(active?.id);
       if (active !== undefined) {
         interruptionPending = true;
@@ -4380,6 +4458,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
         && str(bag(one.entry.toolCall).toolCallId) === toolCallId);
       if (!held) return;
       const settle = held.settle;
+      void held.finish?.().catch(() => {});
       pending.delete(held.id);
       held.clearAbort?.();
       inputNeededRemoved(held.id);
@@ -4430,6 +4509,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * built.
      */
     setTools: async (next) => {
+      return controlled(async () => {
+      if (options.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
       if (disableContributedTools) return true;
       next = allowedContribution(next);
       const before = offering.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
@@ -4454,6 +4535,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       if (requested.ahp === undefined) delete declared.ahp;
       else declared.ahp = requested.ahp;
       return true;
+      });
     },
 
     toolCallOwner: (toolCallId) => byClient.get(toolCallId)?.owner,
@@ -4521,6 +4603,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       if (!held || held.owner !== clientId) return false;
       byClient.delete(toolCallId);
       held.settle(result);
+      void held.finish?.().catch(() => {});
       return true;
     },
 
@@ -4581,6 +4664,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const held = pending.get(requestId);
       if (!held) return;
       pending.delete(requestId);
+      void held.finish?.().catch(() => {});
       held.clearAbort?.();
       inputNeededRemoved(requestId);
 

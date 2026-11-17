@@ -46,7 +46,7 @@ const u32 = (value: number): Buffer => { const b = Buffer.alloc(4); b.writeUInt3
 
 /** Write the entries to `archive`, and answer the number of bytes it came to. */
 export async function zip(archive: string, entries: ZipEntry[]): Promise<number> {
-  const out = createWriteStream(archive);
+  const out = createWriteStream(archive, { mode: 0o600 });
   let offset = 0;
   const written = (chunk: Buffer): Promise<void> => new Promise((resolve, reject) => {
     offset += chunk.length;

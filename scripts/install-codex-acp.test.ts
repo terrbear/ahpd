@@ -10,11 +10,10 @@ let bin: string;
 let install: string;
 let events: string;
 let pinFile: string;
-const revision = '7fc1a0d2ce4a36535630ed2a6c5aca1c9fa77108';
+const revision = '2222222222222222222222222222222222222222';
 const nextRevision = '1111111111111111111111111111111111111111';
 const markerName = '.codex-acp-install.json';
 const installer = new URL('./install-codex-acp.mjs', import.meta.url);
-const pinSource = new URL('./codex-acp.json', import.meta.url);
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'ahpd install codex '));
@@ -25,8 +24,8 @@ beforeEach(() => {
   mkdirSync(scripts, { recursive: true });
   mkdirSync(bin, { recursive: true });
   copyFileSync(installer, join(scripts, 'install-codex-acp.mjs'));
-  copyFileSync(pinSource, join(scripts, 'codex-acp.json'));
   pinFile = join(scripts, 'codex-acp.json');
+  pinTo(revision);
   writeFileSync(join(bin, 'git'), `#!/usr/bin/env node
 const fs = require('node:fs');
 fs.appendFileSync(process.env.TEST_EVENTS, 'git ' + process.argv.slice(2).join(' ') + '\\n');

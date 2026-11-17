@@ -883,3 +883,171 @@ it('reports memory backpressure without spawning or replaying and resumes after 
   expect(JSON.stringify(sdk.runs[1]!.prompts)).toContain('Retry explicitly');
   expect(JSON.stringify(sdk.runs[1]!.prompts)).not.toContain('Do not lose this request');
 });
+
+it('claims the reserved Claude native ID before the query is created', async () => {
+  let allow!: () => void;
+  const blocked = new Promise<void>((resolve) => { allow = resolve; });
+  const claim = vi.fn(() => blocked);
+  const held = session({ claimSessionId: claim });
+  held.begin('first', 'hello');
+  await settle();
+  expect(claim).toHaveBeenCalledWith(sdk.nativeId);
+  expect(sdk.runs).toHaveLength(0);
+  allow();
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(sdk.runs[0]!.options.sessionId).toBe(sdk.nativeId);
+});
+
+it('refuses an owned Claude resume before starting a query', async () => {
+  const claim = vi.fn(async () => { throw new Error('another task owns this native session'); });
+  const held = session({ resume: 'saved-native', claimSessionId: claim });
+  held.begin('first', 'hello');
+  await settle();
+  expect(claim).toHaveBeenCalledWith('saved-native');
+  expect(sdk.runs).toHaveLength(0);
+});
+
+it('keeps a lifecycle-owned Claude process through idle time without containment proof', async () => {
+  const claim = vi.fn(async () => {});
+  const held = session({ claimSessionId: claim, idleTimeoutMs: 100 });
+  held.begin('first', 'hello');
+  await settle();
+  await complete();
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(sdk.runs).toHaveLength(1);
+  expect(sdk.runs[0]!.closed).toBe(false);
+  held.begin('next', 'continue');
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(claim).toHaveBeenCalledOnce();
+});
+
+it('awaits prompt work admission before sending to Claude and finishes on its result', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  const beginWork = vi.fn(async () => { await gate; return finish; });
+  const held = session({ beginWork });
+  held.begin('gated', 'hello');
+  await settle();
+  expect(beginWork).toHaveBeenCalledOnce();
+  expect(sdk.runs[0]!.prompts).toHaveLength(0);
+  admit();
+  await settle();
+  expect(sdk.runs).toHaveLength(1);
+  expect(finish).not.toHaveBeenCalled();
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', duration_ms: 1 });
+  await settle();
+  expect(finish).toHaveBeenCalledOnce();
+});
+
+it('retains Claude prompt permits after cancellation even when a result arrives later', async () => {
+  const finish = vi.fn(async () => {});
+  const held = session({ beginWork: async () => finish });
+  held.begin('cancelled', 'hello');
+  await settle();
+  held.cancel('cancelled');
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', duration_ms: 1 });
+  await settle();
+  expect(finish).not.toHaveBeenCalled();
+});
+
+it('rejects Claude prompt admission without sending user input', async () => {
+  const held = session({ beginWork: async () => { throw new Error('task sealed'); } });
+  held.begin('rejected', 'hello');
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(0);
+  expect(JSON.stringify(held.chatState())).toContain('task sealed');
+});
+
+it('gates Claude retry admission independently from the failed prompt', async () => {
+  let admit!: () => void;
+  const gate = new Promise<void>((resolve) => { admit = resolve; });
+  const finish = vi.fn(async () => {});
+  let calls = 0;
+  const held = session({ beginWork: async () => { if (++calls > 1) await gate; return finish; } });
+  held.begin('retry', 'hello');
+  await settle();
+  sdk.runs[0]!.send({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['test error'] });
+  await settle();
+  expect(finish).toHaveBeenCalledOnce();
+  expect(held.resume!('retry')).toBe(true);
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(1);
+  admit();
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(2);
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', duration_ms: 1 });
+  await settle();
+  expect(finish).toHaveBeenCalledTimes(2);
+});
+
+it('holds a question permit beyond the native prompt result and finishes only its answer', async () => {
+  const inputFinished = vi.fn(async () => {});
+  const held = session({ beginWork: async (work) => work.kind === 'input' ? inputFinished : async () => {} });
+  held.begin('question-turn', 'hello');
+  await settle();
+  const ask = sdk.runs[0]!.options.canUseTool as (name: string, input: Record<string, unknown>, about: Record<string, unknown>) => Promise<unknown>;
+  const pending = ask('AskUserQuestion', { questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }] }, { toolUseID: 'work-question' });
+  await settle();
+  sdk.runs[0]!.send({ type: 'result', subtype: 'success', duration_ms: 1 });
+  await settle();
+  expect(inputFinished).not.toHaveBeenCalled();
+  held.answer('work-question', false, {});
+  await pending;
+  expect(inputFinished).toHaveBeenCalledOnce();
+});
+
+it('retains an unanswered question permit on disposal', async () => {
+  const inputFinished = vi.fn(async () => {});
+  const held = session({ beginWork: async (work) => work.kind === 'input' ? inputFinished : async () => {} });
+  held.begin('question-turn', 'hello');
+  await settle();
+  const ask = sdk.runs[0]!.options.canUseTool as (name: string, input: Record<string, unknown>, about: Record<string, unknown>) => Promise<unknown>;
+  const pending = ask('AskUserQuestion', { questions: [{ question: 'Continue?', options: [{ label: 'Yes' }] }] }, { toolUseID: 'work-question' });
+  await settle();
+  await held.close();
+  await pending;
+  expect(inputFinished).not.toHaveBeenCalled();
+});
+
+it('enforces the local executor profile before Claude starts and blocks later escape routes', async () => {
+  expect(() => session({ workProfile: 'local-executor-v1', beginWork: async () => async () => {} })).toThrow('isolated Claude');
+  expect(sdk.runs).toHaveLength(0);
+  const held = session({ workProfile: 'local-executor-v1', beginWork: async () => async () => {}, settings: {
+    builtInTools: 'none', claudeConfigIsolation: 'isolated', extraArgsPolicy: 'none', toolExecutionFence: 'allowlist', toolExecutionAllowlist: [],
+  } });
+  const run = vi.fn(async () => ({ success: true, output: '', said: '', code: 0 }));
+  expect(() => held.ran!('shell', 'command', run)).toThrow('attached Anton');
+  expect(run).not.toHaveBeenCalled();
+  expect(await held.setConfig!('shellInitScripts', ['dangerous'])).toContain('immutable');
+  expect(await held.setTools!([{ definition: { name: 'local-host-tool' }, run: () => 'bad' }])).toBe(false);
+  expect(await held.startMcpServer!('external')).toBe(false);
+});
+
+it('keeps a provider control permit until the SDK acknowledges an effort change', async () => {
+  const finish = vi.fn(async () => {});
+  const held = session({ beginWork: async () => finish });
+  await settle();
+  let acknowledge!: () => void;
+  const gate = new Promise<void>((resolve) => { acknowledge = resolve; });
+  sdk.control = async (stage) => { if (stage === 'effort_application') await gate; };
+  let resolved = false;
+  const change = Promise.resolve(held.setConfig!('effortLevel', 'high')).then((result) => { resolved = true; return result; });
+  await settle();
+  expect(resolved).toBe(false);
+  expect(finish).not.toHaveBeenCalled();
+  acknowledge();
+  await expect(change).resolves.toBe(true);
+  expect(finish).toHaveBeenCalledOnce();
+});
+
+it('retains a provider control permit on an uncertain SDK failure', async () => {
+  const finish = vi.fn(async () => {});
+  const held = session({ beginWork: async () => finish });
+  await settle();
+  sdk.control = async () => { throw new Error('control channel lost'); };
+  await expect(held.setConfig!('effortLevel', 'high')).rejects.toThrow('control channel lost');
+  expect(finish).not.toHaveBeenCalled();
+});

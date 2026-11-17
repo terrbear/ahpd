@@ -1,5 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { customizationsOf, EFFORT_LABELS, EFFORTS } from './session.js';
+import { sdkModelId } from './models.js';
 import type { Bag, Offered } from '@ahpd/sdk';
 
 /**
@@ -82,7 +83,7 @@ export async function probe(cwd: string): Promise<Offered> {
         .map((raw) => {
           const model = bag(raw);
           return {
-            id: str(model.value) ?? '',
+            id: sdkModelId(model.value, model.resolvedModel),
             name: str(model.displayName) ?? str(model.value) ?? '',
             ...thinkingFor(list(model.supportedEffortLevels).filter((one): one is string => typeof one === 'string')),
           };

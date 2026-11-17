@@ -224,7 +224,13 @@ export interface MessageFrom {
 }
 
 /** A live session. */
+export interface WriterExitProof {
+  kind: 'isolated-process-scope-empty';
+  scope: string;
+}
+
 export interface Session {
+  writerExitProof?: () => WriterExitProof | undefined;
   supportsAttachments?: boolean;
   /** The session channel URI. */
   readonly uri: string;
@@ -426,6 +432,7 @@ export interface Session {
    * announcement it will not act on.
    */
   setTools?(tools: BoundTool[]): Promise<boolean>;
+  setSystemInstructions?(instructions: string[]): Promise<void>;
   /**
    * The client running a tool call, for a call that is one client's to run.
    *
