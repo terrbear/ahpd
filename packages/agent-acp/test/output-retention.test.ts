@@ -124,3 +124,15 @@ it('does not replace output with a nonexistent artifact when storage fails', () 
   expect(() => delta(turn, 'x'.repeat(OUTPUT_PREVIEW_BYTES))).toThrow();
   expect(content(turn)).toEqual([{ type: 'text', text: 'small' }]);
 });
+
+it('includes Codex MCP raw output in the completed tool call', () => {
+  const turn = turnAt(directory());
+  start(turn, 'mcp.fixture.lookup');
+  const actions = mapUpdate(turn, {
+    sessionUpdate: 'tool_call_update',
+    toolCallId: '../tool',
+    status: 'completed',
+    rawOutput: { result: { content: [{ type: 'text', text: 'fixture response' }] }, error: null },
+  });
+  expect((actions[0]!.result as Bag).content).toEqual([{ type: 'text', text: 'fixture response' }]);
+});
