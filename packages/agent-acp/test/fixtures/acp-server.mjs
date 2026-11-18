@@ -411,10 +411,11 @@ const promptScript = async (id, params) => {
       status: 'in_progress',
       rawInput: { path: `${cwd}/gone.txt` },
     };
-    notify({ sessionUpdate: 'tool_call', ...toolCall });
+    const { rawInput, ...callWithoutInput } = toolCall;
+    notify({ sessionUpdate: 'tool_call', ...(text.includes('input in approval') ? callWithoutInput : toolCall) });
     const answer = await ask('session/request_permission', {
       sessionId: session,
-      toolCall,
+      toolCall: text.includes('input in approval') ? { ...callWithoutInput, rawInput: {} } : callWithoutInput,
       options: [
         { optionId: 'yes-once', name: 'Allow once', kind: 'allow_once' },
         { optionId: 'yes-always', name: 'Always allow', kind: 'allow_always' },
