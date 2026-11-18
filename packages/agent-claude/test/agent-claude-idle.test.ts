@@ -1051,3 +1051,11 @@ it('retains a provider control permit on an uncertain SDK failure', async () => 
   await expect(held.setConfig!('effortLevel', 'high')).rejects.toThrow('control channel lost');
   expect(finish).not.toHaveBeenCalled();
 });
+
+it('rejects read-only shell settings without retaining provider work', async () => {
+  const beginWork = vi.fn(async () => async () => {});
+  const held = session({ beginWork });
+  await expect(held.setConfig!('shellXdgConfigHome', '')).resolves.toContain('not a config key');
+  await expect(held.setConfig!('shellPath', '/fixture/bin')).resolves.toContain('not a config key');
+  expect(beginWork).not.toHaveBeenCalled();
+});

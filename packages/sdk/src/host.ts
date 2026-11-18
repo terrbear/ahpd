@@ -873,6 +873,7 @@ export function createHost(options: HostOptions): Host {
    * under.
    */
   const presence = new Map<string, Map<string, Bag>>();
+  const retainedClients = new Map<string, Map<string, Bag>>();
 
   const watches = new Claiming<{
     state: Bag;
@@ -2342,7 +2343,7 @@ export function createHost(options: HostOptions): Host {
    * must not remove them from it. Any spelling of the session counts, and
    * the removal is said under the name it is held by.
    */
-  const leaves = (asked: string, clientId: string): void => {
+  const leaves = (asked: string, clientId: string, disconnected = false): void => {
     const uri = heldAs(asked);
     const held = presence.get(idOf(uri));
     if (!held?.has(clientId)) return;
@@ -2353,16 +2354,13 @@ export function createHost(options: HostOptions): Host {
     held.delete(clientId);
     if (held.size === 0) presence.delete(idOf(uri));
     dispatch(uri, { type: 'session/activeClientRemoved', clientId });
-    /*
-     * And the tools it was providing, which leave with it.
-     *
-     * Both halves matter. The model is offered a smaller list from here on -
-     * a tool whose client has gone is one every call to would fail - and any
-     * call already out with that client is failed now rather than left as a
-     * turn waiting on a promise nothing can settle.
-     */
+    const retained = retainedClients.get(idOf(uri));
+    if (!disconnected) retained?.delete(clientId);
+    if (retained?.size === 0) retainedClients.delete(idOf(uri));
     for (const chat of sessions.get(uri)?.chats.values() ?? []) chat.clientGone?.(clientId);
-    void queueClientToolUpdate(uri, async () => { await retool(uri); });
+    if (!retained?.has(clientId) || clientToolUpdates.has(uri)) {
+      void queueClientToolUpdate(uri, async () => { await retool(uri); });
+    }
   };
 
   /**
@@ -4036,6 +4034,9 @@ export function createHost(options: HostOptions): Host {
     births.set(uri, held.createdAt);
     held.chats.set(chatUri, session);
     sessions.set(uri, held);
+    for (const clientId of retainedClients.get(idOf(uri))?.keys() ?? []) {
+      if (!presence.get(idOf(uri))?.has(clientId)) session.clientGone?.(clientId);
+    }
     /*
      * The name it had before, when it is being created again.
      *
@@ -5028,6 +5029,7 @@ export function createHost(options: HostOptions): Host {
     if (from !== undefined) settleRun(uri, { status: 'cancelled' });
     origins.delete(uri);
     presence.delete(idOf(uri));
+    retainedClients.delete(idOf(uri));
     // And what was kept *about* it. All of these are keyed by a session
     // that no longer exists, so anything left here is held for nobody -
     // a daemon that runs for weeks would accumulate one of each per
@@ -5683,7 +5685,20 @@ export function createHost(options: HostOptions): Host {
    * usable name or schema is dropped rather than offered as a tool the model
    * will fail to call.
    */
-  const clientTools = (uri: string): BoundTool[] => activeClientsOf(uri).flatMap((client) => {
+  const toolClients = (uri: string): Bag[] => {
+    const clients = new Map(retainedClients.get(idOf(uri)));
+    for (const client of activeClientsOf(uri)) clients.set(String(client.clientId), client);
+    return [...clients.values()];
+  };
+
+  const retainClient = (uri: string, client: Bag): void => {
+    const clients = retainedClients.get(idOf(uri)) ?? new Map<string, Bag>();
+    clients.set(String(client.clientId), client);
+    retainedClients.set(idOf(uri), clients);
+    for (const chat of sessions.get(uri)?.chats.values() ?? []) chat.clientConnected?.(String(client.clientId));
+  };
+
+  const clientTools = (uri: string): BoundTool[] => toolClients(uri).flatMap((client) => {
     const clientId = String(client.clientId ?? '');
     if (clientId === '') return [];
     return (Array.isArray(client.tools) ? client.tools : []).flatMap((entry) => {
@@ -8799,6 +8814,7 @@ export function createHost(options: HostOptions): Host {
              * else is announcing a presence that is not theirs.
              */
             if (activeClient !== undefined) {
+              retainClient(uri, activeClient);
               dispatch(uri, { type: 'session/activeClientSet', activeClient });
             }
             return {};
@@ -9971,6 +9987,7 @@ export function createHost(options: HostOptions): Host {
                 return;
               }
               if (!presence.get(idOf(channel))?.has(clientId)) return;
+              retainClient(channel, activeClient);
               if (origin.clientSeq > 0) {
                 const alias = connection.aliases.get(channel);
                 connection.peer.notify('action', {
@@ -9991,6 +10008,7 @@ export function createHost(options: HostOptions): Host {
               no('The agent could not publish the client tools');
               return;
             }
+            retainClient(channel, activeClient);
             dispatch(channel, { type, activeClient }, origin);
           });
         }
@@ -11308,7 +11326,7 @@ export function createHost(options: HostOptions): Host {
           // Gone without reconnecting, which is the second of the three ways.
           // Said after the connection is out of the set, so `leaves` does not
           // find this one still holding the session.
-          for (const channel of was) leaves(channel, connection.clientId || 'anonymous');
+          for (const channel of was) leaves(channel, connection.clientId || 'anonymous', true);
           log(`${connection.clientId || 'a client'} went away`);
         },
       };

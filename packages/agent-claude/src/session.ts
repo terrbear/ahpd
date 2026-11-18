@@ -1212,6 +1212,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * arrives later and from somewhere else, and anything that ends the turn has
    * to settle them itself or the CLI waits for ever on a promise nobody owns.
    */
+  const disconnectedClients = new Set<string>();
   const byClient = new Map<string, { owner: string; request: Bag; finish?: () => Promise<void>; settle: (answer: { text: string; ok: boolean }) => void }>();
 
   /** Every outstanding client call, answered the same way and forgotten. */
@@ -1262,6 +1263,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
   const ranByClient = async (tool: BoundTool, input: Bag): Promise<{ text: string; ok: boolean }> => {
     const owner = tool.owner ?? '';
+    if (disconnectedClients.has(owner)) return { text: 'The Anton tool connection is temporarily disconnected. Wait for reconnection before trying this tool again.', ok: false };
     const generation = claimGeneration;
     const clientGeneration = clientClaimGenerations.get(owner) ?? 0;
     if (closed) return { text: 'The session was disposed', ok: false };
@@ -3975,8 +3977,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * session in a state it is not in.
      */
     setConfig: async (key, value) => {
-      return controlled(async (): Promise<true | string> => {
       if (options.workProfile === 'local-executor-v1' && !['model', 'effortLevel', 'permissionMode'].includes(key)) return 'The local executor profile is immutable';
+      if (!['permissions', 'shellInitScripts', 'model', 'effortLevel', 'permissionMode', 'autoApprove', 'mode'].includes(key)) return `${key} is not a config key this backend takes`;
+      return controlled(async (): Promise<true | string> => {
       /*
        * The lists, which really do move on a running session.
        *
@@ -4507,7 +4510,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
      * built.
      */
     setTools: async (next) => {
-      return controlled(async () => {
       if (options.workProfile === 'local-executor-v1' && next.some((tool) => tool.run !== undefined || !/^anton-ahp_[A-Za-z0-9]+$/.test(tool.owner ?? '') || !tool.definition.name.startsWith(`${tool.owner}__`))) return false;
       if (disableContributedTools) return true;
       next = allowedContribution(next);
@@ -4515,6 +4517,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       const after = next.map((one) => `${one.definition.name}\u0000${one.owner ?? ''}`).join('\n');
       const revision = clientToolsRevision;
       if (before === after && publishedToolsRevision === revision) return true;
+      return controlled(async () => {
       const requested = { ...declared };
       if (next.length > 0) requested.ahp = contributed(next, clientRunner(), contributedWork) as Bag;
       else delete requested.ahp;
@@ -4605,7 +4608,9 @@ export function createSession(options: ClaudeSessionOptions): Session {
       return true;
     },
 
+    clientConnected: (clientId) => { disconnectedClients.delete(clientId); },
     clientGone: (clientId) => {
+      disconnectedClients.add(clientId);
       clientToolsRevision++;
       // A tool call whose client has gone is a turn waiting on a promise
       // nothing will settle. The agent is told it failed, which is true, and

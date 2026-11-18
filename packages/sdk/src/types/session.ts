@@ -463,6 +463,7 @@ export interface Session {
    * hangs for ever is worse than a tool that says it could not run.
    */
   clientGone?(clientId: string): void;
+  clientConnected?(clientId: string): void;
   /** Answer a question the agent asked, keyed by question id. */
   answer(requestId: string, accepted: boolean, answers: Bag): void | { text: string };
   /**
