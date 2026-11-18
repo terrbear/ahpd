@@ -1,4 +1,5 @@
 import { mapAsyncInput } from './async-input.js';
+import { argumentsOf } from './clienttools.js';
 import { toolLabel } from './output.js';
 /**
  * The one place a `session/update` becomes an AHP `chat/*` action.
@@ -178,7 +179,7 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
         displayName: call.displayName,
         ...(contributor === undefined ? {} : { contributor }),
       }];
-      const input = written(update.rawInput);
+      const input = written(owner === undefined ? update.rawInput : argumentsOf(update.rawInput));
       if (input !== undefined) {
         call.readied = true;
         const held = callPartOf(turn, call.toolCallId);
@@ -214,7 +215,7 @@ export function mapUpdate(turn: AcpTurn, update: SessionUpdate): Bag[] {
       const call = callOf(turn, update);
       const part = callPartOf(turn, call.toolCallId);
       const held = part === undefined ? undefined : bag(part.toolCall);
-      const input = written(update.rawInput);
+      const input = written(held?.contributor === undefined ? update.rawInput : argumentsOf(update.rawInput));
       if (held !== undefined && input !== undefined) held.toolInput = input;
       if (held !== undefined && update.content !== undefined && update.content !== null) held.content = contentBlocks(update.content);
       const meta = bag(update._meta);

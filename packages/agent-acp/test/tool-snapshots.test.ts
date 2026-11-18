@@ -41,3 +41,14 @@ it('retains the Codex terminal output delta used for gh pr create across replay'
   const record = { turns: [{ turnId: 'turn', startedAt: '2026-10-12T00:00:00Z', message: { text: 'create it' }, updates: wire, state: 'complete' }] } as WatchedSession;
   expect(turnsOf(record)[0]!.responseParts).toEqual(turn.parts);
 });
+
+it.each([{}, { command: 'pwd', unsandbox: false }])('preserves client tool arguments from a Codex MCP report: %j', (args) => {
+  const turn: AcpTurn = { turnId: 'turn', parts: [], calls: new Map(), clientOf: () => 'anton-fixture' };
+  const rawInput = { server: 'ahp', tool: 'anton-fixture__launch_shell', arguments: args };
+  const actions = mapUpdate(turn, {
+    sessionUpdate: 'tool_call', toolCallId: 'shell', title: 'mcp__ahp__launch_shell', rawInput,
+  });
+  const toolInput = JSON.stringify(args);
+  expect(actions.at(-1)).toMatchObject({ type: 'chat/toolCallReady', toolInput });
+  expect(turn.parts).toMatchObject([{ toolCall: { toolInput } }]);
+});

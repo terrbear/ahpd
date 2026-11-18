@@ -62,7 +62,7 @@ import type { Bag, Chosen, ClientToolCall, MessageFrom, OpenedTerminal, Ran, Ses
 import { watchSession } from './catalog.js';
 import { connectAcp } from './connection.js';
 import { pendingWork } from './pending-work.js';
-import { clientTools } from './clienttools.js';
+import { argumentsOf, clientTools } from './clienttools.js';
 import { elicitations } from './elicitation.js';
 import { confirmationOptions, contentBlocks, mapUpdate } from './mapping.js';
 import type { AcpConnection, AcpOptions, AcpTurn, ConfirmationOption, PermissionAnswer, WatchedTurn } from './types.js';
@@ -634,8 +634,12 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       toolCallId,
       toolName: request.toolCall.name ?? toolLabel(request.toolCall.title ?? toolCallId),
       displayName: toolLabel(request.toolCall.title ?? request.toolCall.name ?? toolCallId),
-      ...(request.toolCall.rawInput === undefined ? {} : { toolInput: JSON.stringify(request.toolCall.rawInput) }),
     } as Bag : bag(bag(existing).toolCall);
+    const rawInput = request.toolCall.rawInput;
+    if (call.toolInput === undefined && rawInput !== undefined && rawInput !== null) {
+      const input = call.contributor === undefined ? rawInput : argumentsOf(rawInput);
+      if (input !== undefined) call.toolInput = JSON.stringify(input);
+    }
     call.status = 'pending-confirmation';
     call.invocationMessage = toolLabel(String(request.toolCall.title ?? call.toolName));
     call.confirmationTitle = toolLabel(String(request.toolCall.title ?? call.displayName));

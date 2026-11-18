@@ -224,6 +224,17 @@ it('asks the person, and answers with the once option they chose', async () => {
   expect(settled).toMatchObject({ snapshot: { state: { inputNeeded: [] } } });
 });
 
+it('uses the explicit empty input supplied with an approval for an existing call', async () => {
+  const { client, peer: p, uri, chatUri } = await talking();
+  begin(client, chatUri, 't1', 'ask with input in approval');
+  await until(() => types(p, uri).includes('session/inputNeededSet'));
+
+  const ready = actions(p, chatUri).find((e) => e.action.type === 'chat/toolCallReady')?.action;
+  expect(ready?.toolInput).toBe('{}');
+  const entry = actions(p, uri).find((e) => e.action.type === 'session/inputNeededSet')?.action.request;
+  expect(entry).toMatchObject({ toolCall: { toolInput: '{}' } });
+});
+
 /** The fixture's three options, as the protocol offers them: approve before deny, in the server's order. */
 const OFFERED = [
   { id: 'yes-once', label: 'Allow once', kind: 'approve', group: 1 },
@@ -244,6 +255,7 @@ it('offers every option the server listed, on the call and on the ask', async ()
   expect(ready?.confirmed).toBeUndefined();
   expect(ready?.options).toEqual(OFFERED);
   expect(ready?.confirmationTitle).toBe('Remove a file');
+  expect(JSON.parse(String(ready?.toolInput))).toMatchObject({ path: expect.stringContaining('gone.txt') });
   const entry = actions(p, uri).find((e) => e.action.type === 'session/inputNeededSet')?.action.request as {
     toolCall?: { options?: unknown };
   };

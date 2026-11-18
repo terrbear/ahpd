@@ -12,9 +12,9 @@ type ReportWaiter = {
 const REPORT_WAIT_MS = 30_000;
 
 /** The arguments a call was given, whether the agent reports them bare or wrapped as `{ server, tool, arguments }`. */
-const argumentsOf = (raw: unknown): unknown => {
+export const argumentsOf = (raw: unknown): unknown => {
   if (typeof raw === 'object' && raw !== null && 'tool' in raw && 'arguments' in raw) return (raw as { arguments: unknown }).arguments;
-  return raw ?? null;
+  return raw;
 };
 
 /**
@@ -89,7 +89,7 @@ export function clientTools(beginWork?: Start['beginWork']) {
       const tool = providing(call);
       if (tool === undefined) return undefined;
       const name = tool.definition.name;
-      const input = JSON.stringify(argumentsOf(call.rawInput));
+      const input = JSON.stringify(argumentsOf(call.rawInput) ?? null);
       const first = (expecting.get(name) ?? []).find((one) => one.owner === tool.owner);
       if (first !== undefined) first.accept(call.toolCallId);
       else unclaimed.set(name, [...(unclaimed.get(name) ?? []), { id: call.toolCallId, input, owner: tool.owner ?? '' }]);
