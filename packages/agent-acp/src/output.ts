@@ -87,6 +87,21 @@ class Output {
   }
 }
 
+function rawToolText(raw: unknown): string | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const output = raw as Record<string, unknown>;
+  if (typeof output.formatted_output === 'string') return output.formatted_output;
+  const result = output.result as { content?: unknown; structuredContent?: unknown } | null | undefined;
+  const blocks = Array.isArray(result?.content) ? result.content : [];
+  const texts = blocks.flatMap((block) =>
+    block?.type === 'text' && typeof block.text === 'string' ? [block.text] : []);
+  if (texts.length > 0) return texts.join('\n');
+  if (result?.structuredContent != null) return JSON.stringify(result.structuredContent);
+  const error = output.error as { message?: unknown } | null | undefined;
+  if (typeof error?.message === 'string') return error.message;
+  return undefined;
+}
+
 /** Per-turn output storage, shared by live mapping and legacy transcript reads. */
 export class ToolOutputs {
   private readonly held = new Map<string, Output>();
@@ -101,8 +116,12 @@ export class ToolOutputs {
     if (typeof update.title === 'string') update.title = toolLabel(update.title);
     const meta = update._meta ?? {};
     const terminal = (meta.terminal_output_delta ?? meta.terminal_output) as { data?: unknown } | undefined;
-    const texts = update.content?.flatMap((entry) =>
+    let texts = update.content?.flatMap((entry) =>
       entry.type === 'content' && entry.content.type === 'text' ? [entry.content.text] : []);
+    if (texts === undefined && typeof terminal?.data !== 'string') {
+      const raw = rawToolText(update.rawOutput);
+      if (raw !== undefined) texts = [raw];
+    }
     if (texts === undefined && typeof terminal?.data !== 'string') return update;
     let output = this.held.get(update.toolCallId);
     if (output === undefined) {
