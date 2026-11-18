@@ -182,6 +182,7 @@ const shellTool = (owner: string): BoundTool => ({
 });
 const permissionContributors = [
   { label: 'Anton client', name: 'mcp__ahp__launch_shell', tools: [shellTool(shellOwner)], contributor: { kind: 'client', clientId: shellOwner } },
+  { label: 'Anton client with empty arguments', name: 'mcp__ahp__launch_shell', tools: [shellTool(shellOwner)], contributor: { kind: 'client', clientId: shellOwner } },
   { label: 'foreign client', name: 'mcp__ahp__foreign__launch_shell', tools: [shellTool('foreign')], contributor: { kind: 'client', clientId: 'foreign' } },
   { label: 'unadvertised alias', name: 'mcp__ahp__launch_shell', tools: [shellTool('foreign')], contributor: { kind: 'mcp', customizationId: 'mcp:ahp' } },
   { label: 'ambiguous alias', name: 'mcp__ahp__launch_shell', tools: [shellTool(shellOwner), shellTool(otherShellOwner)], contributor: { kind: 'mcp', customizationId: 'mcp:ahp' } },
@@ -191,9 +192,9 @@ const permissionContributors = [
 ];
 
 for (const order of ['permission-first', 'streaming-first', 'assistant-first', 'streaming-assistant-first']) {
-  it.each(permissionContributors)(`preserves $label permission contributor with ${order}`, async ({ name, tools, contributor }) => {
+  it.each(permissionContributors)(`preserves $label permission contributor with ${order}`, async ({ label, name, tools, contributor }) => {
     const sent: Bag[] = [];
-    const input = { command: 'pwd' };
+    const input = label === 'Anton client with empty arguments' ? {} : { command: 'pwd' };
     const session = createSession({
       uri: 'claude:/permission-contributor',
       chatUri: 'ahp-chat:/permission-contributor',
@@ -236,6 +237,12 @@ for (const order of ['permission-first', 'streaming-first', 'assistant-first', '
     expect.soft(snapshot.contributor).toEqual(contributor);
     const published = sent.find((action) => action.type === 'session/inputNeededSet')!.request as Bag;
     expect.soft((published.toolCall as Bag).contributor).toEqual(contributor);
+    if (contributor?.kind === 'client') {
+      expect(call.toolInput).toBe(JSON.stringify(input));
+      expect(snapshot.toolInput).toBe(JSON.stringify(input));
+      expect((published.toolCall as Bag).toolInput).toBe(JSON.stringify(input));
+      expect(sent.filter((action) => action.type === 'chat/toolCallReady').at(-1)?.toolInput).toBe(JSON.stringify(input));
+    }
     for (const action of sent.filter((action) => action.type === 'chat/toolCallStart' || action.type === 'chat/toolCallReady')) {
       expect.soft(action.contributor).toEqual(contributor);
     }

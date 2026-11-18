@@ -2569,7 +2569,10 @@ export function createSession(options: ClaudeSessionOptions): Session {
         return;
       }
 
-      const input = scopeApproval === undefined ? toolInputOf(toolName, raw) : JSON.stringify(raw, null, 2);
+      const contributor = contributorOf(toolName);
+      const input = scopeApproval === undefined && contributor?.kind !== 'client'
+        ? toolInputOf(toolName, raw)
+        : JSON.stringify(raw, null, scopeApproval === undefined ? undefined : 2);
       const displayName = str(about.displayName) ?? toolName;
       // A scoped Jira card names its exact targets and exposes the entire
       // proposed payload below; a short search-derived line is not enough.
@@ -2584,7 +2587,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // The call the assistant message opened, if it arrived first. Which of
       // the two comes first is the CLI's business; either order is one call.
       const held = scope.parts.get(id);
-      const contributor = contributorOf(toolName);
       const meta = scopeApproval === undefined
         ? toolMetaOf(toolName)
         : { ...bag(bag(held?.toolCall)._meta), ...(toolMetaOf(toolName) ?? {}), requiresHumanConfirmation: true };
