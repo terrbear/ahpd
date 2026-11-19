@@ -2474,11 +2474,11 @@ export function createHost(options: HostOptions): Host {
     if (found.length === 0)
       return;
     const learnt = about(owner.provider);
-    const same = found.length === learnt.models.length
-      && found.every((model, index) => model.id === learnt.models[index]?.id);
-    if (same)
+    const previous = new Map(learnt.models.map((model) => [model.id, model]));
+    const merged = found.map((model) => ({ ...previous.get(model.id), ...model }));
+    if (JSON.stringify(merged) === JSON.stringify(learnt.models))
       return;
-    learnt.models = found;
+    learnt.models = merged;
     log(`${owner.provider}: ${found.length} model(s): ${found.map((m) => m.id).join(', ')}`);
     dispatch(ROOT, { type: 'root/agentsChanged', agents: descriptors() });
   };

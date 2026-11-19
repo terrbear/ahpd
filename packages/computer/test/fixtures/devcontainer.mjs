@@ -15,6 +15,7 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { lockDockerState } from './docker-state.mjs';
 
 const state = process.env.DEVCONTAINER_FAKE_STATE;
 if (state === undefined) {
@@ -63,6 +64,7 @@ if (verb === 'up') {
    */
   const docker = process.env.DOCKER_FAKE_STATE;
   if (docker !== undefined) {
+    lockDockerState(docker);
     const at = args.indexOf('--workspace-folder');
     const folder = args[at + 1];
     const labels = {};

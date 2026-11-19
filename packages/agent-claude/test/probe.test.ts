@@ -29,7 +29,7 @@ it('disables Claude.ai connectors in the startup probe and preserves its working
 it('advertises a model by its resolved SDK id and falls back to its picker value', async () => {
   sdk.initialization = {
     models: [
-      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5', description: 'Latest Opus' },
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus 5.5', description: 'Latest Opus', supportsFastMode: true },
       { value: 'claude-opus-5', resolvedModel: 'claude-opus-5', displayName: 'Opus 5', description: 'Opus 5' },
       { value: 'custom/model', displayName: 'Custom', description: 'Custom model' },
       { value: 'default', resolvedModel: 'claude-opus-5-5', displayName: 'Default' },
@@ -39,7 +39,9 @@ it('advertises a model by its resolved SDK id and falls back to its picker value
   const offered = await probe('/tmp/ahpd-probe');
 
   expect(offered.models).toEqual([
-    { id: 'claude-opus-5-5', name: 'Opus 5.5' },
+    { id: 'claude-opus-5-5', name: 'Opus 5.5', configSchema: {
+      type: 'object', properties: { speed: { type: 'string', title: 'Speed', enum: ['standard', 'fast'], default: 'standard' } },
+    } },
     { id: 'claude-opus-5', name: 'Opus 5' },
     { id: 'custom/model', name: 'Custom' },
     { id: 'default', name: 'Default' },

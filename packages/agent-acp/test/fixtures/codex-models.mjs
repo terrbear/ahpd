@@ -22,6 +22,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   if (request.method === 'model/list') {
     if (mode === 'error') return process.stdout.write(JSON.stringify({ id: request.id, error: { code: -1, message: 'private error details' } }) + '\n');
     if (mode === 'cold-model') return reply({ data: [{ id: 'cold', displayName: 'Cold' }], nextCursor: null });
+    if (mode === 'settings') return reply({ data: [
+      { id: 'fast', displayName: 'Fast', supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }], defaultReasoningEffort: 'low', additionalSpeedTiers: ['fast'] },
+      { id: 'thorough', displayName: 'Thorough', supportedReasoningEfforts: [{ reasoningEffort: 'max' }], additionalSpeedTiers: [] },
+      { id: 'cold', displayName: 'Cold' },
+    ], nextCursor: null });
     if (mode === 'empty') return reply({ data: [], nextCursor: null });
     if (mode === 'malformed') return reply({ data: [{ id: 1 }], nextCursor: null });
     if (request.params.cursor === null) return reply({ data: [{ id: 'fast', displayName: 'Fast' }], nextCursor: 'second' });

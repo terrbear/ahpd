@@ -857,6 +857,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
   let draft: Bag | undefined;
   let customizations: Bag[] = [...(options.seedCustomizations ?? [])];
   let offered: { id: string; name: string }[] = [];
+  let appliedFastMode: boolean | undefined;
   /** What the client picked. Absent means whatever the CLI defaults to. */
   let chosen: string | undefined;
   /**
@@ -2772,6 +2773,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
       else disabledServers.delete(server);
     },
     create: (generation) => {
+      appliedFastMode = undefined;
       timingGeneration = generation;
       if (captureSdkInitToolManifest) {
         sdkInitToolManifest = { status: 'unknown', sessionUri: uri, generation };
@@ -3163,27 +3165,42 @@ export function createSession(options: ClaudeSessionOptions): Session {
         return;
       }
       if (closed || beginning !== turnId || str(active?.id) !== turnId) return;
-      const level = EFFORTS.find((one) => one === (model?.config ?? {}).thinkingLevel);
-      if (level !== undefined && level !== settings.effortLevel) {
-        const metadata = { turn_id: turnId.slice(0, 128), effort_level: level };
-        timing('effort_application', 'start', metadata);
+      const level = EFFORTS.find((one) => one === model?.config?.thinkingLevel);
+      const speed = model?.config?.speed;
+      if (speed !== undefined && speed !== 'standard' && speed !== 'fast') {
+        reject(`Unsupported Claude speed: ${String(speed)}`);
+        return;
+      }
+      const fastMode = speed === undefined ? undefined : speed === 'fast';
+      const changeEffort = level !== undefined && level !== settings.effortLevel;
+      const changeSpeed = fastMode !== appliedFastMode;
+      if (changeEffort || changeSpeed) {
+        const stage = changeEffort ? 'effort_application' : 'speed_application';
+        const metadata = { turn_id: turnId.slice(0, 128), ...(changeEffort ? { effort_level: level } : {}) };
+        timing(stage, 'start', metadata);
         let application: Promise<void> | undefined;
         try {
-          application = handle.applyFlagSettings({ effortLevel: level });
+          application = handle.applyFlagSettings({
+            ...(changeEffort ? { effortLevel: level } : {}),
+            ...(changeSpeed ? { fastMode: fastMode ?? null } : {}),
+          });
           startupApplication = application;
           await application;
         } catch (error: unknown) {
-          timing('effort_application', 'error', metadata);
+          timing(stage, 'error', metadata);
           if (!closed && beginning === turnId && str(active?.id) === turnId)
             reject(error instanceof Error ? error.message : String(error));
           return;
         } finally {
           if (application !== undefined && startupApplication === application) startupApplication = undefined;
         }
-        timing('effort_application', 'ok', metadata);
+        timing(stage, 'ok', metadata);
         if (closed) return;
-        settings.effortLevel = level;
-        emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
+        appliedFastMode = fastMode;
+        if (changeEffort) {
+          settings.effortLevel = level;
+          emit('session', { type: 'session/configChanged', config: { effortLevel: level } });
+        }
         if (beginning !== turnId || str(active?.id) !== turnId) return;
       }
       beginning = undefined;

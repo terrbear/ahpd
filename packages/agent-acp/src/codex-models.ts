@@ -11,6 +11,29 @@ const object = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 
+function codexModelConfig(model: Record<string, unknown>): { configSchema?: Record<string, unknown> } {
+  const properties: Record<string, unknown> = {};
+  if (Array.isArray(model.supportedReasoningEfforts)) {
+    const efforts = model.supportedReasoningEfforts.flatMap((value: unknown) => {
+      const effort = object(value).reasoningEffort;
+      return typeof effort === 'string' && effort !== '' ? [effort] : [];
+    });
+    if (efforts.length > 0) {
+      properties.thinkingLevel = {
+        type: 'string',
+        title: 'Reasoning effort',
+        enum: [...new Set(efforts)],
+        ...(typeof model.defaultReasoningEffort === 'string' && efforts.includes(model.defaultReasoningEffort)
+          ? { default: model.defaultReasoningEffort } : {}),
+      };
+    }
+  }
+  if (Array.isArray(model.additionalSpeedTiers) && model.additionalSpeedTiers.includes('fast')) {
+    properties.speed = { type: 'string', title: 'Speed', enum: ['standard', 'fast'], default: 'standard' };
+  }
+  return Object.keys(properties).length > 0 ? { configSchema: { type: 'object', properties } } : {};
+}
+
 function isCodexAdapter(command: string): boolean {
   if (basename(command) === 'codex-acp') return true;
   try {
@@ -93,7 +116,7 @@ export async function codexModels(options: AcpOptions): Promise<Offered> {
       for (const value of page.data) {
         const model = object(value);
         if (typeof model.id !== 'string' || !model.id || typeof model.displayName !== 'string') throw failure;
-        if (!models.some((one) => one.id === model.id)) models.push({ id: model.id, name: model.displayName || model.id });
+        if (!models.some((one) => one.id === model.id)) models.push({ id: model.id, name: model.displayName || model.id, ...codexModelConfig(model) });
       }
       if (page.nextCursor !== null && typeof page.nextCursor !== 'string') throw failure;
       cursor = page.nextCursor as string | null;

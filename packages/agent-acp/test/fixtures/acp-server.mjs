@@ -95,6 +95,8 @@ const modes = () => ({
 
 /** The model this server currently serves. */
 let model = 'fast';
+let effort = 'low';
+let fastMode = 'off';
 
 /** The session config options, which is where ACP keeps a model choice. */
 const configOptions = () => [{
@@ -107,7 +109,10 @@ const configOptions = () => [{
     { value: 'fast', name: 'Fast' },
     { value: 'thorough', name: 'Thorough' },
   ],
-}];
+}, ...(process.env.ACP_CODEX_OPTIONS === '1' ? [
+  { type: 'select', id: 'reasoning_effort', name: 'Reasoning effort', currentValue: effort, options: ['low', 'high'].map(value => ({ value, name: value })) },
+  { type: 'select', id: 'fast-mode', name: 'Fast mode', currentValue: fastMode, options: ['off', 'on'].map(value => ({ value, name: value })) },
+] : [])];
 
 /** The sessions `session/list` reports, one titled and one not. */
 const LISTED = [
@@ -536,7 +541,9 @@ const onLine = (line) => {
       return;
 
     case 'session/set_config_option':
-      model = String(message.params?.value ?? model);
+      if (message.params?.configId === 'reasoning_effort') effort = String(message.params.value);
+      else if (message.params?.configId === 'fast-mode') fastMode = String(message.params.value);
+      else model = String(message.params?.value ?? model);
       respond(message.id, { configOptions: configOptions() });
       notify({ sessionUpdate: 'config_option_update', configOptions: configOptions() });
       return;
