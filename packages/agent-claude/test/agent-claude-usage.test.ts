@@ -208,7 +208,7 @@ it('sends a total that grows with every call, a worker\'s included, and ends at 
     total(answered, empty),
     total(answered, empty, answered),
   ]);
-  expect(payload(said[3])).toEqual({
+  expect(payload(said[3])).toMatchObject({
     ...total(answered, empty, answered),
     _meta: { ...total(answered, empty, answered)._meta as Bag, cost: { amount: 1.25, currency: 'USD' } },
   });
@@ -217,6 +217,18 @@ it('sends a total that grows with every call, a worker\'s included, and ends at 
   expect(workers.get('toolu_worker')?.some((one) => one.type === 'chat/usage')).toBe(false);
 
   // And the snapshot a client reads afterwards holds the same number.
+  const requests = (payload(said[3])?._meta as Bag).modelRequests as Bag;
+  expect(requests).toEqual({
+    count: 3,
+    requests: [answered, empty, answered].map(({ input, read, wrote, output }) => ({
+      model: expect.any(String),
+      inputTokens: input,
+      cachedInputTokens: read,
+      cacheWriteInputTokens: wrote,
+      outputTokens: output,
+      recordedAt: expect.any(String),
+    })),
+  });
   const turns = (session.chatState().turns ?? []) as Bag[];
   expect(turns[0]?.usage).toEqual(payload(said[3]));
 });
@@ -237,7 +249,9 @@ it('sends no cost the CLI could only guess at, and still differences the next on
   // `costBasis: 'unknown'` is a model the CLI had no price row for, so the
   // figure beside it is the default model's rate and nothing more.
   const { main, session } = await replay([...fixture('claude-answered-round.jsonl'), result(0.5, 'unknown')]);
-  expect(payload(reports(main).at(-1))?._meta).toEqual({ cacheWriteTokens: answered.wrote });
+  const meta = payload(reports(main).at(-1))?._meta as Bag;
+  expect(meta.cacheWriteTokens).toBe(answered.wrote);
+  expect(meta).not.toHaveProperty('cost');
 
   // The guess is not sent, but it is still on the books: the next result
   // differences from where this one left them, or it would bill those 0.5

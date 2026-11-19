@@ -1,3 +1,4 @@
+import { codexRequestUsage } from './codex-request-usage.js';
 /**
  * One ACP session, seen through the AHP `Session` contract.
  *
@@ -1057,11 +1058,12 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
    * own, and one that reported neither says nothing, because what the updates
    * already sent stands.
    */
-  const saidUsage = (usage: Usage | null | undefined): void => {
+  const saidUsage = (usage: Usage | null | undefined, meta: unknown): void => {
     const turn = active;
     const held = mapping;
     if (turn === undefined || held === undefined) return;
     const num = (value: unknown): number | undefined => (typeof value === 'number' ? value : undefined);
+    const requests = provider === 'codex' ? codexRequestUsage(bag(meta).codexModelRequests) : undefined;
     const wrote = num(usage?.cachedWriteTokens);
     const thought = num(usage?.thoughtTokens);
     const price = held.cost === undefined
@@ -1076,12 +1078,13 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
        * carries a measurement it names no field for, and where the other
        * backends already put both.
        */
-      ...(wrote !== undefined || thought !== undefined || price !== undefined
+      ...(wrote !== undefined || thought !== undefined || price !== undefined || requests !== undefined
         ? {
             _meta: {
               ...(wrote !== undefined ? { cacheWriteTokens: wrote } : {}),
               ...(thought !== undefined ? { reasoningTokens: thought } : {}),
               ...(price !== undefined ? { cost: price } : {}),
+              ...(requests !== undefined ? { modelRequests: requests } : {}),
             },
           }
         : {}),
@@ -1115,7 +1118,7 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
       if (attachments.some((part) => part.type === 'image') && !capabilities?.image) throw new Error('This ACP agent does not support image prompts');
       if (attachments.some((part) => part.type === 'resource') && !capabilities?.embeddedContext) throw new Error('This ACP agent does not support embedded files');
       const response = await held.connection.prompt(held.sessionId, text, attachments);
-      saidUsage(response.usage);
+      saidUsage(response.usage, response._meta);
       await questionWork.ready();
       const unfinishedTools = mapping?.parts.some((part) => part.kind === 'toolCall' && bag(part.toolCall).status === 'running') ?? false;
       if (!unfinishedTools && !offered.busy()) await completed?.();
