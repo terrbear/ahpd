@@ -9,6 +9,7 @@ const sdk = vi.hoisted(() => ({ nativeId: '11111111-1111-4111-8111-111111111111'
   options: Record<string, unknown>;
   closed: boolean;
   prompts: unknown[];
+  flagSettings: unknown[];
   send: (frame: Record<string, unknown>) => void;
 }[] }));
 
@@ -38,6 +39,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
       options: given.options,
       closed: false,
       prompts: [] as unknown[],
+      flagSettings: [] as unknown[],
       send: (frame: Record<string, unknown>) => { frames.push(frame); wake?.(); },
     };
     sdk.runs.push(run);
@@ -55,7 +57,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
       reloadPlugins: async () => ({ plugins: [] }),
       supportedModels: async () => [],
       setModel: async () => { await sdk.control?.('model_selection', sdk.runs.indexOf(run)); },
-      applyFlagSettings: async () => { await sdk.control?.('effort_application', sdk.runs.indexOf(run)); },
+      applyFlagSettings: async (flags: unknown) => { run.flagSettings.push(flags); await sdk.control?.('effort_application', sdk.runs.indexOf(run)); },
       setPermissionMode: async () => {},
       interrupt: async () => {},
       toggleMcpServer: async () => {},
@@ -132,6 +134,15 @@ it('delivers steering to an active Claude query', async () => {
     initial,
     { type: 'user', message: { role: 'user', content: 'Check the edge case' }, parent_tool_use_id: null },
   ]);
+});
+
+it.each([['fast', true], ['standard', false]])('applies Claude %s speed alongside reasoning effort before sending a prompt', async (speed, fastMode) => {
+  const held = session();
+  sdk.control = async () => { expect(sdk.runs[0]!.prompts).toEqual([]); };
+  held.begin('first', 'Start working', { id: 'opus', config: { thinkingLevel: 'high', speed } });
+  await settle();
+  expect(sdk.runs[0]!.flagSettings).toEqual([{ effortLevel: 'high', fastMode }]);
+  expect(sdk.runs[0]!.prompts).toHaveLength(1);
 });
 
 it('captures only observed SDK init tool names when the per-session opt-in is enabled', async () => {

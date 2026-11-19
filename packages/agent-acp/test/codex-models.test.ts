@@ -35,6 +35,21 @@ it('discovers the bundled Codex catalog before session/new without creating a th
     .toEqual(['initialize', 'initialized', 'account/read', 'model/list', 'model/list']);
 });
 
+it('advertises Codex settings per model', async () => {
+  const { agent } = fixture('settings');
+  expect((await agent.probe?.())?.models).toMatchObject([
+    { id: 'fast', configSchema: { properties: {
+      thinkingLevel: { enum: ['low', 'high'], default: 'low' },
+      speed: { enum: ['standard', 'fast'], default: 'standard' },
+    } } },
+    { id: 'thorough', configSchema: { properties: {
+      thinkingLevel: { enum: ['max'] },
+    } } },
+    { id: 'cold', name: 'Cold' },
+  ]);
+  expect((await agent.probe?.())?.models[1]?.configSchema?.properties).not.toHaveProperty('speed');
+});
+
 it.each(['signed-out', 'error', 'malformed', 'loop', 'exit', 'hang'])('bounds %s and retries without caching failure', async (mode) => {
   const { agent, env } = fixture(mode);
   await expect(agent.probe?.()).rejects.toThrow();
@@ -119,8 +134,8 @@ it('does not launch an unknown provider command or a custom adapter argument', a
   expect(existsSync(log)).toBe(false);
 });
 
-it('replaces the cold catalog with models learned from a session', async () => {
-  const { agent: discovery, path } = fixture('cold-model');
+it('refreshes the model catalog from a session and preserves discovered settings', async () => {
+  const { agent: discovery, path } = fixture('settings');
   const sessionAgent = acpAgent({
     command: process.execPath,
     args: [fileURLToPath(new URL('./fixtures/acp-server.mjs', import.meta.url))],
@@ -132,12 +147,17 @@ it('replaces the cold catalog with models learned from a session', async () => {
   const changes: unknown[] = [];
   const client = host.accept({ send: () => {}, notify: (_method, params) => { changes.push(params); }, request: async () => ({}), answered: () => {}, close: async () => {} });
   const initial = await client.handle({ method: 'initialize', params: { clientId: 'updates', protocolVersions: ['0.9.0'], initialSubscriptions: ['ahp-root://'] } });
-  expect(initial).toMatchObject({ snapshots: [{ state: { agents: [{ models: [{ id: 'cold', name: 'Cold' }] }] } }] });
+  expect(initial).toMatchObject({ snapshots: [{ state: { agents: [{ models: [{ id: 'fast', configSchema: { properties: { speed: { enum: ['standard', 'fast'] } } } }, { id: 'thorough' }, { id: 'cold' }] }] } }] });
   const channel = 'ahp-session:/catalog-update';
   await client.handle({ method: 'createSession', params: { channel, provider: 'codex', workingDirectories: [`file://${path}`] } });
   await client.handle({ method: 'dispatchAction', params: { channel: 'ahp-chat:/catalog-update', action: { type: 'chat/turnStarted', turnId: 't1', message: { text: 'hello' } } } });
   await expect.poll(() => changes.some((change) => {
     const action = (change as { action?: { type: string; agents?: { models: { id: string }[] }[] } }).action;
-    return action?.type === 'root/agentsChanged' && action.agents?.[0]?.models.some((model) => model.id === 'thorough');
+    return action?.type === 'root/agentsChanged' && action.agents?.[0]?.models.length === 2;
   })).toBe(true);
+  const refreshed = await client.handle({ method: 'subscribe', params: { channel: 'ahp-root://' } });
+  expect(refreshed).toMatchObject({ snapshot: { state: { agents: [{ models: [
+    { id: 'fast', configSchema: { properties: { speed: { enum: ['standard', 'fast'] } } } },
+    { id: 'thorough', configSchema: { properties: { thinkingLevel: { enum: ['max'] } } } },
+  ] }] } } });
 });

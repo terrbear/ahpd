@@ -1000,10 +1000,6 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
   /**
    * Point the server at the model the turn asked for, before the prompt.
    *
-   * ACP carries the model as a session config option, so the choice is one
-   * `session/set_config_option` when the server's current value differs. A
-   * failure here fails the turn rather than prompting with the wrong model: an
-   * answer from a model nobody selected is worse than an error saying so.
    */
   const chooseModel = async (
     held: { connection: AcpConnection; sessionId: string },
@@ -1016,11 +1012,32 @@ export function acpSession(options: AcpOptions, start: Start, catalog?: AcpCatal
     if (option === undefined) {
       throw new Error(`${provider}: this ACP server names no model option, so "${chosen.id}" cannot be chosen`);
     }
-    if (option.currentValue === chosen.id) return;
+    await applyModelOption(held, option.id, chosen.id);
+    if (provider !== 'codex') return;
+    if (typeof chosen.config?.thinkingLevel === 'string') {
+      await applyModelOption(held, 'reasoning_effort', chosen.config.thinkingLevel);
+    }
+    if (chosen.config?.speed !== undefined) {
+      if (chosen.config.speed !== 'fast' && chosen.config.speed !== 'standard') {
+        throw new Error(`Unsupported Codex speed: ${String(chosen.config.speed)}`);
+      }
+      await applyModelOption(held, 'fast-mode', chosen.config.speed === 'fast' ? 'on' : 'off');
+    }
+  };
+
+  const applyModelOption = async (
+    held: { connection: AcpConnection; sessionId: string },
+    id: string,
+    value: string,
+  ): Promise<void> => {
+    const option = offers.find((candidate): candidate is SessionConfigOption & { type: 'select' } =>
+      candidate.id === id && candidate.type === 'select');
+    if (option === undefined) {
+      throw new Error(`${provider}: the current model does not offer ${id} value "${value}"`);
+    }
+    if (option.currentValue === value) return;
     const answer = await held.connection.setSessionConfigOption({
-      sessionId: held.sessionId,
-      configId: option.id,
-      value: chosen.id,
+      sessionId: held.sessionId, configId: option.id, value,
     });
     learnOffers(answer.configOptions);
   };

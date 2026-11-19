@@ -38,14 +38,14 @@ const scratch = (): string => {
 };
 
 /** The backend under test, with its own request log. */
-function backend(): { agent: Agent; log: string } {
+function backend(provider = 'acp'): { agent: Agent; log: string } {
   const log = join(scratch(), 'requests.jsonl');
   return {
     agent: acpAgent({
       command: process.execPath,
       args: [FIXTURE],
-      env: { ACP_LOG: log },
-      provider: 'acp',
+      env: { ACP_LOG: log, ...(provider === 'codex' ? { ACP_CODEX_OPTIONS: '1' } : {}) },
+      provider,
     }),
     log,
   };
@@ -174,6 +174,25 @@ it('sets the model a turn chose on the server before prompting', async () => {
   expect(session.models()).toEqual([
     { id: 'fast', name: 'Fast' },
     { id: 'thorough', name: 'Thorough' },
+  ]);
+});
+
+it('applies Codex effort and speed before prompting and can return to standard', async () => {
+  const { agent, log } = backend('codex');
+  const { session, watch } = start(agent, 'options');
+  session.begin('t1', 'hi', { id: 'thorough', config: { thinkingLevel: 'high', speed: 'fast' } });
+  await until(() => watch.endings().length === 1);
+  session.begin('t2', 'hi', { id: 'thorough', config: { thinkingLevel: 'high', speed: 'standard' } });
+  await until(() => watch.endings().length === 2);
+
+  expect(watch.endings()).toEqual(['chat/turnComplete', 'chat/turnComplete']);
+  const applied = requests(log).flatMap(({ method, params }) => {
+    if (method === 'session/set_config_option') return [[params?.configId, params?.value]];
+    return method === 'session/prompt' ? [['prompt']] : [];
+  });
+  expect(applied).toEqual([
+    ['model', 'thorough'], ['reasoning_effort', 'high'], ['fast-mode', 'on'],
+    ['prompt'], ['fast-mode', 'off'], ['prompt'],
   ]);
 });
 
