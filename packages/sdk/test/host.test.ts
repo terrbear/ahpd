@@ -33,6 +33,7 @@ const REPO = fileURLToPath(new URL('../../..', import.meta.url)).replace(/\/$/, 
 
 const sdk = vi.hoisted(() => {
   interface Fake {
+    inputIds: string[];
     frames: Record<string, unknown>[];
     wake: (() => void) | undefined;
     closed: boolean;
@@ -95,12 +96,14 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
     return sdk.transcript;
   },
   query: ({ prompt, options }: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
-    const fake = { frames: [] as Record<string, unknown>[], wake: undefined as undefined | (() => void), closed: false, options };
+    const fake = { inputIds: [] as string[], frames: [] as Record<string, unknown>[], wake: undefined as undefined | (() => void), closed: false, options };
     sdk.queries.push(fake);
     if (options.canUseTool) sdk.canUseTool = options.canUseTool as typeof sdk.canUseTool;
     void (async () => {
       for await (const frame of prompt) {
-        sdk.said.push((frame as { message?: { content?: string } }).message?.content ?? '');
+        const input = frame as { uuid?: string; message?: { content?: string } };
+        sdk.said.push(input.message?.content ?? '');
+        if (input.uuid) fake.inputIds.push(input.uuid);
       }
     })();
     return {
@@ -3486,23 +3489,21 @@ describe('a message typed while a turn is running', () => {
     expect(sdk.said).toEqual(['first', 'now']);
   });
 
-  it('says it and then says it is gone, because it is consumed as it arrives', async () => {
+  it('announces steering removal when Claude consumes the message', async () => {
     const { client, peer: p, chatUri } = await busy();
     client.handle({
       method: 'dispatchAction',
       params: { channel: chatUri, action: { type: 'chat/pendingMessageSet', kind: 'steering', id: 's1', message: { text: 'now' } } },
     });
     await settle();
-    const said = actions(p, chatUri).map((one) => one.action)
-      .filter((one) => String(one.type).startsWith('chat/pendingMessage'));
-    // `steeringMessage` describes a message *waiting* to be injected, and
-    // nothing waits here - so the pair goes out and the field stays empty.
-    expect(said.map((one) => one.type)).toEqual(['chat/pendingMessageSet', 'chat/pendingMessageRemoved']);
-    expect(said.every((one) => one.kind === 'steering')).toBe(true);
-    const state = (await client.handle({ method: 'subscribe', params: { channel: chatUri } }) as {
-      snapshot: { state: { steeringMessage?: unknown } };
-    }).snapshot.state;
-    expect(state.steeringMessage).toBeUndefined();
+    const steeringActions = () => actions(p, chatUri).map((one) => one.action)
+      .filter((one) => one.kind === 'steering' && one.id === 's1')
+      .map((one) => one.type);
+    expect(steeringActions()).toEqual(['chat/pendingMessageSet']);
+    const id = sessionQueries().at(-1)?.inputIds.at(-1);
+    expect(id).toEqual(expect.any(String));
+    await emit({ type: 'system', subtype: 'status', status: 'requesting', user_message_uuids: [id] });
+    expect(steeringActions()).toEqual(['chat/pendingMessageSet', 'chat/pendingMessageRemoved']);
   });
 
   it('refuses one sent at a chat with nothing running to steer', async () => {
@@ -6250,8 +6251,8 @@ describe('what a chat says about itself', () => {
     expect(state.interactivity).toBe('full');
   });
 
-  it('takes a steering message out of the state where the CLI reads it, not before', async () => {
-    const { client, peer: p, chatUri } = await running();
+  it('records steering consumption in the chat snapshot', async () => {
+    const { client, chatUri } = await running();
     client.handle({
       method: 'dispatchAction',
       params: { channel: chatUri, action: { type: 'chat/turnStarted', turnId: 't1', message: { text: 'go' } } },
@@ -6265,22 +6266,17 @@ describe('what a chat says about itself', () => {
       },
     });
     await settle();
-    /*
-     * `steeringMessage` describes a message *waiting* to be injected, so it is
-     * cleared where the prompt generator hands it over rather than in the same
-     * tick it arrived. Against this fake the CLI is always reading, so the
-     * window is instant; against a real one mid-tool-call it is seconds. What
-     * is observable either way is that the message reached the CLI and that
-     * its removal was announced after it did.
-     */
     expect(sdk.said).toContain('actually, stop');
-    const said = p.notes
-      .map((one) => one.params as { channel?: string; action?: { type?: string } })
-      .filter((one) => one.channel === chatUri)
-      .map((one) => String(one.action?.type ?? ''));
-    expect(said.indexOf('chat/pendingMessageSet')).toBeGreaterThanOrEqual(0);
-    expect(said.lastIndexOf('chat/pendingMessageRemoved'))
-      .toBeGreaterThan(said.indexOf('chat/pendingMessageSet'));
+    const snapshot = () => client.handle({ method: 'subscribe', params: { channel: chatUri } });
+    expect(await snapshot()).toMatchObject({ snapshot: { state: { steeringMessage: { id: 's1' } } } });
+    const id = sessionQueries().at(-1)?.inputIds.at(-1);
+    expect(id).toEqual(expect.any(String));
+    await emit({ type: 'system', subtype: 'status', status: 'requesting', user_message_uuids: [id] });
+    const consumed = await snapshot();
+    expect(consumed).not.toHaveProperty('snapshot.state.steeringMessage');
+    expect(consumed).toMatchObject({ snapshot: { state: { _meta: {
+      'ahpd.humanSteering': { receipts: [{ id: 's1', turnId: 't1', status: 'injected' }] },
+    } } } });
   });
 
 });
