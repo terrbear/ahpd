@@ -1345,7 +1345,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * `stopped` is why the round stopped, from `message_delta`: `end_turn` is
    * the only reason that means the model chose to finish.
    */
-  const rounds = new Map<string, { answered: boolean; stopped?: string }>();
+  const rounds = new Map<string, { answered: boolean; stopped?: string; request?: Bag }>();
 
   /**
    * One conversation inside the SDK stream, with its own parts and its turn.
@@ -1738,9 +1738,12 @@ export function createSession(options: ClaudeSessionOptions): Session {
    * Keyed by the SDK's own field names, which `usageOf` reads.
    */
   const spent: Record<string, number> = {};
-  /** A new turn counts nothing yet. */
+  const modelRequests: Bag[] = [];
+  let modelRequestCount = 0;
   const newTurn = (): void => {
     for (const key of Object.keys(spent)) delete spent[key];
+    modelRequests.length = 0;
+    modelRequestCount = 0;
   };
 
   /** One API call's half, added to the turn's sum; anything absent is left out. */
@@ -1932,8 +1935,15 @@ export function createSession(options: ClaudeSessionOptions): Session {
     if (type === 'message_start') {
       scope.streaming = str(bag(event.message).id) ?? 'm';
       // A new round: whatever the last one said, this one has said nothing.
-      rounds.set(parent, { answered: false });
       openTurn(scope);
+      const message = bag(event.message);
+      const usage = bag(message.usage);
+      rounds.set(parent, { answered: false, request: {
+        model: str(message.model),
+        inputTokens: usage.input_tokens,
+        cachedInputTokens: usage.cache_read_input_tokens,
+        cacheWriteInputTokens: usage.cache_creation_input_tokens,
+      } });
       // This call's input side, the half only this event reports.
       count(bag(event.message).usage, INPUT_SIDE);
       return;
@@ -1956,6 +1966,16 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // counted into the turn: a subagent's rounds end their own way, and the
       // lead's last delta arrives long before its `result`.
       count(event.usage, OUTPUT_SIDE);
+      const request = round?.request;
+      const outputTokens = bag(event.usage).output_tokens;
+      if (round !== undefined && request !== undefined && [request.inputTokens, request.cachedInputTokens, request.cacheWriteInputTokens, outputTokens]
+        .every((value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)) {
+        delete round.request;
+        modelRequestCount++;
+        if (modelRequests.length < 1024) {
+          modelRequests.push({ ...request, outputTokens, recordedAt: new Date().toISOString() });
+        }
+      }
       sayUsage();
       return;
     }
@@ -3693,11 +3713,14 @@ export function createSession(options: ClaudeSessionOptions): Session {
             // and the result's own main-loop count is then the best there is.
             const used = sum() ?? usageOf(message.usage, ran);
             const cost = costOf(message);
-            if (used !== undefined || cost !== undefined) {
+            if (used !== undefined || cost !== undefined || modelRequestCount > 0) {
               // The cost rides the tokens' own `_meta`, the same place cache
               // writes go, rather than beside them as a field of its own.
               const total: Bag = used ?? {};
               if (cost !== undefined) total._meta = { ...bag(total._meta), cost };
+              if (modelRequestCount > 0) {
+                total._meta = { ...bag(total._meta), modelRequests: { count: modelRequestCount, requests: modelRequests.slice() } };
+              }
               turn.usage = total;
               emit('chat', { type: 'chat/usage', turnId: turn.id, usage: total });
             }

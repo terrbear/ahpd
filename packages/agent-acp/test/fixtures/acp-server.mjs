@@ -190,8 +190,20 @@ const charge = (amount) => {
  * Marked unstable in the protocol and optional in practice, so a test has to be
  * able to have a response without them as well as one with.
  */
+const requestEvidence = {
+  count: 1,
+  requests: [{
+    inputTokens: 30,
+    cachedInputTokens: 200,
+    cacheWriteInputTokens: 5,
+    outputTokens: 20,
+    reasoningOutputTokens: 4,
+    recordedAt: '2026-11-19T12:00:00.000Z',
+  }],
+};
 const countedFor = (text) => (text.includes('tokens')
   ? {
+      ...(text.includes('request details') ? { _meta: { codexModelRequests: requestEvidence } } : {}),
       usage: {
         totalTokens: 1530,
         inputTokens: 1000,

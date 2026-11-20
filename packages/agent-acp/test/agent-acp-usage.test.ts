@@ -37,7 +37,8 @@ afterEach(async () => {
 /** A session over the fixture server, with every action it emits kept. */
 function talking(...flags: string[]): { session: Session; actions: Bag[] } {
   const actions: Bag[] = [];
-  const agent = acpAgent({ command: process.execPath, args: [FIXTURE, ...flags], provider: 'acp-usage' });
+  const provider = flags.includes('--codex') ? 'codex' : 'acp-usage';
+  const agent = acpAgent({ command: process.execPath, args: [FIXTURE, ...flags], provider });
   const opening: Start = {
     uri: 'ahp-session:/usage',
     chatUri: 'ahp-chat:/usage',
@@ -157,4 +158,23 @@ it('sends no usage for a turn whose server reported none', async () => {
   await turn(session, actions, 't1', 'say nothing about it');
 
   expect(reports(actions)).toEqual([]);
+});
+
+
+it('keeps Codex model request details on the completed turn', async () => {
+  const { session, actions } = talking('--codex');
+  await turn(session, actions, 't1', 'tokens with request details');
+  const expected = {
+    count: 1,
+    requests: [{
+      inputTokens: 30,
+      cachedInputTokens: 200,
+      cacheWriteInputTokens: 5,
+      outputTokens: 20,
+      reasoningOutputTokens: 4,
+      recordedAt: '2026-11-19T12:00:00.000Z',
+    }],
+  };
+  expect(bag(reports(actions).at(-1)?._meta).modelRequests).toEqual(expected);
+  expect(bag(held(session)._meta).modelRequests).toEqual(expected);
 });
