@@ -132,8 +132,32 @@ it('delivers steering to an active Claude query', async () => {
   await settle();
   expect(sdk.runs[0]!.prompts).toEqual([
     initial,
-    { type: 'user', message: { role: 'user', content: 'Check the edge case' }, parent_tool_use_id: null },
+    { type: 'user', uuid: expect.any(String), priority: 'next', message: { role: 'user', content: 'Check the edge case' }, parent_tool_use_id: null },
   ]);
+  const state = () => held.chatState();
+  const uuid = (sdk.runs[0]!.prompts[1] as { uuid: string }).uuid;
+  const reply = (parent: string | null, ids: string[]) => sdk.runs[0]!.send({ type: 'assistant', parent_tool_use_id: parent, session_id: sdk.nativeId, user_message_uuids: ids, message: { role: 'assistant', content: [] } });
+  const receipt = { id: 'steer-1', turnId: 'first', status: 'pending' };
+  expect(state()).toMatchObject({ steeringMessage: { id: 'steer-1' }, _meta: { 'ahpd.humanSteering': { receipts: [receipt] } } });
+  expect(held.steer?.('steer-1', 'Check the edge case')).toBe(true);
+  expect(held.steer?.('steer-1', 'Changed text')).toBe(false);
+  reply('worker', [uuid]);
+  reply(null, ['unrelated']);
+  await settle();
+  expect(state()).toHaveProperty('steeringMessage.id', 'steer-1');
+  sdk.runs[0]!.send({ type: 'system', subtype: 'status', status: 'requesting', session_id: sdk.nativeId, user_message_uuids: ['initial', uuid] });
+  await settle();
+  expect(state()).not.toHaveProperty('steeringMessage');
+  expect(state()).toMatchObject({ _meta: { 'ahpd.humanSteering': { receipts: [{ ...receipt, status: 'injected' }] } } });
+  expect(held.steer?.('steer-1', 'Check the edge case')).toBe(true);
+  expect(held.steer?.('steer-2', 'One more correction')).toBe(true);
+  await settle();
+  expect(sdk.runs[0]!.prompts).toHaveLength(3);
+  const second = (sdk.runs[0]!.prompts[2] as { uuid: string }).uuid;
+  expect(second).not.toBe(uuid);
+  sdk.runs[0]!.send({ type: 'assistant', parent_tool_use_id: null, session_id: sdk.nativeId, user_message_uuid: second, message: { role: 'assistant', content: [] } });
+  await settle();
+  expect(state()).toMatchObject({ _meta: { 'ahpd.humanSteering': { receipts: [{ id: 'steer-1', status: 'injected' }, { id: 'steer-2', status: 'injected' }] } } });
 });
 
 it.each([['fast', true], ['standard', false]])('applies Claude %s speed alongside reasoning effort before sending a prompt', async (speed, fastMode) => {

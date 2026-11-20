@@ -1567,7 +1567,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
 
   // The input stream. A query with a live stream stays open between turns,
   // which is what makes a session a session rather than a series of them.
-  const waiting: { type: 'user'; message: { role: 'user'; content: SDKUserMessage['message']['content'] }; parent_tool_use_id: null }[] = [];
+  const waiting: SDKUserMessage[] = [];
   let wake: (() => void) | undefined;
   let closed = false;
 
@@ -1621,17 +1621,21 @@ export function createSession(options: ClaudeSessionOptions): Session {
   };
 
 
-  /**
-   * A steering message, for as long as it is waiting to be read.
-   *
-   * The protocol's `ChatState.steeringMessage` is "a message to inject into
-   * the current turn at a convenient point", and the convenient point is when
-   * the CLI next reads its prompt. Between the two there is a real window - a
-   * turn mid-tool-call has not read anything for some time - and this is what
-   * fills it. Cleared where the generator hands the message over, because that
-   * is the moment it stops waiting.
-   */
-  let steering: Bag | undefined;
+  type SteeringReceipt = { id: string; turnId: string; message: { text: string; origin: { kind: 'user' } }; createdAt: string; status: 'pending' | 'injected' };
+  const steeringReceipts: SteeringReceipt[] = [];
+  let steering: { uuid: string; receipt: SteeringReceipt } | undefined;
+
+  const observeSteering = (frame: Bag): void => {
+    if (!steering || frame.parent_tool_use_id != null) return;
+    const requesting = frame.type === 'system' && frame.subtype === 'status' && frame.status === 'requesting';
+    if (!requesting && frame.type !== 'assistant' && frame.type !== 'stream_event' && !(frame.type === 'result' && frame.subtype === 'success')) return;
+    if (frame.user_message_uuid !== steering.uuid && !(Array.isArray(frame.user_message_uuids) && frame.user_message_uuids.includes(steering.uuid))) return;
+    const { receipt } = steering;
+    receipt.status = 'injected';
+    steering = undefined;
+    emit('chat', { type: 'chat/pendingMessageRemoved', kind: 'steering', id: receipt.id });
+    touch();
+  };
 
   async function* input(signal: AbortSignal): AsyncGenerator<(typeof waiting)[number]> {
     const abort = () => { wake?.(); };
@@ -1646,12 +1650,6 @@ export function createSession(options: ClaudeSessionOptions): Session {
             timing('sdk_user_input', 'yield');
           }
           yield next;
-          if (steering !== undefined) {
-            const said = steering;
-            steering = undefined;
-            emit('chat', { type: 'chat/pendingMessageRemoved', kind: 'steering', id: String(said.id ?? '') });
-            touch();
-          }
         }
         if (closed || signal.aborted) return;
         await new Promise<void>((resolve) => { wake = resolve; });
@@ -3482,6 +3480,7 @@ export function createSession(options: ClaudeSessionOptions): Session {
     try {
       for await (const raw of handle) {
         const message = bag(raw as unknown);
+        observeSteering(message);
         const type = str(message.type);
         // Every message carries it, so this needs no particular one to arrive.
         const said = str(message.session_id);
@@ -3995,7 +3994,8 @@ export function createSession(options: ClaudeSessionOptions): Session {
       // when the field is absent, and assuming it is not the same as being
       // told. Every chat here is one somebody can type into.
       interactivity: 'full',
-      ...(steering !== undefined ? { steeringMessage: steering } : {}),
+      ...(steering !== undefined ? { steeringMessage: { id: steering.receipt.id, message: steering.receipt.message } } : {}),
+      _meta: { 'ahpd.humanSteering': { version: 1, receipts: structuredClone(steeringReceipts) } },
       queuedMessages: queued.map((held) => ({ id: held.id, message: held.message })),
     }),
 
@@ -4256,32 +4256,20 @@ export function createSession(options: ClaudeSessionOptions): Session {
       runCommand(turnId, command, run, queuedAs);
     },
 
-    /**
-     * Into the turn that is already running, rather than after it.
-     *
-     * The whole of it is `waiting.push` and a wake, which is the same door
-     * `begin` and the queue go through: the prompt handed to the CLI is a
-     * generator that stays open for the life of the session, so a message
-     * pushed while a turn runs is delivered to that turn. This was refused on
-     * the grounds that "the SDK has nowhere to put one", which was a claim
-     * about the harness nobody had tested and is not true of this one.
-     *
-     * Set and removed in the same breath, because it is consumed the instant
-     * it arrives: `steeringMessage` describes a message *waiting* to be
-     * injected, and nothing waits here. The protocol says the server emits
-     * the removal when it consumes one, so both go out and the state field
-     * stays empty - which is the honest description of what happened.
-     */
     steer: (id, text) => {
-      if (!active) return false;
-      const message = { text, origin: { kind: 'user' } };
-      // Held in the state as well as announced, and taken out again where the
-      // CLI reads it rather than here: a client that only read the state saw
-      // nothing waiting, because the announcement and its removal used to
-      // happen in one tick.
-      steering = { id, message };
+      const prior = steeringReceipts.find((receipt) => receipt.id === id);
+      if (prior) return prior.message.text === text && prior.turnId === active?.id;
+      if (!active || steering || !id || id.length > 256 || !text.trim() || Buffer.byteLength(text) > 128 * 1024) return false;
+      const message = { text, origin: { kind: 'user' as const } };
+      const receipt: SteeringReceipt = { id, turnId: String(active.id), message, createdAt: new Date().toISOString(), status: 'pending' };
+      while (steeringReceipts.length >= 256 || Buffer.byteLength(JSON.stringify(steeringReceipts)) + Buffer.byteLength(JSON.stringify(receipt)) > 512 * 1024) {
+        if (!steeringReceipts.shift()) return false;
+      }
+      steeringReceipts.push(receipt);
+      const uuid = crypto.randomUUID();
+      steering = { uuid, receipt };
       emit('chat', { type: 'chat/pendingMessageSet', kind: 'steering', id, message });
-      waiting.push({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null });
+      waiting.push({ type: 'user', uuid, priority: 'next', message: { role: 'user', content: text }, parent_tool_use_id: null });
       wake?.();
       wake = undefined;
       touch();
