@@ -387,6 +387,7 @@ export interface Agent {
    */
   protectedResources?: Bag[];
   accountIdentity?: (directory?: string) => Promise<{ status: 'verified'; name: string } | { status: 'unavailable' }>;
+  subscriptionUsage?: () => Promise<unknown>;
 
   /**
    * What a session of this kind can be told to do differently.

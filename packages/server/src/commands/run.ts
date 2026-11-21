@@ -50,6 +50,7 @@ import { manifest, version } from '../version.js';
 import { managedLifecycle, managedPlugins } from '../managed.js';
 import { conflict, optionsFrom, secret, flagFields, stop } from './options.js';
 import { accountProvider } from '../account.js';
+import { subscriptionProvider } from '../subscription.js';
 import { cliHistoryProvider } from '../cli-history.js';
 import { FORCED_SIGNAL, RESTART_SIGNAL, answerRestartSignal, checkedRestart, lifecycle } from './restart.js';
 import type { Options } from './options.js';
@@ -534,7 +535,7 @@ export async function runForeground(options: Options): Promise<void> {
     process.exit(1);
   }
 
-  folded.resourceProviders = { ...folded.resourceProviders, 'ahpd-account': accountProvider(folded.agents), 'ahpd-cli-history': cliHistoryProvider(folded.agents) };
+  folded.resourceProviders = { ...folded.resourceProviders, 'ahpd-account': accountProvider(folded.agents), 'ahpd-subscription': subscriptionProvider(folded.agents), 'ahpd-cli-history': cliHistoryProvider(folded.agents) };
   if (managedProviders.some((provider) => !folded.agents.some((agent) => agent.provider === provider))) stop('A managed update is missing an installed provider.');
   const admission = memoryAdmission(options.admission, { log: stamp });
   folded.admitSession = admission.reserve;

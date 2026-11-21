@@ -120,6 +120,8 @@ ahpc --host ws://127.0.0.1:9187
 
 An admitted AHP client can read `ahpd-account://<provider>` on `ahp-root://` with `resourceRead`. The UTF-8 JSON response is either `{"status":"verified","name":"user@example.com"}` or `{"status":"unavailable"}`. The resource is read only and returns no tokens, raw authentication responses, or probe errors.
 
+The daemon owner can read `ahpd-subscription://codex` on `ahp-root://`. A compatible Codex ACP adapter returns the verified ChatGPT account, observation time, and active windows from its configured app-server. Older adapters and unavailable or unverified accounts return `{"status":"unavailable"}`. The daemon accepts no caller-supplied directory or credentials for this read, and the resource has no write operation. Claude currently has no daemon subscription read.
+
 Append `?cwd=<URL-encoded absolute path>` to probe a new session's selected working directory. Codex requires that path and must use the configured `codex-acp` command; ahpd accepts only its ChatGPT account-status notification. API key status, missing status, and configured credential environment overrides return `unavailable`. Claude Code probes `claude auth status --json` as the daemon user from the selected directory, and returns `unavailable` for key, gateway, cloud mode, or preset overrides. A session using a machine or client-supplied credential can have a different account from the daemon default; clients selecting those overrides must show this identity as unavailable for that session.
 
 ## Embedding

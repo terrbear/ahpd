@@ -112,6 +112,40 @@ export function acpAgent(options: AcpOptions): Agent {
       }
     },
 
+    ...(provider === 'codex' && options.command.split('/').at(-1) === 'codex-acp' ? {
+      subscriptionUsage: async (): Promise<unknown> => {
+        const unavailable = { status: 'unavailable' };
+        const env = { ...process.env, ...options.env };
+        if (env.OPENAI_API_KEY || env.OPENAI_BASE_URL) return unavailable;
+        const connection = connectAcp({
+          command: options.command,
+          ...(options.args === undefined ? {} : { args: options.args }),
+          ...(options.env === undefined ? {} : { env: options.env }),
+          cwd: options.cwd ?? process.cwd(),
+          subscriptionUsage: true,
+          handlers: { update: () => {} },
+        });
+        const read = async () => {
+          const handshake = await connection.initialize();
+          const capability = handshake.agentCapabilities?._meta?.subscriptionUsage;
+          return typeof capability === 'object' && capability !== null &&
+            'version' in capability && capability.version === 1 ? connection.readSubscriptionUsage() : unavailable;
+        };
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([read(), new Promise((resolve) => {
+            timer = setTimeout(() => resolve(unavailable), 5_000);
+            timer.unref();
+          })]);
+        } catch {
+          return unavailable;
+        } finally {
+          clearTimeout(timer);
+          await connection.close();
+        }
+      },
+    } : {}),
+
     probe: () => codexModels(options),
 
     /*

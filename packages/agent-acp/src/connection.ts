@@ -121,7 +121,10 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
    * written twice.
    */
   const clientCapabilities: ClientCapabilities = {
-    ...(options.customInstructions ? { _meta: { 'ahpd.clientSystemInstructions': { version: 1 } } } : {}),
+    ...(options.customInstructions || options.subscriptionUsage ? { _meta: {
+      ...(options.customInstructions ? { 'ahpd.clientSystemInstructions': { version: 1 } } : {}),
+      ...(options.subscriptionUsage ? { 'ahpd.subscriptionUsage': 1 } : {}),
+    } } : {}),
     ...(readTextFile !== undefined || writeTextFile !== undefined
       ? {
           fs: {
@@ -195,6 +198,7 @@ export function connectAcp(options: AcpConnectionOptions): AcpConnection {
         return reply;
       });
     },
+    readSubscriptionUsage: (): Promise<unknown> => heard(() => connection.agent.request('_account/subscription_usage', {})),
     readHistory: (id: string): Promise<Record<string, unknown>> => heard(() => connection.agent.request('_session/read_history', { sessionId: id })),
     newSession: (request: NewSessionRequest): Promise<NewSessionResponse> => heard(() => connection.agent.request('session/new', request)),
     loadSession: (request: LoadSessionRequest): Promise<LoadSessionResponse> => heard(() => connection.agent.request('session/load', request)),
