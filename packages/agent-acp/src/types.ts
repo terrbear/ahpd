@@ -140,6 +140,7 @@ export interface AcpConnectionOptions {
   cwd?: string;
   handlers: AcpHandlers;
   authStatus?: (status: unknown) => void;
+  subscriptionUsage?: boolean;
 }
 
 /** One open ACP connection over a server's stdio. */
@@ -151,6 +152,7 @@ export interface AcpConnection {
    * told what a client can do at the start of a connection and never again.
    */
   initialize(): Promise<InitializeResponse>;
+  readSubscriptionUsage(): Promise<unknown>;
   readHistory(id: string): Promise<Record<string, unknown>>;
   /** Open one session on the server, which names it. */
   newSession(request: NewSessionRequest): Promise<NewSessionResponse>;

@@ -24,6 +24,7 @@ const bag = (value: unknown): Bag => typeof value === 'object' && value !== null
 export function workProfileRequest(method: string, params: Bag): string | undefined {
   if (method === 'dispatchAction') return workProfileAction(bag(params.action));
   if (method === 'resourceRead' && /^ahpd-account:\/\/(claude|codex)(\?cwd=[^#]*)?$/.test(String(params.uri ?? ''))) return undefined;
+  if (method === 'resourceRead' && (params.uri === 'ahpd-subscription://codex' || params.uri === 'ahpd-subscription://claude')) return undefined;
   if (!methods.has(method)) return `${method} is unavailable in local-executor-v1`;
   if (method === 'createSession') {
     const config = bag(params.config);
